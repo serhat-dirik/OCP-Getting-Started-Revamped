@@ -3,7 +3,7 @@
 include::partial$version-attributes.adoc[]
 
 // Lab page for Registry, Images & Catalog Governance. Workshop exercises are guarded ifndef::demo[]; the DEMO rendering shows only the
-// presenter arc. Every command runs in the Showroom terminal as {user}, so blocks are
+// SA demo page. Every command runs in the Showroom terminal as {user}, so blocks are
 // [source,sh,role=execute]. The FIRST block sets NS={user}-dev (subs=attributes); every later COMMAND
 // block uses $NS with NO subs so jsonpath braces stay literal. Expected-OUTPUT blocks are the opposite
 // case: where a capture printed the sample user's namespace they carry {user}-dev + subs="attributes",
@@ -47,29 +47,75 @@ The expected-output blocks name *your* namespace, `{user}-dev`. The `sha256` dig
 endif::demo[]
 
 // ============================================================================
-// DEMO FLAVOR — 10-minute presenter arc: governance narrative
+// DEMO FLAVOR — the 10-minute SA demo: promote by digest -> set the import floor -> scheduled
+// re-import -> a namespaced catalog entry. The title's minutes are the sum of the four step
+// headings below (3+3+2+2); keep them in step. Every command here is the captured form from the
+// workshop exercises below — change the wording around them, never the commands.
 // ============================================================================
 ifdef::demo[]
-== Demo arc — The platform team decides what runs and what's offered (10 min)
+== The platform team decides what runs and what is offered · 10 min
 
-[NOTE]
-.Before you present
+Parasol's tested image is promoted to production by immutable digest, an unapproved registry is refused at admission, a base image is set to re-pull itself, and one team gets a catalog entry nobody else sees.
+
+[IMPORTANT]
+.Prep — run before the session
 ====
-Run `ws prep registry-images-catalog-governance --user {user} --yes` a few minutes ahead, and set `NS={user}-dev` in your terminal.
-This demo runs from the *entry* state (only the seeded `parasol-claims:1.0` stream), *not* from `adm solve`.
-The money moment is beat 2 — a `docker.io` import *refused* live by the allowed-registries policy, then *allowed* the instant you revert it.
-Keep the terminal font large; the digests and the policy denial are the whole visual.
-The allowed-registries beat is a *cluster-wide* change — only run it on your *own* demo cluster, never a shared workshop cluster mid-session.
+Stage the module from the cockpit terminal:
+
+[source,sh,role=execute]
+----
+ws prep registry-images-catalog-governance
+----
+
+This demo runs from the *entry* state — only the seeded `parasol-claims:1.0` ImageStream in `{user}-dev` and the sample pull secret, nothing promoted and nothing imported — so there is no finished state to stage. The same command returns the world to that state between runs.
+
+If step 2 has been run, confirm the cluster-wide import policy is empty again before the next session:
+
+[source,sh,role=execute]
+----
+oc get image.config.openshift.io/cluster -o jsonpath='allowed-now={.spec.allowedRegistriesForImport}{"\n"}'
+----
+
+Keep the terminal font large enough for a `sha256` digest to be readable: the two digests in step 1 and the refusal in step 2 are the evidence this demo rests on.
+
+NOTE: The wording of the refusal in step 2 is deliberately not quoted anywhere on this page, because no capture from the cluster you are on can exist — the patch mutates a singleton and is only ever run on a disposable cluster. What is certain: the import is refused *at admission*, instantly, with no node reboot and no exemption, cluster-admin included; and `oc` answers with a multi-line *validation* error (`Invalid`, HTTP `422`), not a tidy one-liner and not a `403`. The word *Forbidden* is on that screen more than once — as the per-field cause reason, not as the HTTP status. Call the import refused or rejected, point at the cause line naming the registry, and move on.
+
+CAUTION: Step 2 patches `image.config.openshift.io/cluster`, a cluster-wide singleton. While the field is set it blocks imports for *every* concurrent user, and the patch itself rolls the `openshift-apiserver` for every tenant. Run this demo on your own demo cluster, never on a shared workshop cluster mid-session. Step 2 lifts the field again as part of the demo; the check above confirms it.
 ====
 
-=== Beat 1 — Promote by digest, not by tag
+=== Brief
 
-[demo-block]
-[TIME 3m]
-Say:: "Parasol tested build `1.0`. Now they want it in production. Watch me promote it — not by rebuilding, not by re-pushing a tag someone could swap, but by pinning production to the *exact bits* we tested. `prod` and `1.0` will be the same `sha256`."
-Show:: The seeded `parasol-claims:1.0` stream; the promote; then `prod` and `1.0` resolving to an identical digest.
-Do:: Promote by immutable digest:
-+
+image::registry-images-catalog-governance/registry-images-catalog-governance-01-two-supply-chains.svg["Two supply chains meeting at one developer. Along the top, external registries — registry.redhat.io, quay.io, docker.io — pass through the platform's governance controls (allowed registries for import, registry sources, IDMS/ITMS mirrors) into the cluster's internal registry on port 5000 with its volume and nightly pruner, then into an ImageStream that records an immutable digest, can re-import on a schedule, and can serve the bits locally, and finally into the running workload. Along the bottom, the catalog supply — OperatorHub sources, the samples operator, ConsoleSample, namespaced Templates and devfiles — feeds the Software Catalog the same developer picks from."]
+
+*Two supply chains on one page*
+
+Every image question a platform team gets is one of two supply chains that meet at the developer. The *image supply* decides which bits run. The *catalog supply* decides what a developer can pick from in the first place.
+
+A container tag is a moving target: whoever pushes `parasol-claims:prod` next changes what that name means. An *ImageStream* is OpenShift's answer — a stable in-cluster name that records the immutable `sha256` digest behind each tag, can re-import an external image on a schedule, and can serve the bits from the internal registry as a pull-through cache.
+
+*The trust boundary: where images may come from*
+
+Signing answers "is this image trusted?" — a different axis, covered in the supply-chain module. This one answers "may images come from that registry at all?", and it is set cluster-wide. `allowedRegistriesForImport` answers it at admission: instant, no node change, and no exemption for anyone. `registrySources` and IDMS/ITMS mirroring answer it at the container runtime on every node — how a disconnected cluster runs, and why those two re-render and roll the whole node pool. Most failures of this kind are policy never set, not policy defeated.
+
+The catalog is curated with the same kind of lever: OperatorHub sources, the samples operator and `ConsoleSample` are cluster-wide, while a `Template` in a project is the one entry a team can publish for itself.
+
+*In this demo*
+
+. The tested claims image promoted to production by immutable digest, with `prod` and `1.0` proven to be the same bits
+. An unapproved `docker.io` import refused by an allowed-registries policy, then allowed again the moment it is lifted
+. A base image marked for scheduled re-import, so it stays current with nobody watching it
+. A catalog entry published into one project, and offered in that project alone
+
+=== 1 · Promote by digest, not by tag — 3 min
+
+Parasol tested build `1.0` and wants it in production. Promote it without a rebuild and without re-pushing a tag anyone could swap: pin production to the exact bits that were tested, then prove that is what happened.
+
+image::registry-images-catalog-governance/registry-images-catalog-governance-02-imagestream-two-tags.png["The parasol-claims ImageStream detail page after the promote: Image count has gone from 1 to 2, and the Tags table now carries two rows — parasol-claims:1.0 and parasol-claims:prod. Read across to the Identifier column: both resolve to the same sha256:ca759845... digest. The promote created a second NAME for one image, not a second copy of it."]
+
+*Why it matters*
+
+"Is the image in production the one we tested?" is either provable or a matter of trust. A digest is content-addressed — it can never point at different bits — so promotion becomes a pointer move that can be audited, rather than a rebuild that has to be believed.
+
 [source,sh,role=execute,subs="attributes"]
 ----
 NS={user}-dev
@@ -77,17 +123,21 @@ oc get istag parasol-claims:1.0 -n $NS -o jsonpath='1.0 -> {.image.metadata.name
 oc tag $NS/parasol-claims:1.0 $NS/parasol-claims:prod
 oc get is parasol-claims -n $NS -o jsonpath='{range .status.tags[*]}{.tag}{" -> "}{.items[0].dockerImageReference}{"\n"}\{end}'
 ----
-+
-"Same `sha256` on both lines — production runs the image we tested, and I can *prove* it. That's an ImageStream promotion: a pointer to immutable content."
 
-=== Beat 2 — Set the floor: an unapproved import refused
+*What just happened*
 
-[demo-block]
-[TIME 3m]
-Say:: "Where can images even come from? Right now, anywhere. A developer could pull a random image off the public internet straight into this cluster. Watch me set the floor — allow only registries we trust — and watch an unapproved import get refused."
-Show:: An empty allowed-registries surface; the policy applied; a `docker.io` import *refused*; the policy reverted and the same import *allowed*.
-Do:: Set and lift the import floor (cluster-wide — your own demo cluster only):
-+
+Both tags print the same `sha256`. `prod` is a second *name* for one image, not a second copy of it — an ImageStream promotion is a pointer to immutable content.
+
+=== 2 · Set the floor: where images may come from — 3 min
+
+As it stands, this cluster will import an image from anywhere on the public internet. Set the floor to the registries Parasol trusts, watch an unapproved `docker.io` import be turned away, then lift it and watch the same import succeed.
+
+image::registry-images-catalog-governance/registry-images-catalog-governance-04-cluster-image-config.png["The cluster-scoped Image configuration object — config.openshift.io/v1, kind Image, name cluster — on its YAML tab, shown whole. Line 46 is a bare spec with an empty pair of braces: nothing is set, so neither allowedRegistriesForImport nor registrySources exists and no import restriction is in force. Below it, status reports imageStreamImportMode Legacy and internalRegistryHostname image-registry.openshift-image-registry.svc:5000."]
+
+*Why it matters*
+
+Nothing in the default configuration stops `oc import-image docker.io/anything`. One field on this object is the difference between "anywhere" and "only what we trust", and it takes effect at admission — instantly, with no node change and no exemption, cluster-admin included.
+
 [source,sh,role=execute]
 ----
 oc get image.config.openshift.io/cluster -o jsonpath='allowed-now={.spec.allowedRegistriesForImport}{"\n"}'
@@ -95,73 +145,52 @@ oc patch image.config.openshift.io/cluster --type=merge \
   -p '{"spec":{"allowedRegistriesForImport":[{"domainName":"registry.redhat.io"},{"domainName":"registry.access.redhat.com"}]}}'
 oc import-image demo-blocked -n $NS --from=docker.io/library/nginx:latest --confirm
 ----
-// NOTE TO AUTHORS: these comment lines sit BEFORE the `+`, not after it. A `//` comment between a
-// list continuation and a block ATTRIBUTE line (`[NOTE]`) silently detaches the rest of the item —
-// the dlist closes early and every later `+` renders as a literal plus sign. Antora still exits 0
-// with zero warnings, so only the rendered HTML catches it. Measured 2026-08-08 with @asciidoctor/core;
-// comments before a plain paragraph are harmless, which is why the older shape here got away with it.
-// [UNVERIFIABLE-PERMANENT] the denial string as it prints on the cluster this arc is presented from.
-// This block patches image.config.openshift.io/cluster, a cluster-wide singleton whose mutation
-// triggers a live openshift-apiserver rollout for every tenant, so the shared workshop cluster can
-// never host the capture — a structural property of the object, not a stale gap. The string HAS been
-// captured once, on a disposable OpenShift Local 4.22.1 cluster as kubeadmin (2026-07-31). The
-// literal text NOW RENDERS on instructor.adoc, under its "Block a registry for import" block, so an
-// instructor can read it; only the reproduction command, the 422-vs-403 cross-check and the byte-exact
-// unelided second cause stay in the authoring comment there. It is an Invalid / HTTP 422
-// validation error, NOT a 403 Forbidden, and cluster-admin is not exempt. One cluster on one release
-// is not a promise about the presenter's, so the arc narrates the EFFECT and lets the screen supply
-// the wording. The rendered NOTE below is the presenter-facing half of this comment — keep the two in
-// step, and do not script a literal sentence into the spoken line again. What would close the marker
-// outright: the same block run on the release the presenter is actually on, pasted back.
-+
-[NOTE]
-.Let the screen supply the wording — this arc does not script the refusal
-====
-Narrate the *effect*, not the sentence, and do not promise the room a specific line before it appears.
-The exact text is deliberately unscripted for a structural reason: this beat patches `image.config.openshift.io/cluster`, a cluster-wide singleton whose mutation rolls the `openshift-apiserver` for every tenant, so it is only ever run on a disposable demo cluster and never on the shared workshop cluster — which is precisely why nobody can hand you a verbatim line to read out.
 
-What *is* grounded, and what you can assert: the import is refused *at admission* — instant, no node reboot, no pool roll — and there is no exemption, cluster-admin included.
+The import is refused and no image arrives. `oc` answers with a multi-line validation error rather than a single line; the cause line names the registry that was turned away. Nothing rebooted and no pool rolled — admission simply declined the request.
 
-Expect a *validation* error rather than a tidy one-liner: `oc` prints a multi-line block naming the registry it turned away, an `Invalid` response (HTTP `422`), not a `403`. That wall of red is the correct result — point at the cause line and move on.
+Lifting the field again is the other half of the point:
 
-One trap worth knowing before you look at it: the word *Forbidden* **is** on the screen, more than once — but as the per-field *cause reason*, not as the HTTP status. Say "refused" or "rejected"; if you read *Forbidden* off the screen and call it a 403, the engineer in the room reading the same screen has you. The instructor page carries the captured text if you want to see the shape first.
-====
-+
-"Refused — instantly, and no image came in. No node rebooted, no pool rolled: that is admission turning the import away, and there is no exemption from it, not even for cluster-admin. The reason is right there on screen. Now I lift it —"
-+
 [source,sh,role=execute]
 ----
 oc patch image.config.openshift.io/cluster --type=json -p '[{"op":"remove","path":"/spec/allowedRegistriesForImport"}]'
 oc import-image demo-blocked -n $NS --from=docker.io/library/nginx:latest --confirm >/dev/null && echo "now allowed"
 oc delete is demo-blocked -n $NS >/dev/null
 ----
-+
-"— and it's allowed again. That one field is the difference between 'anything' and 'only what we trust.'"
 
-=== Beat 3 — Base images that re-pull on their own
+*What just happened*
 
-[demo-block]
-[TIME 2m]
-Say:: "Base images drift — a CVE gets patched upstream and the tag moves. I don't want to babysit that. Watch me tell the cluster to *re-check and re-pull* this base image on its own."
-Show:: A scheduled import of UBI; the `scheduled: true` flag that keeps it current.
-Do:: Import an external base image on a schedule:
-+
+The same import that was impossible a moment ago succeeded, and the temporary stream was cleaned up. One field decided whether an image from an unapproved registry could enter the cluster at all — which is why it is the control a platform team sets on day one, and the heavier node-level controls are planned work.
+
+=== 3 · A base image that re-pulls itself — 2 min
+
+Base images drift: upstream patches a CVE and the tag moves. Marking a tag *scheduled* hands that re-check to the platform instead of to a person.
+
+image::registry-images-catalog-governance/registry-images-catalog-governance-01-imagestream-detail.png["The parasol-claims ImageStream detail page in this project: Image count 1, an Image repository of image-registry.openshift-image-registry.svc:5000 followed by the project and stream name, and a Tags table with a single row. That row is the anatomy every imported tag has — the tag name, the mutable reference it was imported From, and the immutable sha256 digest it currently resolves to in the Identifier column."]
+
+*Why it matters*
+
+A tag row holds both halves of the problem: the moving reference an image came from, and the fixed digest it resolves to today. A scheduled tag makes the platform re-resolve that reference on its own, so staying current stops being a standing task — and because each import is recorded as a digest, "when did this base image change?" stays answerable.
+
 [source,sh,role=execute]
 ----
 oc import-image ext-ubi -n $NS --from=registry.access.redhat.com/ubi9/ubi:latest --scheduled --confirm | head -3
 oc get is ext-ubi -n $NS -o jsonpath='{range .spec.tags[*]}{.name}{" scheduled="}{.importPolicy.scheduled}{"\n"}{end}'
 ----
-+
-"``scheduled=true`` — the platform re-imports the new digest when upstream moves. The base stays current with nobody watching."
 
-=== Beat 4 — A catalog entry for one team only
+*What just happened*
 
-[demo-block]
-[TIME 2m]
-Say:: "Last piece: the catalog. I want *this* team to have a one-click Parasol starter — but only in *their* project, not cluster-wide. I publish a Template into their namespace and it appears in their Software Catalog alone."
-Show:: A namespaced Template applied; it listed as a catalog entry; nobody else's catalog changed.
-Do:: Publish a namespaced catalog entry:
-+
+`scheduled=true`. OpenShift re-checks the source registry periodically and pulls the new digest when the upstream tag moves, with nobody watching it.
+
+=== 4 · A catalog entry for one team only — 2 min
+
+The last lever is the catalog itself. Publish a one-click Parasol starter into this team's project, where it appears in their Software Catalog and in nobody else's.
+
+image::registry-images-catalog-governance/registry-images-catalog-governance-03-developer-catalog-template.png["The Software Catalog narrowed to Templates — the breadcrumb reads Software Catalog then Templates — with the keyword box filtered to Parasol and 2 items returned: a Parasol Claims Quickstart tile (Provided by Parasol Insurance, described as a one-click Parasol claims service) and a Parasol PostgreSQL (ephemeral) tile. Both are badged Templates. They are on this page because the Template objects live in this project, not because the cluster offers them to everyone."]
+
+*Why it matters*
+
+Curating the catalog centrally takes cluster-admin — the samples operator, OperatorHub sources, `ConsoleSample`. A `Template` in a project takes none of that: a team publishes its own blessed starting point without a ticket, and without changing what any other team sees.
+
 [source,sh,role=execute]
 ----
 oc apply -n $NS -f - <<'EOF'
@@ -196,15 +225,22 @@ objects:
 EOF
 oc get templates -n $NS
 ----
-+
-"One Template, one namespace — a self-service catalog entry with no cluster-admin. The platform team decides what's offered; here they offered it to exactly one team."
 
-[NOTE]
-.Reset between runs
-====
-`ws prep registry-images-catalog-governance --user {user} --yes` returns the world to the entry state — only the seeded `parasol-claims:1.0` stream and the sample pull secret, nothing promoted or imported.
-If you ran the allowed-registries beat, *confirm* `oc get image.config.openshift.io/cluster -o jsonpath='{.spec.allowedRegistriesForImport}'` is empty before the next run.
-====
+*On screen* — the web console → *Software Catalog* in `{user}-dev`, filtered to *Templates*: *Parasol Claims Quickstart* is listed, and it is listed nowhere else. One Template, one namespace — self-service with no cluster-admin, and the platform team still decides what is offered everywhere else.
+
+== Frequently asked questions
+
+*Why use an ImageStream at all — why not reference the image directly?*::
+Three reasons, all of them on screen in this demo. It pins a moving tag to an immutable digest, so `prod` is provably the bits that were tested. It can re-import on a schedule, so a base image stays current on its own. And with `referencePolicy: Local` it acts as a pull-through cache — workloads pull from the internal registry rather than the source, which is faster and survives the source being briefly unreachable. A bare image reference gives you none of the three: the tag can move silently, nothing re-imports, and every pod pulls from the source.
+
+*The allowed-registries control is cluster-wide — how do you change it safely?*::
+`allowedRegistriesForImport` is admission-level and instant: no node reboot, no pool roll, and it reverts as fast as it applies. It does govern every user's imports while it is set, so it is changed in an announced window like any other cluster policy. The heavier controls are the ones to plan around — `registrySources` and IDMS/ITMS mirroring re-render `/etc/containers/registries.conf` on every node and roll the pool, so they are maintenance work, never a live toggle.
+
+*Can we push to the internal registry from outside the cluster?*::
+Not on this cluster: the registry has no external route, so it is reachable only from inside, and everything runs through the API — `oc tag`, `oc import-image`, in-cluster builds. A default route can be enabled, but it adds an internet-facing surface with TLS and pull-secret handling to own. Route-free is the usual posture for shared and locked-down clusters. Where an organization needs a shared multi-cluster registry with scanning, geo-replication and fine-grained access control, that is Red Hat Quay rather than the integrated registry.
+
+*Could we offer that Template to everyone rather than to one project?*::
+Yes, and it is a different object. A namespaced `Template` is the lever a team owns; a cluster-scoped `ConsoleSample` puts an entry in every project's catalog, and that is a platform-team change. Removing stock entries is the same story in reverse: individual samples are dropped with `skippedImagestreams` and `skippedTemplates`, never by setting the samples operator to `Removed`, which deletes all of them.
 endif::demo[]
 
 // ============================================================================
