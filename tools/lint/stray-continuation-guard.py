@@ -125,7 +125,7 @@ def _crash_exit_2(exc_type, exc, tb):
     with Python's default rc 1 — which is exactly what CI's `--self-test must exit EXACTLY 1`
     assertion reads as "the canary fired". `os._exit` is what makes the remap stick: an excepthook
     cannot change the exit status by returning. Copied verbatim from the sibling built-artefact
-    guards (demo-beat-chip-guard.py, demo-region-identifier-guard.py) — same failure mode, same fix.
+    guard (demo-region-identifier-guard.py) — same failure mode, same fix.
     """
     import os
     import traceback
@@ -234,8 +234,8 @@ def scan(dirs: list[Path], floors=(MIN_RENDERINGS, MIN_HTML_FILES), quiet: bool 
 
     `floors` is a parameter, not a module constant read directly, so --self-test can prove detection
     against tiny synthetic fixtures (low floors) and prove the REAL floors would collapse a truncated
-    scan (the production floors, asserted separately) — the same split demo-beat-chip-guard.py and
-    demo-region-identifier-guard.py use their own `floors=` parameter for, and for the same reason:
+    scan (the production floors, asserted separately) — the same split demo-region-identifier-guard.py
+    uses its own `floors=` parameter for, and for the same reason:
     a floor sized for a 396-file real build would reject its own three-file canary as "collapsed"
     before the detector had a chance to prove anything.
     """
@@ -295,8 +295,7 @@ def report(findings, summary: str) -> int:
 
 # ── Self-test fixtures ─────────────────────────────────────────────────────────────────────────────
 # Built HTML, not .adoc — this guard reads finished artefacts only, so its canaries are pages the way
-# Asciidoctor actually writes them, exactly as demo-beat-chip-guard.py's BUILT_PAGE/BUILT_GOOD/
-# BUILT_BAD constants do for their own opt-in built-mode check. There is no on-disk `.canary.adoc` or
+# Asciidoctor actually writes them. There is no on-disk `.canary.adoc` or
 # `.canary/` fixture here because there is no source-side detector for one to exercise.
 
 # The bare-paragraph shape: the marker WAS the entire paragraph (ai-assisted-development Beat 2, the

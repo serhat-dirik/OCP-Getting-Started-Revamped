@@ -44,8 +44,8 @@ WHICH LEVEL THIS WORKS AT, AND WHAT EACH LEVEL CANNOT SEE. Both, because neither
   "language-sh…">` bodies of a built site and applies the same harvest. This is the level that
   actually caught two of the three instances, and it is the only level that proves what a presenter
   will see. It CANNOT run in CI as things stand — every job in .github/workflows/lint.yml is
-  checkout-plus-a-script and a gate that needs a site build is a gate that gets skipped (the same
-  reasoning demo-beat-chip-guard records for its own built mode) — and it CANNOT name the source
+  checkout-plus-a-script and a gate that needs a site build is a gate that gets skipped — and it
+  CANNOT name the source
   line to edit, because by then the conditional is gone.
 
 WHAT IT ASSERTS.
