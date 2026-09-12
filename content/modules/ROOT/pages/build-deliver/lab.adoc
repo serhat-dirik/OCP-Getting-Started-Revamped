@@ -3,7 +3,7 @@
 include::partial$version-attributes.adoc[]
 
 // Lab page for Ways to Build & Deliver Apps. Workshop exercises are guarded ifndef::demo[] so the DEMO
-// rendering shows only the presenter arc; the WORKSHOP rendering shows the hands-on
+// rendering shows only the SA demo page; the WORKSHOP rendering shows the hands-on
 // steps. Every attendee command uses role=execute (click-to-run). Console click-paths
 // were walked live on the 4.21 unified console (2026-07-10); screenshots are committed
 // under assets/images/build-deliver/. Java is JDK 21 throughout (workshop
@@ -35,82 +35,153 @@ Open the {gitea_url}/{user}/parasol-claims[parasol-claims repo^] in a browser ta
 endif::demo[]
 
 // ============================================================================
-// DEMO FLAVOR — 10–12 minute presenter arc (import-from-git -> running app +
-// catalog tour + trusted-content talk track)
+// DEMO FLAVOR — the 11-minute SA demo: import from Git -> running app, the software
+// catalog, the two Red Hat registries, and the database wiring. The title's minutes are
+// the sum of the four step headings below (3+3+2+3); keep them in step.
 // ============================================================================
 ifdef::demo[]
-== Demo arc — Source to running app (11 min)
+== Source in, a running application out · 11 min
 
-[NOTE]
-.Before you present
+A Git repository with no image and no Dockerfile becomes a running, database-backed claims API, built by the platform out of content it can vouch for.
+
+[IMPORTANT]
+.Prep — run before the session
 ====
-Run `adm solve build-deliver --user {user}` *before the session* so a finished, database-backed claims app (`parasol-claims`) is already running — it is both your safety net and the owner of the database (`claims-db`) your live build will wire into.
-*Do not delete anything*: you will build a second copy live under the name `claims-live`, beside the pre-staged one.
-A Quarkus S2I build takes *~4–5 minutes* on a warmed node; the catalog tour and trusted-content talk track below are timed to cover that typical case, so the build finishes while you talk.
-The first build on a fresh cluster is the slowest (no cached Maven artifacts or builder image yet) and can run past five minutes — see "If the live build is slow" below for the fallback.
-Have the {gitea_url}/{user}/parasol-claims[parasol-claims repo^] open in a browser tab.
-The console labels below were confirmed on a current OpenShift console during the build.
-Note that the console's *Import from Git* cannot reach the in-cluster Gitea host, so it does not auto-detect the builder — you select *Java 21* yourself (rehearse this so the warning does not surprise you live).
+This demo starts from the finished lab state. Stage it before the session from your own terminal, signed in with a cluster-admin account:
+
+[source,sh,subs="attributes"]
+----
+adm solve build-deliver --user {user}
+----
+
+It leaves a finished, database-backed `parasol-claims` running in `{user}-dev` beside the `claims-db` PostgreSQL it uses, and returns in roughly *5–10 minutes* — longer on a cluster whose Maven and builder-image caches are still cold, so start it well ahead.
+
+Nothing is deleted during the demo. Step 1 builds a *second* copy of the same source, named `claims-live`, beside the staged application, and step 4 wires that copy to the database the staged one already owns.
+
+A Quarkus S2I build takes about *4–5 minutes* on a warmed node; the first build on a fresh cluster has neither cached Maven artifacts nor a cached builder image and runs considerably longer.
+
+Have two browser tabs signed in as `{user}`: the web console, and the {gitea_url}/{user}/parasol-claims[parasol-claims repository^] whose URL step 1 pastes into the console.
+
+NOTE: The console's *Import from Git* cannot reach the in-cluster Gitea host, so it reports the repository as unreachable and detects no import strategy. That is expected on this cluster: the *Java 21* builder is chosen by hand, and the build itself clones the repository without trouble.
+
+CAUTION: If the live build is still running when step 4 arrives, use the staged `parasol-claims` instead — it is untouched, already wired to its database, and shows the same result. The live build's logs are still there afterwards.
 ====
 
-=== Beat 1 — Source to running app, no Dockerfile
+=== Brief
 
-[demo-block]
-[TIME 3m]
-Say:: "Parasol's dev team handed me a claims service as *source code* — a Git repo, no image. Watch the platform build and run it for me, no Dockerfile in sight."
-Show:: The masthead *Quick create* (+) menu → *Import from Git*.
-Paste the repo URL; the console reports it cannot reach the repo, so you pick the builder yourself.
-Do:: Paste `{gitea_url}/{user}/parasol-claims`. When the *unreachable-repository* warning appears, select *Import Strategy → Builder Image*, pick the *Java 21* tile, set the *Name* to `claims-live` (so it lands beside the pre-staged app), leave *Target port* `8080`, then click *Create*.
-Land in *Topology*: "That build you see starting is Source-to-Image — my source plus a supported Java 21 builder image, no Dockerfile. The console can't peek inside our in-cluster Git host, so I chose the builder myself — which is exactly what the CLI's `java-21~<repo>` syntax says."
+image::build-deliver/build-deliver-01-build-spectrum.svg["A decision flow from an application to run: if an image already exists, deploy it with no build; with source and no need to control the base image, Import from Git builds it with Source-to-Image; where the base image and the build steps must be controlled, a Containerfile build with Buildah; and once the build belongs to the team, the same build runs from a pipeline."]
 
-=== Beat 2 — Where the images come from: the curated catalog
+*Source, not an image*
 
-[demo-block]
-[TIME 3m]
-Say:: "While that builds, let me show you where images come from here — because 'where did this come from?' is the first question security asks."
-Show:: *Ecosystem* → *Software Catalog*.
-Scroll the *Databases* category — the Parasol PostgreSQL tile is here — and the language builders.
-Do:: "Everything here is *curated* — the platform team chose it. These builders are UBI-based: Red Hat's Universal Base Image, maintained and patched. That's the paved road your subscription already includes."
+One question comes first, because it can remove the build entirely: is there already an image? If so the platform simply runs it. With source and no image, OpenShift offers two build strategies — alternatives, one per application, not a ladder to climb.
 
-=== Beat 3 — Two registries, two trust models
+*Source-to-Image is the paved road*
 
-[demo-block]
-[TIME 2m]
-Say:: "One level deeper on trust. There are two Red Hat registries, and they behave differently on purpose."
-Show:: A terminal.
-Do::
-+
+S2I takes a Git repository plus a supported language builder image and produces a runnable image. Nobody writes a `Containerfile`, and nobody owns a base image or its patching. A Containerfile build, run with Buildah, is the answer when something S2I cannot give is genuinely needed: a specific or hardened base image, a system package, an unusual build step.
+
+*A pipeline is not a third strategy*
+
+A pipeline runs whichever of those two was chosen, on every push, with test, scan, sign and promote around it. That is where a build goes once it belongs to the team rather than to one developer — a separate module.
+
+*Where the image comes from*
+
+Every container starts from a base image, and "where did this come from?" is the first question a security review asks. Red Hat's language builders are built on the Universal Base Image, maintained and patched, and already included in the subscription — and the platform team decides which of them developers see.
+
+*In this demo*
+
+. Source in a Git repository, built and deployed by the platform with no Dockerfile
+. The software catalog those builder images and the database come from
+. Two Red Hat registries, and what their different behaviour proves about provenance
+. The built application wired to its database and serving claims on its own URL
+
+=== 1 · Source to a running application — 3 min
+
+Parasol's claims service arrives as source in Git: no image, no `Containerfile`. *Import from Git* hands that repository to a supported Java 21 builder and deploys what comes out, as a second copy named `claims-live` beside the staged application.
+
+image::build-deliver/build-deliver-01-import-from-git.png["The console's Import from Git form showing the repository-is-unreachable and unable-to-detect-the-import-strategy warnings, with Import Strategy set to Builder Image and the row of language builder tiles below it."]
+
+*Why it matters*
+
+There is no Dockerfile to write, review or keep patched, and no build server of the customer's own. The build is an ordinary workload in the developer's own project, bound by that project's quota — not something happening off to the side.
+
+*On screen* — masthead *Quick create* (+) → *Import from Git*. Paste `{gitea_url}/{user}/parasol-claims`; when the unreachable-repository warning appears, choose *Import Strategy → Builder Image* and the *Java 21* tile, set *Name* to `claims-live`, leave *Target port* at `8080`, then *Create*. The console lands in *Topology* with the build already starting.
+
+*What just happened*
+
+Source-to-Image paired the repository with the Java 21 builder image — the same pairing the CLI writes as `java-21~<repo>`. That build runs for the next few minutes, and neither of the two steps after this one waits on it.
+
+=== 2 · Where the builder images and the database come from — 3 min
+
+The software catalog is the platform's front door: the builder images, databases and templates a developer on this cluster can start from, chosen by the platform team rather than found on the internet.
+
+image::build-deliver/build-deliver-02-catalog-postgres-tile.png["The Software Catalog filtered to the Databases category: MariaDB, MySQL and PostgreSQL tiles, each provided by Red Hat, with the Parasol PostgreSQL (ephemeral) tile at the bottom of the frame."]
+
+*Why it matters*
+
+Everything on this page is curated. The language builders are UBI-based — Red Hat's Universal Base Image, maintained and patched — and the subscription already covers a wider road than most people expect: Java, Node.js, Python, .NET, Go, Ruby, PHP, plus JBoss EAP, JBoss Web Server, httpd and nginx. An administrator adds any other Red Hat builder to the same catalog, which is exactly how the Java 21 builder in step 1 got here.
+
+*On screen* — *Ecosystem* → *Software Catalog*: the *Databases* category, where the Parasol PostgreSQL tile that provides `claims-db` lives, then *Type → Builder Images* for the language builders, the Java 21 one among them.
+
+=== 3 · Two registries, two trust models — 2 min
+
+One level deeper on trust: the base images underneath those builders come from two Red Hat registries that behave differently on purpose, and the image this build produces is tagged into an ImageStream in the project itself.
+
+[mermaid]
+....
+include::example$diagrams/build-deliver/04-registry-trust.mmd[]
+....
+
+*Why it matters*
+
+"Which base images are we allowed to use, and can we prove where they came from?" is the whole of software supply chain security, and it starts with content whose origin can be named and whose patches arrive from someone under contract. Inside the cluster the same question has an answer too: the build's output is tagged in an ImageStream in this project, so what is deployed points at a specific image the cluster produced.
+
 [source,sh,role=execute]
 ----
 oc run probe --image=registry.access.redhat.com/ubi9/ubi-minimal --restart=Never --rm -i --command -- curl -sI https://registry.access.redhat.com/v2/ | head -1
 ----
-+
-"``registry.access.redhat.com`` hands out UBI *anonymously*. The fuller catalog on `registry.redhat.io` needs credentials — the cluster's pull secret. That difference *is* provenance: you always know what you're running and where it came from."
 
-=== Beat 4 — Wire it to the database and serve claims
+*What just happened*
 
-[demo-block]
-[TIME 3m]
-Say:: "Our build should be done. A freshly built app doesn't magically know where its database lives — one command wires it to the catalog database's credentials, and then it's serving."
-Show:: *Topology* (under *Workloads*) → the `claims-live` node → the *Resources* tab → the completed *Build*; then the terminal for the wiring; then the app answering.
-Do:: Wire the live-built app to the database and watch it come up:
-+
+`registry.access.redhat.com` served a UBI image to a Pod on this cluster with no credentials at all. The fuller catalog on `registry.redhat.io` refuses the same anonymous request and needs the cluster's pull secret. That difference is provenance made concrete: what is running here is always traceable to a registry someone maintains.
+
+=== 4 · Wire it to the database and serve claims — 3 min
+
+The build has finished and `claims-live` is running, but a freshly built application does not know where its database lives. One command hands it the credentials the catalog database already published as a Secret.
+
+image::build-deliver/build-deliver-03-what-you-built.svg["The finished chain: the parasol-claims source in the developer's Git fork built by the java-21 Source-to-Image builder into an ImageStream tag, deployed as a Deployment that takes the claims-db Secret as environment variables and reaches the PostgreSQL database from the catalog, published through a Service on port 8080 and a Route a claims adjuster reaches over HTTPS."]
+
+*Why it matters*
+
+The image is built once and carries no environment inside it; what it connects to is configuration, handed over at deploy time. That separation is what lets the same image move from dev to production unchanged — the subject of the configuration module.
+
 [source,sh,role=execute,subs="attributes"]
 ----
 oc -n {user}-dev set env deploy/claims-live --from=secret/claims-db
 oc -n {user}-dev rollout status deploy/claims-live
 ----
-+
-Open ``claims-live``'s `/api/claims` URL from its Route: show the JSON list of claims.
-"From a Git repo to a running, database-backed API — the platform built it, one line of config wired it to the catalog database, and it's published on its own URL. That's the whole build-and-deliver story — and the config half is exactly what the Config module goes deep on."
 
-[NOTE]
-.If the live build is slow
-====
-S2I build time depends on the node cache; a cold first build can run past five minutes.
-If it is still going when you finish the talk track, switch to the pre-staged `parasol-claims` instance (untouched, database-wired) to show the running app, and return to the live build's logs afterward.
-Never stall on a progress bar — narrate the trusted-content story instead.
-====
+*On screen* — *Topology* → the `claims-live` node → its *Resources* tab → the completed *Build*; then open the application's Route and call `/api/claims`, which returns the seeded claims as JSON.
+
+*What just happened*
+
+A Git repository became a running, database-backed API on its own URL: the platform built the image from source, one line of configuration wired it to the catalog database, and a Route published it. No Dockerfile, no registry credentials, and nothing installed on anyone's machine.
+
+== Frequently asked questions
+
+*Source-to-Image or a Containerfile — how do we choose?*::
+Default to S2I: nothing is written, the platform builds the source with a supported and patched builder image, and no `Containerfile` is owned. Reach for a Containerfile build only for something S2I cannot give — a specific or hardened base image, a system package, an unusual build step. The test is whether there is a reason to own a base image; if not, S2I.
+
+*Why is the builder called `java-21` rather than `java`?*::
+Because a platform team pinned it. The stock OpenShift samples ship a `java` stream that trails the current release, so this cluster carries its own Java 21 builder on UBI 9 and every build lands on the same current JDK. Curating that list is precisely what a platform team does, and how such a list is published and kept current is the Developer Hub module.
+
+*Where do the builds run, and what stops them consuming the cluster?*::
+Each build runs in a build Pod in the developer's own namespace, under that namespace's ResourceQuota and LimitRange — a first-class, quota-bound workload like any other. The default 1 GiB container limit carries these Quarkus builds; a larger application can need more, set on its BuildConfig.
+
+*The console said the repository was unreachable. Is that a problem?*::
+Only for the console's inspection. The console backend on this cluster cannot reach the in-cluster Git host, so it cannot read the repository to detect a strategy — the build itself clones it fine. Where the Git server is reachable the strategy is detected automatically, and choosing the builder by hand is the same choice the CLI's `java-21~<repo>` makes.
+
+*Is that database real, and where does the data go?*::
+It is a real PostgreSQL 15, but deliberately ephemeral here: it stores to an `emptyDir`, so restarting the Pod loses everything in it. Giving a database durable, identity-stable storage is the storage module. Nothing anyone cares about should point at an ephemeral database.
 endif::demo[]
 
 // ============================================================================
