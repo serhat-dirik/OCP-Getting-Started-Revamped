@@ -30,26 +30,62 @@ endif::demo[]
 // DEMO FLAVOR — 10-minute presenter arc: data-loss → redemption
 // ============================================================================
 ifdef::demo[]
-== Demo arc — Lose the data, then save it (10 min)
+== Lose the data, then save it · 10 min
 
-[NOTE]
-.Before you present
+Parasol's claims database loses every claim to a routine Pod restart, then survives the same restart once one line of its definition changes.
+
+[IMPORTANT]
+.Prep — run before the session
 ====
-Run `ws prep storage-stateful --user {user} --yes` a few minutes ahead so the claims app and its ephemeral database are up and the app has finished its first boot.
-Have the *Terminal* ready, logged in as `{user}`, in `{user}-dev`.
-The whole arc is CLI — keep the font large.
-This demo runs from the *entry* (ephemeral) state, not from `adm solve` — the story *is* the loss, so you must start ephemeral.
+This demo runs from the module's *entry* state, where the claims database still writes to an ephemeral volume. Stage it a few minutes ahead, so the application and its database have finished their first boot:
+
+[source,sh,role=execute]
+----
+ws prep storage-stateful
+----
+
+It inspects the project first and offers to clear anything left from an earlier run; answer its prompt. Do not stage the finished lab state: the data loss in step 1 is what the first half of the demo shows, and it only happens on the ephemeral entry state.
+
+Every step runs in the *Terminal* tab as `{user}`, in the `{user}-dev` project. Nothing here needs the web console, so enlarge the terminal font beforehand if the output goes to a shared screen.
+
+NOTE: The application's connection pool needs a second or two to reconnect after the database Pod restarts. If the first `curl` after a restart blips, run it once more — it settles immediately. Step 3 deliberately never restarts the application; that it keeps working is the result being shown.
+
+CAUTION: Deleting the *persistent* database Pod in step 3 takes around 30 seconds, because a ReadWriteOnce volume has to detach from one node before it attaches to another; the ephemeral Pod in step 1 comes back in about 15. Neither is a hang. After a rehearsal, run `ws prep storage-stateful` again and accept the wipe — the demo has to start with an ephemeral database and no PersistentVolumeClaim.
 ====
 
-=== Beat 1 — A few claims, a normal day
+=== Brief
 
-[demo-block]
-[TIME 2m]
-Say:: "Here's Parasol's claims database. Let me add a few claims — a normal day."
-Show:: The Terminal.
-`GET /api/claims` returns an empty list, then three ``POST``s create claims, then the list shows three.
-Do:: Seed and list:
-+
+image::storage-stateful/storage-stateful-01-storage-chain.svg["The storage abstraction chain in two rows. Inside your namespace, a Pod running your database mounts a PersistentVolumeClaim — what you ask for. That claim is bound to the cluster-scoped row, where a PersistentVolume — what the platform gives you — is created from a StorageClass, the recipe the platform follows, which carves real disk from the cluster's storage backend."]
+
+*Storage that dies with the Pod*
+
+A container's filesystem is part of its Pod. That is correct for a stateless application and fatal for a database: the first time the Pod is rescheduled, upgraded, or simply dies, everything written inside it goes with it. Nothing raises an alarm, because nothing is broken — the platform did exactly what a Pod means.
+
+*The storage abstraction chain*
+
+OpenShift separates the request from the disk. An application asks for storage with a PersistentVolumeClaim in its own namespace; a StorageClass — the platform team's recipe for one kind of storage — provisions a matching PersistentVolume on demand and binds it to the claim. Developers write claims. Nobody files a storage ticket, and nobody picks an array.
+
+*StatefulSet vs Deployment*
+
+A Deployment treats its Pods as interchangeable, which is why a database deployed that way can lose its data to a restart. Software whose identity matters runs as a StatefulSet instead: each Pod keeps its ordinal name and its own claim across restarts. In production an Operator wraps those primitives into a database that also replicates, fails over, and takes backups.
+
+*In this demo*
+
+. Three claims created in Parasol's claims database, and lost to a routine Pod restart
+. The ephemeral volume replaced by a PersistentVolumeClaim, in one command
+. The same restart repeated, with the claims still there
+. The claim traced back to the volume and the class that provisioned it
+
+=== 1 · Three claims, and a restart that loses them — 4 min
+
+Create three claims through the claims application's own API, then delete the database Pod — the same thing a node drain, an upgrade, or a crash does — and read the claims back.
+
+image::storage-stateful/storage-stateful-02-sts-vs-deployment.svg["Two workload shapes side by side. A Deployment whose Pods carry generated names, pod-a1b2 and pod-c3d4, sharing one load-balanced Service; and a StatefulSet whose Pods pg-sts-0 and pg-sts-1 each keep a stable name, own their own volume — data-pg-sts-0 and data-pg-sts-1 — and answer to their own DNS name from a headless Service."]
+
+*Why it matters*
+
+The database runs as a Deployment, so its Pod is interchangeable: the replacement carries the same specification and none of the previous Pod's disk. Its data volume is an `emptyDir` — part of the Pod. A StatefulSet is the right shape for a datastore because identity and volume stay together, but a StatefulSet on an ephemeral volume would lose the data just as completely. The volume is what decides.
+
 [source,sh,role=execute,subs="attributes"]
 ----
 CLAIMS=$(oc -n {user}-dev get route parasol-claims -o jsonpath='{.spec.host}')
@@ -60,17 +96,9 @@ for c in '{"claimant":"Nadia Rahman","type":"auto","amount":3200}' \
 done
 curl -s -D - -o /dev/null "http://$CLAIMS/api/claims" | grep -i x-total-count
 ----
-+
-"Three claims. Real data, in a real PostgreSQL running on the cluster."
 
-=== Beat 2 — A routine Pod restart wipes it out
+Three claims, in a real PostgreSQL running on the cluster. Now restart the database Pod:
 
-[demo-block]
-[TIME 2m]
-Say:: "Now watch. The database Pod restarts — a node drains, an upgrade, a crash. Routine. I'll just delete the Pod."
-Show:: Deleting the `claims-db` Pod; it comes back in seconds; then the claims list is *empty* — and the app even errors, because the table itself is gone.
-Do:: Kill the Pod, then look:
-+
 [source,sh,role=execute,subs="attributes"]
 ----
 oc -n {user}-dev delete pod -l app=claims-db
@@ -78,17 +106,21 @@ oc -n {user}-dev rollout status deploy/claims-db
 oc -n {user}-dev rollout restart deploy/parasol-claims && oc -n {user}-dev rollout status deploy/parasol-claims
 curl -s -D - -o /dev/null "http://$CLAIMS/api/claims" | grep -i x-total-count
 ----
-+
-"Zero claims. The volume was an *emptyDir* — it lived and died with the Pod. Every claim is gone. This is the trap."
 
-=== Beat 3 — Swap the emptyDir for a PersistentVolumeClaim
+*What just happened*
 
-[demo-block]
-[TIME 3m]
-Say:: "Same database, same app. The only thing I change is *what the data volume is*. I'll swap the emptyDir for a PersistentVolumeClaim."
-Show:: `oc set volume` swaps the volume for a PVC; the PVC is `Pending` (WaitForFirstConsumer), then `Bound` once the Pod schedules; re-seed three claims.
-Do:: Add persistence, then re-seed:
-+
+Zero claims. The application had to be restarted before it could answer at all, because the `claim` table itself was created inside that volume the first time it connected — the whole database went, not only the rows. Ephemeral or persistent is a property of the volume, not of the database.
+
+=== 2 · One volume definition changes — 3 min
+
+Swap the ephemeral volume for a PersistentVolumeClaim in a single command, then create three claims again. The application, the database image, and everything else about the deployment stay as they were.
+
+image::storage-stateful/storage-stateful-01-pvc-bound.png["The claims-db-data PersistentVolumeClaim in the console: a Bound badge beside the name, a donut reading 2 GiB available, and a summary column giving Status Bound, Requested capacity 2 GiB, Capacity 2 GiB, Used 45.69 MiB — the database's actual footprint — Access modes ReadWriteOnce, Volume mode Filesystem, and the StorageClass that provisioned it, ocs-external-storagecluster-ceph-rbd."]
+
+*Why it matters*
+
+`--claim-size=2Gi` is the entire storage request. The cluster's default StorageClass provisions a real volume for it on demand, binds it once the Pod is scheduled, and mounts it at the database's data directory. No ticket, no array, no disk created in advance.
+
 [source,sh,role=execute,subs="attributes"]
 ----
 oc -n {user}-dev set volume deploy/claims-db --add --overwrite --name data \
@@ -102,31 +134,41 @@ for c in '{"claimant":"Persistent Pat","type":"auto","amount":4100}' \
 curl -s -D - -o /dev/null "http://$CLAIMS/api/claims" | grep -i x-total-count
 ----
 
-=== Beat 4 — The same restart, the opposite outcome
+*What just happened*
 
-[demo-block]
-[TIME 1m]
-Say:: "Now the same Pod restart that wiped us out before."
-Show:: Delete the `claims-db` Pod again; the claims list still shows three — *no* app restart, no error this time.
-Do:: Kill it and read straight back:
-+
+The claim was `Pending` for a moment — the default class waits for the first consumer, so the volume is created where the Pod lands — then `Bound`, and the database came back writing to it instead of to the Pod.
+
+=== 3 · The same restart, the opposite outcome — 1 min
+
+Delete the database Pod again, exactly as in step 1, and read the claims straight back. The application is not restarted this time.
+
+image::storage-stateful/storage-stateful-04-what-you-built.svg["What the change amounts to: an emptyDir volume, marked as data that dies with the Pod, replaced through oc set volume --overwrite by the Bound claim claims-db-data on a PersistentVolume from the default StorageClass. Beside it, the StatefulSet form of the same idea — pg-sts-0 and pg-sts-1, a per-Pod claim each, stable identity over headless DNS, a partitioned update, and an init-container migration."]
+
+*Why it matters*
+
+The same Pod restart, the opposite outcome, and no recovery procedure in between: the data was never in the Pod. The application did not have to be told anything, because both its schema and its rows were on the volume, waiting for the new Pod to mount them.
+
 [source,sh,role=execute,subs="attributes"]
 ----
 oc -n {user}-dev delete pod -l app=claims-db
 oc -n {user}-dev rollout status deploy/claims-db
 curl -s -D - -o /dev/null "http://$CLAIMS/api/claims" | grep -i x-total-count
 ----
-+
-"Three claims. Same Pod restart, opposite outcome — and the app never even noticed, because the data *and* the schema were on the persistent volume. That's the whole module: ephemeral versus persistent is a property of the volume, not the app."
 
-=== Beat 5 — Where the disk came from: no ticket
+*What just happened*
 
-[demo-block]
-[TIME 2m]
-Say:: "One more look under the hood — where did that disk actually come from? Nobody filed a storage ticket."
-Show:: The chain from claim to volume to class: the PVC `Bound`, the real Ceph-backed PersistentVolume behind it, and the StorageClass that provisioned it on demand.
-Do:: Walk the chain:
-+
+Three claims, through the restart that emptied the database two steps ago. The only difference between the two outcomes is what the `data` volume is.
+
+=== 4 · Where the disk came from — 2 min
+
+Follow the chain in the terminal: the claim in the project, the PersistentVolume bound to it, and the StorageClass that created it.
+
+image::storage-stateful/storage-stateful-02-storageclass.png["The StorageClass detail page for ocs-external-storagecluster-ceph-rbd: the left column gives the name, annotations, and the provisioner openshift-storage.rbd.csi.ceph.com; the right column gives Reclaim policy Delete, Default class True, and Volume binding mode WaitForFirstConsumer."]
+
+*Why it matters*
+
+Nobody filed a storage request. The platform team publishes the classes — which backend, which access modes, whether volumes can grow, what happens when the claim is deleted — and application teams claim against them. That contract is what makes storage a platform service rather than a project.
+
 [source,sh,role=execute,subs="attributes"]
 ----
 oc -n {user}-dev get pvc claims-db-data
@@ -134,16 +176,24 @@ PV=$(oc -n {user}-dev get pvc claims-db-data -o jsonpath='{.spec.volumeName}')
 oc get pv "$PV" -o custom-columns='NAME:.metadata.name,CAPACITY:.spec.capacity.storage,RECLAIM:.spec.persistentVolumeReclaimPolicy,DRIVER:.spec.csi.driver'
 oc get storageclass
 ----
-+
-"A claim, a real Ceph volume created on demand, and the StorageClass that did it — that's dynamic provisioning. The platform team publishes the classes; developers just claim. Storage as a contract, not a ticket."
 
-[NOTE]
-.If the app is briefly slow after a DB Pod restart
-====
-After the DB Pod restarts, the app's connection pool needs a second or two to reconnect.
-If the first `curl` blips, run it once more — it settles immediately.
-Never restart the app in the *persistent* step (step 4); the point is that you don't have to.
-====
+*What just happened*
+
+A claim, a real volume created on demand behind it, and the class that did the work — dynamic provisioning, end to end.
+
+== Frequently asked questions
+
+*My PVC says `Pending` and nothing is happening — is it broken?*::
+Almost always no: the default class uses `WaitForFirstConsumer`, so it deliberately waits to provision the volume until a Pod that mounts the claim is scheduled, and the disk then lands near that Pod. `oc describe pvc <name>` shows the event. A claim with no consuming Pod sits `Pending` by design.
+
+*Why did killing the database Pod return an error rather than an empty list?*::
+Because the schema — the `claim` table itself — was created inside the ephemeral volume the first time the application connected, and it died with the Pod. The application is configured to reuse an existing schema rather than wipe and recreate one on boot, so against a brand-new empty database it fails instead of quietly rebuilding the table. The whole database was in ephemeral storage, not just the rows.
+
+*Two replicas of PostgreSQL — is that a highly available database?*::
+No. A StatefulSet gives each Pod a stable identity and its own volume; it does not replicate data between them, so two replicas are two independent PostgreSQL instances with separate storage. Replication, failover, and backups are the job of a database Operator or a managed service. The StatefulSet is the plumbing underneath one, not a database strategy by itself.
+
+*If the workload is deleted, does the data go with it?*::
+No, and that surprises people in both directions. Deleting a StatefulSet leaves the claims from its `volumeClaimTemplate` bound and still holding data, so a workload can be deleted and recreated without loss — and orphaned claims quietly accumulate cost when nobody cleans them up. Deleting the claim is what releases the volume, and on a class whose reclaim policy is `Delete`, the storage goes too.
 endif::demo[]
 
 // ============================================================================
