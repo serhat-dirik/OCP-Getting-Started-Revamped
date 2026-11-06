@@ -110,6 +110,20 @@ Sized against a **32 vCPU / 64 GiB** worker — figure on roughly 30 CPU and 58 
 floor below 30 — module topology is, and the next section explains why. If you order for capacity
 alone you will land on 3 or 4 workers and one module will not run.
 
+**The `Order` column and the topology floor are two different numbers, and conflating them is the
+mistake this table invites.** `Order` is *capacity* — buy it for the cohort. The topology floor is a
+**count of schedulable `worker`-role nodes**, and **schedulable control planes count toward it**. So
+an RHDP *OpenShift Base* cluster ordered with **3 workers** presents 3 control planes + 3 workers =
+**6 schedulable nodes**, which clears the floor with five eligible after the batch taint — even
+though you bought three workers. Settle it with one command rather than arithmetic:
+
+```
+oc get nodes -l node-role.kubernetes.io/worker
+```
+
+**Five or more rows and the floor is met** — the tainted batch node is one of them (it keeps the
+`worker` role), leaving the four non-batch nodes the module needs.
+
 **CPU decides the capacity column, not memory.** Every row needs one to two more nodes for CPU than
 for memory, and the gap widens with the cohort. That is the Dev Spaces workspace: 2.5 CPU requested
 against 0.5 Gi. It is a large CPU reservation for something that mostly waits for a human to type,
@@ -127,7 +141,7 @@ magnitude higher. A cluster that looks 90% idle will still refuse to place a pod
 > one or two modules each; a cohort deep into the catalog sits higher. If a long delivery starts
 > crowding the cluster, resetting finished modules reclaims it.
 
-### Why five workers, when capacity says three
+### Why five *schedulable* nodes, when capacity says three
 
 **One module needs free *nodes*, not just free totals — and that is what sets the floor.**
 
