@@ -618,11 +618,6 @@ else
     [[ "${AVL:-}" == "Available" ]] || { echo "❌ Argo CD instance not Available after 5m. Check: oc get argocd -n openshift-gitops"; exit 1; }
     echo "  ✓ Argo CD instance available"
 
-    # The portfolio manages cluster-scoped resources (namespaces, operators, RBAC),
-    # so the default instance's application-controller needs cluster-admin.
-    oc apply -f "${SCRIPT_DIR}/operator/controller-rbac.yaml"
-    echo "  ✓ controller RBAC applied"
-
     # The operator-default controller memory (2Gi) OOM-wedges under cohort-scale concurrent entry-state
     # materializations; raise it to 6Gi. On an instance WE installed that is unconditional. On an
     # ADOPTED one it is a mutation of something the org owns, so it is asked for, recorded, and undone
@@ -798,6 +793,15 @@ else
       oc apply -f "${SCRIPT_DIR}/operator/argocd-controller-resources.yaml"
       echo "  ✓ controller resources raised (6Gi limit / 2Gi request)"
     fi
+
+    # The portfolio manages cluster-scoped resources (namespaces, operators, RBAC), so the default
+    # instance's application-controller needs cluster-admin. Granted HERE, after the adopted-memory
+    # gate, never before it: both refusal paths above exit with "Nothing on this cluster has been
+    # changed", and on an adopted Argo CD this binding hands the org's controller cluster-admin.
+    # Applied first (as it was until 2026-11-06), a declined install left that grant behind under a
+    # message saying there was none. Nothing between the operator wait and here needs it.
+    oc apply -f "${SCRIPT_DIR}/operator/controller-rbac.yaml"
+    echo "  ✓ controller RBAC applied"
   fi
 fi
 
