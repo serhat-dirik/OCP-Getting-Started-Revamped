@@ -338,7 +338,8 @@ What this means on the clusters you will actually meet:
 > nothing ever syncs. On an Argo CD *we* install that is applied unconditionally; on an **adopted** one
 > it is a change to a resource the org owns that restarts their controller, so the installer prints the
 > prior value, asks `[y/N]`, and records what to restore before patching. **Answering no — or running
-> with no TTY — stops the install.** For an unattended run consent up front:
+> with no TTY — stops the install in preflight, before it has changed anything.** `tools/ws/adm preflight`
+> warns about it in advance. For an unattended run consent up front:
 > `OGSR_ADOPTED_ARGOCD_MEMORY=apply ./bootstrap/install.sh`.
 
 ### 3.2 Configure

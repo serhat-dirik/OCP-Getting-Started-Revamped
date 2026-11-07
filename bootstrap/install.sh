@@ -775,6 +775,49 @@ assert_no_batch_taint_pending() {
   return 1
 }
 
+# ── preflight: adopted Argo CD controller memory — DECIDED BEFORE THE FIRST MUTATION ──────────────
+# The portfolio installer asks this question at its own step [1/2] — correct when it runs standalone,
+# too late when we call it: by then this script has captured state, labelled and tainted nodes and
+# annotated adopted resources. So a "no", or no TTY to ask on, stopped an install that had already
+# changed the cluster, under a message saying it had not (cluster-zvqzn, 2026-11-06). Asked HERE, a
+# refusal is genuinely free. The answer is exported, so the portfolio acts on it instead of asking again.
+# Same "adopted" verdict the portfolio uses: the first-write-wins snapshot if a previous install left
+# one, else the live Subscription. Read-only.
+ARGO_TARGET_MEM="$(grep -A2 'limits:' "$(dirname "$PORTFOLIO_INSTALL")/operator/argocd-controller-resources.yaml" 2>/dev/null \
+                    | grep -m1 'memory:' | sed 's/.*memory:[[:space:]]*//' | tr -d '"' || true)"
+ARGO_TARGET_MEM="${ARGO_TARGET_MEM:-6Gi}"
+_gitops_adopted="$(oc get configmap "$STATE_CM" -n "$STATE_NS" -o jsonpath='{.data.gitops_preexisted}' 2>/dev/null || true)"
+if [[ -z "$_gitops_adopted" ]] \
+   && oc get subscriptions.operators.coreos.com openshift-gitops-operator -n openshift-gitops-operator >/dev/null 2>&1; then
+  _gitops_adopted="true"
+fi
+_argo_cur_mem="$(oc get argocd openshift-gitops -n openshift-gitops -o jsonpath='{.spec.controller.resources.limits.memory}' 2>/dev/null || true)"
+if [[ "$_gitops_adopted" == "true" && "$_argo_cur_mem" != "$ARGO_TARGET_MEM" ]]; then
+  warn "this cluster's OpenShift GitOps is ADOPTED and its controller memory limit is ${_argo_cur_mem:-the operator default 2Gi}."
+  warn "   The workshop needs ${ARGO_TARGET_MEM} (below that the controller is OOMKilled and nothing syncs)."
+  warn "   Raising it changes a resource the cluster owner owns and restarts their controller; the prior"
+  warn "   value is recorded first and ogsr-uninstall.sh puts it back."
+  _argo_decision="${OGSR_ADOPTED_ARGOCD_MEMORY:-}"
+  if [[ -z "$_argo_decision" ]]; then
+    if [[ -t 0 ]]; then
+      printf '   Raise it to %s and continue? [y/N] ' "$ARGO_TARGET_MEM"
+      read -r _reply </dev/tty || _reply=""
+      case "$_reply" in [yY]|[yY][eE][sS]) _argo_decision="apply" ;; *) _argo_decision="refuse" ;; esac
+    else
+      err "no terminal to ask on — re-run with OGSR_ADOPTED_ARGOCD_MEMORY=apply to consent up front."
+      _argo_decision="refuse"
+    fi
+  fi
+  if [[ "$_argo_decision" != "apply" ]]; then
+    err "not installing. Nothing on this cluster has been changed."
+    err "   To proceed: OGSR_ADOPTED_ARGOCD_MEMORY=apply ./bootstrap/install.sh — or raise it yourself first:"
+    err "     oc -n openshift-gitops patch argocd openshift-gitops --type merge \\"
+    die "       -p '{\"spec\":{\"controller\":{\"resources\":{\"limits\":{\"memory\":\"${ARGO_TARGET_MEM}\"},\"requests\":{\"memory\":\"2Gi\"}}}}}'"
+  fi
+  export OGSR_ADOPTED_ARGOCD_MEMORY="apply"
+  ok "adopted Argo CD controller: consent given — it is raised to ${ARGO_TARGET_MEM} at step [1/6]"
+fi
+
 info "[0/6] capturing uninstall-state (prior cluster state for a non-destructive uninstall)"
 oc apply -f - >/dev/null <<EOF
 apiVersion: v1
