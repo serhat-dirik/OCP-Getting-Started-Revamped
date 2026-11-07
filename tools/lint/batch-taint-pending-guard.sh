@@ -418,7 +418,10 @@ canary_mutate() {  # <id> → mutated function text on stdout, real function tex
            {print}' ;;
     ambiguous-also-flagged)
       # The attribution logic still WARNS, but counts the pod anyway — the false positive returns.
-      awk '/^      ambiguous=\$\(\(ambiguous \+ 1\)\)$/{print "      ambiguous=$((ambiguous + 1)); flagged=$((flagged + 1))  # CANARY: counted anyway"; next}
+      # Counting a pod means the increment AND the recheck list: the recheck recounts from that list,
+      # so a mutant that only bumps the counter is erased by it and proves nothing (bash 5, CI
+      # 2026-11-07). macOS bash 3.2 hid this by crashing on the empty list instead.
+      awk '/^      ambiguous=\$\(\(ambiguous \+ 1\)\)$/{print "      ambiguous=$((ambiguous + 1)); flagged=$((flagged + 1)); flagged_pods+=(\"${ns}/${pod}\")  # CANARY: counted anyway"; next}
            {print}' ;;
     selector-ignored)
       awk '$0=="    [[ -z \"$miss\" ]] || continue"{print "    : # CANARY: the nodeSelector no longer excludes a pod"; next}

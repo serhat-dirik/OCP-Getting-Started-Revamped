@@ -741,6 +741,7 @@ assert_no_batch_taint_pending() {
   local total=0 flagged=0 ambiguous=0 ns pod evt sel kv miss
   local -a flagged_pods=()
   local node_labels
+  # shellcheck disable=SC2016  # $k/$v are go-template variables, not shell ones
   node_labels="$(oc get node "$BATCH_NODE" -o go-template='{{range $k,$v := .metadata.labels}}{{$k}}={{$v}}{{"\n"}}{{end}}' 2>/dev/null || true)"
   while read -r ns pod; do
     [[ -n "$pod" ]] || continue
@@ -755,6 +756,7 @@ assert_no_batch_taint_pending() {
     # blamed on the taint of a worker they could never use, and a healthy install exited 1.
     # ponytail: nodeSelector only — required nodeAffinity is not evaluated; add it if a pod using it
     # is ever misattributed.
+    # shellcheck disable=SC2016  # $k/$v are go-template variables, not shell ones
     sel="$(oc get pod "$pod" -n "$ns" -o go-template='{{range $k,$v := .spec.nodeSelector}}{{$k}}={{$v}}{{"\n"}}{{end}}' 2>/dev/null || true)"
     miss=""
     while IFS= read -r kv; do
