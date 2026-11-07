@@ -37,6 +37,12 @@
 #       [d/rc] (not attributable to us), but still surfaces a warning naming the competing taint
 #       [d/named] — proof the attribution logic the header comment describes is real, not just
 #       asserted in prose.
+#   (e) THE 2026-11-06 FALSE ALARM: a Pending pod cites an untolerated taint, our taint is the only
+#       one on the batch node, but the pod's nodeSelector excludes that node anyway (console pods,
+#       control-plane only, mid-rollout on cluster-zvqzn) → returns 0 [e/rc]. The scheduler reports
+#       each node under the first filter that rejects it, so the message alone cannot tell.
+#   (f) a pod flagged on the first pass is gone or Running at the one recheck (a rollout's new pod
+#       waiting seconds for the old one to free its node) → returns 0 [f/rc].
 #
 # ON THE `oc`-IN-A-SUBSHELL TRAP (case 0). `oc` calls inside this function are read via `$(oc …)` and
 # `<(oc …)` — both fork subshells — so a stub that counts "was I called" in an ordinary shell variable
@@ -108,6 +114,7 @@ FN_ASSERT="assert_no_batch_taint_pending"
 run_batch() {  # <func_file> <scenario: skip|zero|tolerates|blocked|ambiguous> → banner, RC=, CALLS=
   local func_file="$1" scenario="$2" harness count_file
   local tainted=true node_taints="" pending_pods="" tolerations="" event_msg=""
+  local node_labels="" pod_selector="" recheck_phase="Pending"
   case "$scenario" in
     skip)
       tainted=false
@@ -135,6 +142,21 @@ run_batch() {  # <func_file> <scenario: skip|zero|tolerates|blocked|ambiguous> �
       tolerations=""
       event_msg="0/2 nodes are available: 1 Insufficient memory, 1 node(s) had untolerated taint(s)."
       ;;
+    selector)
+      # Console shape: our taint alone on the node, but the pod only fits control-plane nodes.
+      node_taints="workshop.redhat.com/pool=NoSchedule"
+      node_labels=$'node-role.kubernetes.io/worker=\nworkshop.redhat.com/pool=batch'
+      pod_selector="node-role.kubernetes.io/master="
+      pending_pods=$'openshift-console console-64c6cb5d6c-7ps66'
+      event_msg="0/6 nodes are available: 1 node(s) had untolerated taint(s), 2 node(s) didn't match Pod's node affinity/selector, 3 node(s) didn't match pod anti-affinity rules."
+      ;;
+    transient)
+      # The incident shape on the first pass, but the pod is Running by the recheck.
+      node_taints="workshop.redhat.com/pool=NoSchedule"
+      pending_pods=$'ns-t pod-t'
+      event_msg="0/2 nodes are available: 1 Insufficient memory, 1 node(s) had untolerated taint(s)."
+      recheck_phase="Running"
+      ;;
     ambiguous)
       # the batch node ALSO carries an unrelated taint (e.g. disk-pressure) — not attributable to us.
       node_taints=$'workshop.redhat.com/pool=NoSchedule\nnode.kubernetes.io/disk-pressure=NoSchedule'
@@ -155,12 +177,16 @@ run_batch() {  # <func_file> <scenario: skip|zero|tolerates|blocked|ambiguous> �
     echo "PENDING_PODS=$(printf '%q' "$pending_pods")"
     echo "TOLERATIONS=$(printf '%q' "$tolerations")"
     echo "EVENT_MSG=$(printf '%q' "$event_msg")"
+    echo "NODE_LABELS=$(printf '%q' "$node_labels")"
+    echo "POD_SELECTOR=$(printf '%q' "$pod_selector")"
+    echo "RECHECK_PHASE=$(printf '%q' "$recheck_phase")"
     echo "CALL_COUNT_FILE='${count_file}'"
     cat <<'STUBS'
 ok()   { echo "ok: $*"; }
 err()  { echo "err: $*" >&2; }
 warn() { echo "warn: $*" >&2; }
 info() { echo "info: $*"; }
+sleep() { :; }   # the one recheck waits 60s; the harness must not
 # Call counter is a FILE, not a variable: every branch below is reached only via `$(oc …)` or
 # `<(oc …)`, both subshells — a variable increment here would never be visible to the caller.
 oc() {
@@ -171,6 +197,9 @@ oc() {
     *"status.phase=Pending"*) printf '%s\n' "$PENDING_PODS" ;;
     *".spec.tolerations"*) printf '%s' "$TOLERATIONS" ;;
     *"reason=FailedScheduling"*) printf '%s' "$EVENT_MSG" ;;
+    *".metadata.labels"*)  printf '%s\n' "$NODE_LABELS" ;;
+    *".spec.nodeSelector"*) printf '%s\n' "$POD_SELECTOR" ;;
+    *"{.status.phase}"*)   printf '%s' "$RECHECK_PHASE" ;;
     *) : ;;
   esac
   return 0
@@ -288,6 +317,23 @@ check_batch_taint_gate() {  # <func_file> → 0 correct, 1 wrong, 2 harness brok
     rc=1
   fi
 
+  # (e) the pod's nodeSelector excludes the batch node — the taint cannot be what blocks it.
+  out="$(run_batch "$func_file" selector)"
+  if ! printf '%s\n' "$out" | grep -qx 'RC=0'; then
+    bad "[e/rc] a Pending pod whose nodeSelector excludes the batch node must return 0 — measured RC=$(field "$out" RC)."
+    note "    the 2026-11-06 cluster-zvqzn false alarm: control-plane-only console pods blamed on a worker's taint."
+    note "    transcript: $(printf '%s' "$out" | tr '\n' ' ')"
+    rc=1
+  fi
+
+  # (f) flagged on the first pass, Running at the recheck — transient, not starved.
+  out="$(run_batch "$func_file" transient)"
+  if ! printf '%s\n' "$out" | grep -qx 'RC=0'; then
+    bad "[f/rc] a pod that is no longer Pending at the recheck must return 0 — measured RC=$(field "$out" RC)."
+    note "    transcript: $(printf '%s' "$out" | tr '\n' ' ')"
+    rc=1
+  fi
+
   if [[ "$rc" -eq 0 ]]; then
     ok "batch-taint Pending check: skip touches oc zero times; zero/tolerating pods pass cleanly; a"
     note "pod blocked solely by our taint FAILS naming the real incident; a co-tainted node does not"
@@ -373,6 +419,12 @@ canary_mutate() {  # <id> → mutated function text on stdout, real function tex
     ambiguous-also-flagged)
       # The attribution logic still WARNS, but counts the pod anyway — the false positive returns.
       awk '/^      ambiguous=\$\(\(ambiguous \+ 1\)\)$/{print "      ambiguous=$((ambiguous + 1)); flagged=$((flagged + 1))  # CANARY: counted anyway"; next}
+           {print}' ;;
+    selector-ignored)
+      awk '$0=="    [[ -z \"$miss\" ]] || continue"{print "    : # CANARY: the nodeSelector no longer excludes a pod"; next}
+           {print}' ;;
+    recheck-ignored)
+      awk '$0=="    flagged=$still"{print "    : # CANARY: the recheck result is thrown away"; next}
            {print}' ;;
     ambiguity-not-named)
       awk '/is Pending citing an untolerated taint/{print "    warn \"  ${ns}/${pod} is Pending citing an untolerated taint (CANARY: the competing taints are no longer named): ${evt}\""; next}
@@ -485,6 +537,8 @@ pass-message-printed-anyway|[c/no-pass]|the pass summary prints alongside the fa
 incident-not-named|[c/incident]|the failure stops naming the RHACS central-db incident
 ambiguous-also-flagged|[d/rc]|a co-tainted node is hard-failed again — the false positive returns
 ambiguity-not-named|[d/named]|the ambiguity warning stops naming the competing taint
+selector-ignored|[e/rc]|THE 2026-11-06 SHAPE: a pod that can never use the batch node is blamed on its taint
+recheck-ignored|[f/rc]|a transient Pending pod fails the install despite the recheck
 CANARIES
 
   ok "self-test ok — real tree clean (rc=0); ${n} canaries + the empty-extraction path, each caught by"

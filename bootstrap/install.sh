@@ -738,13 +738,30 @@ assert_no_batch_taint_pending() {
     other_taints+="${_tkey}:${_teffect} "
   done < <(oc get node "$BATCH_NODE" -o jsonpath='{range .spec.taints[*]}{.key}{"="}{.effect}{"\n"}{end}' 2>/dev/null)
 
-  local total=0 flagged=0 ambiguous=0 ns pod evt
+  local total=0 flagged=0 ambiguous=0 ns pod evt sel kv miss
+  local -a flagged_pods=()
+  local node_labels
+  node_labels="$(oc get node "$BATCH_NODE" -o go-template='{{range $k,$v := .metadata.labels}}{{$k}}={{$v}}{{"\n"}}{{end}}' 2>/dev/null || true)"
   while read -r ns pod; do
     [[ -n "$pod" ]] || continue
     total=$((total + 1))
     if oc get pod "$pod" -n "$ns" -o jsonpath='{.spec.tolerations[*].key}' 2>/dev/null | grep -q "$POOL_LABEL_KEY"; then
       continue   # this pod opted in to the batch node; not this check's concern
     fi
+    # Never a candidate: a pod whose nodeSelector the batch node does not satisfy could not land there
+    # with or without our taint. The message cannot tell us — the scheduler reports each node under the
+    # FIRST filter that rejects it, and TaintToleration runs before NodeAffinity. Seen on cluster-zvqzn
+    # (2026-11-06): console pods (nodeSelector node-role.kubernetes.io/master) Pending mid-rollout were
+    # blamed on the taint of a worker they could never use, and a healthy install exited 1.
+    # ponytail: nodeSelector only — required nodeAffinity is not evaluated; add it if a pod using it
+    # is ever misattributed.
+    sel="$(oc get pod "$pod" -n "$ns" -o go-template='{{range $k,$v := .spec.nodeSelector}}{{$k}}={{$v}}{{"\n"}}{{end}}' 2>/dev/null || true)"
+    miss=""
+    while IFS= read -r kv; do
+      [[ -n "$kv" ]] || continue
+      grep -Fxq -- "$kv" <<<"$node_labels" || miss="$kv"
+    done <<<"$sel"
+    [[ -z "$miss" ]] || continue
     evt="$(oc get events -n "$ns" --field-selector "involvedObject.name=${pod},reason=FailedScheduling" \
             -o jsonpath='{.items[-1:].message}' 2>/dev/null || true)"
     grep -qi 'untolerated taint' <<<"$evt" || continue
@@ -753,10 +770,29 @@ assert_no_batch_taint_pending() {
       warn "  ${ns}/${pod} is Pending citing an untolerated taint, but ${BATCH_NODE} also carries ${other_taints}— not attributable to ${POOL_LABEL_KEY}: ${evt}"
     else
       flagged=$((flagged + 1))
-      err "  ${ns}/${pod} is Pending and ${POOL_LABEL_KEY} is the ONLY blocking taint on ${BATCH_NODE} (pod does not tolerate it): ${evt}"
+      flagged_pods+=("${ns}/${pod}")
+      warn "  ${ns}/${pod} is Pending and ${POOL_LABEL_KEY} is the ONLY blocking taint on ${BATCH_NODE} (pod does not tolerate it): ${evt}"
     fi
   done < <(oc get pods -A --field-selector=status.phase=Pending \
              -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' 2>/dev/null)
+
+  # One recheck before failing: a rollout's new pod is Pending for seconds while the old one frees its
+  # node, and failing a whole install for that is a false alarm. A pod our taint really starves is
+  # still Pending a minute later.
+  if [[ "$flagged" -gt 0 ]]; then
+    info "batch-taint Pending-pod check: ${flagged} pod(s) flagged — rechecking in 60s (a rollout's pod is Pending only briefly)"
+    sleep 60
+    local still=0 fp
+    for fp in "${flagged_pods[@]}"; do
+      if [[ "$(oc get pod "${fp#*/}" -n "${fp%%/*}" -o jsonpath='{.status.phase}' 2>/dev/null || true)" == "Pending" ]]; then
+        still=$((still + 1))
+        err "  ${fp} is still Pending after 60s, blocked by ${POOL_LABEL_KEY} on ${BATCH_NODE}"
+      else
+        ok "  ${fp} is no longer Pending — it was transient, not starved by the taint"
+      fi
+    done
+    flagged=$still
+  fi
 
   if [[ "$total" -eq 0 ]]; then
     ok "batch-taint Pending-pod check: inspected 0 Pending pods cluster-wide — nothing to flag"
