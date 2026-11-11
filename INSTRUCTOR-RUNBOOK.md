@@ -27,26 +27,8 @@ has its own timing table, pre-flight checklist and watchouts.
 
 1. **Install and verify:** [INSTALL.md › Install](INSTALL.md#2-install), steps 1–7.
 2. **Run the pre-flight checklist** on the instructor page of every module in your agenda.
-3. **Warm up the slow parts.** The first run of these is much slower than a warm one:
-
-| Module | Do this | Why |
-|---|---|---|
-| Platform Orientation & First App | Deploy and delete the claims image once as a sample user | First pull of the 410 MB image takes ~18 s |
-| Ways to Build & Deliver Apps | `adm solve build-deliver --user <u>` | The first S2I build takes up to ~11 min on a cold node (~4.5 min warm) |
-| Dev Spaces & the Inner Loop | Start one workspace | Cold start ~85 s, warm ~20 s. For a large event, enable `imagePuller` on the CheCluster |
-| Pipelines Fundamentals | `adm solve pipelines-fundamentals --user <u>` (one full run: 8–21 min) | The Maven cache is per attendee, so this warms only that user. Exercise 2 is designed to fill everyone else's slow first run. |
-| Trusted Software Supply Chain | Run the seeded pipeline once as a sample user, ~1 hour before | RHACS needs ~1 hour after install before the Log4Shell policy fires. Starting this module also takes ~8 min (it builds a signed image). |
-| Application Security Testing | Have attendees start their first run before you teach the concept. For the demo version, stage its six finished PipelineRuns days ahead (~66 min of pipeline). | Nothing is cached, so hands-on takes 85–105 min, a double slot. The demo version takes ~15 min of room time. |
-| Multi-Tenancy & Workload Security | `oc run` the `openshift/tools` image once, then delete it | Exercises 1 and 5 otherwise stall up to ~20 s on the image pull |
-| Developer Hub & Golden Paths | Sign in as guest and open the Catalog filtered to `parasol-claims` | The first step becomes one glance |
-| GitOps Fundamentals / at Scale | `adm solve <slug> --user <u>` | A ready opening visual. It performs a real sync, so a later rehearsal syncs a second time. |
-| Securing Apps with Keycloak | Check the `sso-workshop` Keycloak and the attendee realms are up | The module depends on both. Do not let attendees fix exercise 4's deliberate break early. |
-| Service Mesh 3 & Advanced Gateways | Open Kiali on a second screen, signed in, project selected | It is the visual for the traffic steps |
-| Resilience, Multi-Cluster & DR | `ws reset resilience-multicluster-dr` | Too slow to run live |
-| Serverless Zero-to-Hero | Leave the service idle until it is at zero pods (~1 min) | Otherwise the cold start does not happen |
-| Eventing & Serverless Workflows | `curl` both services once, unless you want the ~14 s cold wake as a step | Avoids a cold start mid-sentence |
-| Application Modernization | The evening before, stage three MTA applications: `parasol-legacy-claims-demo`, `parasol-legacy-claims-fixed-demo`, `parasol-claims-demo` (recipe: the Prep block on the module's Demo page). Start a Dev Spaces workspace. | MTA keeps one report per application, so before-and-after needs three. Keep the `-demo` suffix: the Hub is shared with attendees. Allow 10–15 min of Hub time. |
-| AI-Assisted Development | Check the MaaS key works. Run exercise 3 on your model. Do one throwaway `ask-agent` diagnosis just before you present. | Models differ in whether they carry out writes. The first call of the day is the slowest. |
+3. **Running Application Modernization's demo, or a new AI model?** See
+   [Appendix: module preparation](#appendix-module-preparation).
 
 ---
 
@@ -77,7 +59,7 @@ No login refresh is needed. Each attendee's terminal logs in from their own brow
 - The stated time is for a mixed room. Confident attendees finish in about half; newcomers need
   about a third longer.
 - A module that runs long is almost always waiting on a cold image, build or workspace. That is
-  what the [warm-up table](#2-day-before) prevents.
+  what [module preparation](#appendix-module-preparation) prevents.
 
 **Instructor-only exercises.** Nine modules have one exercise you perform yourself, because it
 changes something cluster-wide. Attendees see the result.
@@ -145,3 +127,15 @@ oc get applications -n openshift-gitops
 - Contents of each attendee's Keycloak realm.
 - Attendee home directories in the cockpit.
 - Gitea tokens and SSH keys on the kept accounts.
+
+---
+
+## Appendix: module preparation
+
+Only these modules need anything from you before the session.
+
+| Module | When | Do this |
+|---|---|---|
+| Application Modernization | You run its demo version | The evening before, stage three MTA applications: `parasol-legacy-claims-demo`, `parasol-legacy-claims-fixed-demo`, `parasol-claims-demo` (recipe: the Prep block on the module's Demo page). Allow 10–15 min of Hub time. Keep the `-demo` suffix: the Hub is shared with attendees. |
+| AI-Assisted Development | You changed the AI model | Run exercise 3 once on the new model. Models differ in whether they carry out writes. |
+| Ways to Build, Pipelines Fundamentals, Application Security Testing, Trusted Software Supply Chain, Dev Spaces | Until the install pre-warms them (in progress) | Run each once as a sample user the day before (`tools/ws/adm solve <slug> --user <u>`). The first build or workspace start is several minutes slower. |
