@@ -781,6 +781,10 @@ purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve s
   # non-mesh clusters (the istio CRDs are absent).
   oc delete virtualservices.networking.istio.io,destinationrules.networking.istio.io,gateways.networking.istio.io,serviceentries.networking.istio.io,sidecars.networking.istio.io,envoyfilters.networking.istio.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
   oc delete authorizationpolicies.security.istio.io,peerauthentications.security.istio.io,requestauthentications.security.istio.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
+  # Gateway API objects aren't in `oc delete all` either. An attendee's own Gateway (networking-dev-devops
+  # lets them create one) survives reset, istiod rebuilds its proxy pods, and the module's entry check
+  # "no Gateway yet" goes red. Routes and grants go with it so nothing dangles off a deleted Gateway.
+  oc delete gateways.gateway.networking.k8s.io,httproutes.gateway.networking.k8s.io,grpcroutes.gateway.networking.k8s.io,referencegrants.gateway.networking.k8s.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
   # Knative Serving/Eventing CRs the serverless-zero-to-hero attendee creates in {user}-dev aren't in
   # `oc delete all`; a leftover ksvc (Service→Configuration/Revision/Route cascade), Broker, Trigger or
   # PingSource survives reset and red-fails the next entry verify ("a ksvc already exists / eventing
@@ -813,6 +817,11 @@ purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve s
     for name in $(oc get "$kind" -n "$ns" -o name 2>/dev/null); do
       case "$name" in
         */builder-dockercfg-*|*/default-dockercfg-*|*/deployer-dockercfg-*|*/builder-token-*|*/default-token-*|*/deployer-token-*|*/kube-root-ca.crt|*/openshift-service-ca.crt) ;;
+        # Workshop-layer (Argo-owned) Gateway proxy sizing — gitops/workshop-config per-user-gateway-params.yaml.
+        configmap/ogsr-gateway-proxy) ;;
+        # OpenShift Pipelines injects these CA bundles into every namespace ONCE and never recreates them;
+        # purged, every later Tekton push to the internal registry fails x509 (measured, user10-dev).
+        configmap/config-service-cabundle|configmap/config-trusted-cabundle) ;;
         */ws-entry-${keep}) [[ -n "$keep" ]] || oc delete "$name" -n "$ns" --wait=false >/dev/null 2>&1 || true;;
         */ws-entry-*) oc delete "$name" -n "$ns" --wait=false >/dev/null 2>&1 || true;;
         *) oc delete "$name" -n "$ns" --wait=false >/dev/null 2>&1 || true;;
