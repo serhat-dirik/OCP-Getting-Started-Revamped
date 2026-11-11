@@ -1,10 +1,19 @@
-# ENTRY STATE: the cohort's pre-scanned, Chains-signed parasol-claims:latest, COPIED into {user}-cicd.
+# ENTRY STATE: the cohort's pre-scanned, Chains-signed image, COPIED into {user}-cicd as
+# parasol-claims-trusted:latest.
+#
+# ITS OWN REPOSITORY, NOT parasol-claims: the install's ClusterImagePolicy ogsr-signed-parasol-claims
+# (workshop-config trusted-image-policy.yaml) scopes userN-cicd/parasol-claims-trusted and accepts only
+# signatures whose identity is {{ .Values.trustedImageNamespace }}/parasol-claims — the repository Chains
+# signed it in (cosign verify on the copy, cluster-5vqxc 2026-11-12: docker-reference =
+# …/ogsr-supply-chain/parasol-claims). userN-cicd/parasol-claims stays unscoped because Pipelines
+# Fundamentals and App Security Testing build and deploy their own Chains-signed :latest there, and no
+# one signedIdentity covers both. This module's seeded build still goes to parasol-claims:candidate.
 #
 # The clean `main` image is built ONCE at install (gitops/workshop-config/templates/trusted-image.yaml,
 # namespace {{ .Values.trustedImageNamespace }}): build → SBOM → Chains signature + SLSA attestation →
 # RHACS gate. This hook copies the image and its two Chains artifacts (sha256-<digest>.sig and .att)
 # into this attendee's registry with `oc image mirror` — same digest, so `cosign verify` and
-# `cosign verify-attestation` against {user}-cicd/parasol-claims pass exactly as they did when every
+# `cosign verify-attestation` against {user}-cicd/parasol-claims-trusted pass exactly as they did when every
 # prep built its own (measured on cluster-5vqxc 2026-11-12: copy ~1s; a per-user build blocked prep
 # ~5 min there, ~8 min on smaller clusters). The attendee's own seeded build still runs in the lab, to
 # the throwaway :candidate tag.
@@ -46,7 +55,7 @@ spec:
             - name: SRC
               value: image-registry.openshift-image-registry.svc:5000/{{ .Values.trustedImageNamespace }}/parasol-claims
             - name: DST
-              value: image-registry.openshift-image-registry.svc:5000/{{ .Values.user }}-cicd/parasol-claims
+              value: image-registry.openshift-image-registry.svc:5000/{{ .Values.user }}-cicd/parasol-claims-trusted
           resources:
             requests: {cpu: 10m, memory: 256Mi}
             limits: {memory: 512Mi}
@@ -56,12 +65,12 @@ spec:
               set -euo pipefail
               oc registry login --registry=image-registry.openshift-image-registry.svc:5000 --skip-check --to=/tmp/auth.json >/dev/null
               m() { oc image mirror -a /tmp/auth.json --insecure=true "$@" >/dev/null 2>&1; }
-              echo "▶ copying the cohort's scanned, Chains-signed parasol-claims:latest into ${DST%/*}…"
+              echo "▶ copying the cohort's scanned, Chains-signed parasol-claims:latest into ${DST}…"
               for _ in $(seq 1 140); do
                 if m "${SRC}:latest=${DST}:latest"; then
-                  T="$(oc get istag parasol-claims:latest -o jsonpath='{.image.metadata.name}' | tr ':' '-')"
+                  T="$(oc get istag parasol-claims-trusted:latest -o jsonpath='{.image.metadata.name}' | tr ':' '-')"
                   if m "${SRC}:${T}.sig=${DST}:${T}.sig" "${SRC}:${T}.att=${DST}:${T}.att"; then
-                    echo "  ✓ parasol-claims:latest + ${T}.sig + ${T}.att (same digest as the install-time build)"
+                    echo "  ✓ parasol-claims-trusted:latest + ${T}.sig + ${T}.att (same digest as the install-time build)"
                     exit 0
                   fi
                 fi

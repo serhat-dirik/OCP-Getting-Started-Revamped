@@ -5,14 +5,14 @@
 #          contract) · Gitea fork answers with its seed-vulnerable branch · the curated parasol-tasks
 #          acs-image-check task is reachable · AND the PRE-SCANNED trust artifact: the install builds the
 #          CLEAN main branch ONCE in ${TRUSTED_NS} (workshop-config trusted-image.yaml) and every prep copies
-#          the Chains-signed parasol-claims:latest (with its .sig + .att tags) into {user}-cicd, so the
+#          the Chains-signed image (with its .sig + .att tags) into {user}-cicd as parasol-claims-trusted, so the
 #          image is present and the shared run passed the scan gate BEFORE the attendee starts — that
 #          signed image is what the trust lab (cosign verify → attestation → admission)
 #          reads, so it is asserted in BOTH modes (owner's 2026-07-18 pre-scanned-image rebalance).
 #          ONLY in --entry-only mode: the fork's seed-vulnerable branch still carries the seeded log4j-core
 #          CVE (the attendee's optional SBOM-fix beat removes it, so this entry-materialization check is
 #          NOT run in full mode — template rule 14, mode-split).
-#   End:   the trust end state SURVIVES a completed lab — the signed parasol-claims:latest, Chains signing,
+#   End:   the trust end state SURVIVES a completed lab — the signed parasol-claims-trusted:latest, Chains signing,
 #          and the scan-gate-passed run are all still present, so those three are asserted in both modes.
 #          NB: "an image was built" alone is NOT the signal there: a scan-BLOCKED vulnerable run also
 #          builds+signs an image, so assert a run that SUCCEEDED the gate (⟺ clean source) plus the signed
@@ -89,14 +89,16 @@ supply_chain_run_succeeded() {
     -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Succeeded")].status}{"\n"}{end}' || return 1
   grep -qx True <<<"$OC_OUT"
 }
-# The pre-scanned trust artifact is present: the ImageStream carries parasol-claims:latest PLUS the two
-# Chains-emitted tags derived from its digest — sha256-<digest>.sig (signature) and .att (SLSA attestation).
-# This is what the trust lab's cosign verify / verify-attestation / admission beats read; the prep copy hook
-# produces it at prep and a completed lab leaves it intact (the attendee's red beat uses a :candidate tag).
+# The pre-scanned trust artifact is present: the parasol-claims-trusted ImageStream carries :latest PLUS the
+# two Chains-emitted tags derived from its digest — sha256-<digest>.sig (signature) and .att (SLSA
+# attestation). Its own repository, not parasol-claims: the install's ClusterImagePolicy scopes exactly
+# this one (entry-state trusted-image-copy.yaml says why). This is what the trust lab's cosign verify /
+# verify-attestation / admission beats read; the prep copy hook produces it at prep and a completed lab
+# leaves it intact (the attendee's red beat builds parasol-claims:candidate, a different repository).
 # Same three-outcome treatment, and for the same reason: `tags="$(oc … 2>/dev/null || true)"` makes an
 # ImageStream that could not be read indistinguishable from one carrying no signed tags.
 signed_latest_image_present() {
-  oc_read get imagestream parasol-claims -n "$1" -o jsonpath='{range .status.tags[*]}{.tag}{"\n"}{end}' || return 1
+  oc_read get imagestream parasol-claims-trusted -n "$1" -o jsonpath='{range .status.tags[*]}{.tag}{"\n"}{end}' || return 1
   grep -qx 'latest' <<<"$OC_OUT" && grep -q '\.sig$' <<<"$OC_OUT" && grep -q '\.att$' <<<"$OC_OUT"
 }
 
@@ -161,9 +163,10 @@ candidate_image_present() {
   oc_read get imagestream parasol-claims -n "$1" -o jsonpath='{range .status.tags[*]}{.tag}{"\n"}{end}' || return 1
   grep -qx 'candidate' <<<"$OC_OUT"
 }
-# …and Chains signed it too — the second .sig/.att pair the lab has the attendee count in exercises 3
-# and 5 ("Chains signs EVERY build, including the failed one — who-built-it is not is-it-clean").
-# >=2, never ==2: the Challenge has the attendee rebuild :candidate, and any extra build adds a pair.
+# …and Chains signed it too — the .sig/.att pair beside :candidate that exercise 3 has the attendee read
+# ("Chains signs EVERY build, including the failed one — who-built-it is not is-it-clean"). The trusted
+# image's pair lives in parasol-claims-trusted, so ANY pair here is the attendee's own build's.
+# >=1, never ==1: the Challenge has the attendee rebuild :candidate, and any extra build adds a pair.
 candidate_signed() {
   oc_read get imagestream parasol-claims -n "$1" -o jsonpath='{range .status.tags[*]}{.tag}{"\n"}{end}' || return 1
   local sigs atts
@@ -173,7 +176,7 @@ candidate_signed() {
   atts="$(grep -c '\.att$' <<<"$OC_OUT" || true)"
   # if/then, not a bare `(( … ))`: a false arithmetic expression returns 1, and as a function's LAST
   # statement that makes the function return 1 — fatal under `set -e` the day someone calls this bare.
-  if (( sigs >= 2 && atts >= 2 )); then return 0; fi
+  if (( sigs >= 1 && atts >= 1 )); then return 0; fi
   return 1
 }
 # All three facts exercise 1 leaves behind, together — the "is the outcome already there?" question the
@@ -217,7 +220,7 @@ check "curated library task acs-image-check reachable"     oc get tasks.tekton.d
 # --- the pre-scanned trust artifact (built once at install, copied in at prep; survives the lab) ---------
 check "install-time supply-chain run PASSED the scan gate (${TRUSTED_NS})" supply_chain_run_succeeded "$TRUSTED_NS" || hint "the install builds the CLEAN main branch once in ${TRUSTED_NS}; if this is red that build is still running or failed — watch: tkn pipelinerun logs --last -n ${TRUSTED_NS} (instructor: re-sync the workshop-config app to retry it)"
 check "Tekton Chains signed that build (signed TaskRun present)"   signed_taskrun_exists "$TRUSTED_NS"       || hint "Chains signs a few seconds after the build TaskRun completes — re-check in a moment"
-check "pre-scanned signed image parasol-claims:latest (+ .sig/.att)" signed_latest_image_present "$NS"         || hint "the signed image was not copied into ${NS} — re-materialize: ws prep trusted-supply-chain --user ${USER_NAME} --yes (copies it from ${TRUSTED_NS} in seconds)"
+check "pre-scanned signed image parasol-claims-trusted:latest (+ .sig/.att)" signed_latest_image_present "$NS"         || hint "the signed image was not copied into ${NS} — re-materialize: ws prep trusted-supply-chain --user ${USER_NAME} --yes (copies it from ${TRUSTED_NS} in seconds)"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # Entry-only: the seeded flaw is asserted ONLY here. The trusted-supply-chain lab's optional SBOM-fix beat
@@ -264,7 +267,7 @@ else
             || hint "the seeded build concluded without the gate failing it. If you did the optional SBOM-fix beat and rebuilt, the gate now legitimately passes — re-seed with: ws reset trusted-supply-chain --user ${USER_NAME}. Otherwise read the run: tkn pipelinerun logs --last -n ${NS}"
           check "exercise 1: the refused image reached your registry as parasol-claims:candidate" candidate_image_present "$NS" \
             || hint "build-image must succeed before acs-scan can refuse it — if your run died earlier than the scan, start it again from the lab's manifest (it raises per-Task memory; a run started from the console's Start form is killed mid-build)"
-          check "exercises 3+5: Chains signed the refused build too (a second .sig/.att pair)" candidate_signed "$NS" \
+          check "exercise 3: Chains signed the refused build too (a .sig/.att pair beside :candidate)" candidate_signed "$NS" \
             || hint "Chains signs a few seconds after each build TaskRun completes — re-check: oc get imagestream parasol-claims -n ${NS} -o jsonpath='{range .status.tags[*]}{.tag}{\"\\n\"}{end}'"
         else
           # 6–12 minutes, longer on a cold node. An attendee who verifies while the logs stream is not
