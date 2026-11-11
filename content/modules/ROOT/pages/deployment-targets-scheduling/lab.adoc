@@ -567,10 +567,9 @@ oc rollout status deploy/parasol-claims -n $NS --timeout=120s
 oc get pods -n $NS -l app=parasol-claims --field-selector=status.phase=Running -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | while read n; do echo "$n zone=$(oc get node $n -o jsonpath='{.metadata.labels.workshop\.redhat\.com/zone}')"; done
 ----
 
-// Measured TWICE on a live cluster, 2026-07: the post-rollout distribution came back a:1 b:2 c:0 — a
-// genuine maxSkew:1 violation, not a copy error. See the IMPORTANT box below for why, and for the field
-// that would deliver the even guarantee instead.
-.Expected output (a sample shape — not the even one-per-zone you might expect from `maxSkew: 1`)
+// The spread varies run to run. Measured twice in 2026-07 as a:1 b:2 c:0 (the sample below); measured
+// even (a:1 b:1 c:1) by the 2026-11 smoke run and again as user2 on 2026-11-12. See the IMPORTANT box.
+.Expected output (a sample — the spread varies: you may get one replica per zone, or a skew like this one)
 [source,texinfo]
 ----
 control-plane-2 zone=b
@@ -579,9 +578,9 @@ control-plane-3 zone=a
 ----
 
 [IMPORTANT]
-.`ScheduleAnyway` is a preference, not a guarantee — this is why the layout above can skew
+.`ScheduleAnyway` is a preference, not a guarantee — this is why the layout can skew
 ====
-That output is a genuine capture, not a mistake: measured twice on a live cluster, this same patch settled as `a:1 b:2 c:0` — one zone holding two replicas, another holding none — even with `maxSkew: 1` set.
+The spread varies from run to run. Some runs settle one replica per zone; others skew, like the sample above (`a:1 b:2 c:0`) — one zone holding two replicas, another none — even with `maxSkew: 1` set. Both are correct behaviour.
 
 Here's why.
 `whenUnsatisfiable: ScheduleAnyway` scores each pod placement *once*, at the moment the scheduler admits it, against the zone counts visible *right then* — it never revisits or rebalances a pod once it is running.
@@ -740,15 +739,19 @@ Confirm it landed on the batch pool node — and that the node it landed on real
 [source,sh,role=execute]
 ----
 oc get pods -n $NS -l app=statement-batch -o wide
-BN=$(oc get pods -n $NS -l app=statement-batch --field-selector=status.phase=Running -o jsonpath='{.items[0].spec.nodeName}')
+BN=$(oc get pods -n $NS -l app=statement-batch --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].spec.nodeName}')
 echo "landed on: $BN  pool-label=$(oc get node $BN -o jsonpath='{.metadata.labels.workshop\.redhat\.com/pool}')"
 ----
 
-.Expected output
+// Re-captured as user2 on OCP 4.22.22, 2026-11-12. The old pod stays Terminating for up to its 30 s grace
+// period after `oc rollout status` returns, and its phase is still Running, so a status.phase=Running
+// selector can pick it. Newest-by-creationTimestamp always picks the pod the rollout just created.
+.Expected output (the old pod may still show `Terminating` for up to 30 s; the `landed on` line reads the newest pod)
 [source,texinfo]
 ----
-NAME                               READY   STATUS    NODE
-statement-batch-667dc64bc7-zcjxm   1/1     Running   worker-1
+NAME                               READY   STATUS        NODE
+statement-batch-6d8475b6c9-ln99k   1/1     Running       worker-1
+statement-batch-8dfd47749-9szbs    1/1     Terminating   control-plane-3
 landed on: worker-1  pool-label=batch
 ----
 
@@ -761,7 +764,7 @@ A toleration without a selector would *allow* the batch node but not *choose* it
 ****
 
 == 5. Make the rollout zero-downtime
-⏱ *~10 min* · measure the drops, diagnose the real cause, fix it at the source, and protect with a PDB
+⏱ *~15 min* · measure the drops, diagnose the real cause, fix it at the source, and protect with a PDB
 
 A rollout replaces every API pod. Done carelessly it drops requests; done right a customer never notices.
 First, *measure* a default roll. This one-shot block drives a fast probe at the API from the load generator while a rollout runs, and tallies any request that isn't a clean `2xx`:
@@ -865,13 +868,14 @@ pod/parasol-claims-655664d848-vw86s condition met
 There it is. A *single* pod restart wiped your write and reverted `CLM-1001` to the seed `UnderReview` — because that one boot ran `drop-and-create` and rebuilt the *shared* database out from under the other, still-serving pods.
 That is exactly what a rolling update does, over and over: each new pod's boot drops the tables the old pods are mid-query on.
 The disruption is in the *data plane, at startup* — which is why no `maxUnavailable` or shutdown-hook tuning could ever reach zero.
-// Re-measured live as user2 on 2026-07-28: three replacement pods at the 500m limit took 23 s / 25 s /
-// 33 s from PodScheduled to Ready (mean 27 s). The same three at limits.cpu=1 took 14 s / 15 s / 15 s.
-One more thing to notice: that replacement pod took a while to reach `Ready` — about *27 s* on the build cluster, because the container's *500m CPU limit* throttles the JVM cold-start. Hold that thought; it matters for the capacity dip.
+// Cold start, PodScheduled -> Ready, varies with how busy the node is. As user2 on 2026-07-28: 23/25/33 s
+// at the 500m limit, 14/15/15 s at limits.cpu=1. The 2026-11 smoke run: 13 s at 500m, 12-13 s at 1. As
+// user2 on 2026-11-12: 13/13 s at 500m, 12/12/13 s at 1. So the page quotes a range, not a speed-up.
+One more thing to notice: how long that replacement pod took to reach `Ready` — between about *12 s* and *33 s* across our runs. The container's *500m CPU limit* caps the JVM cold-start, and how much that costs depends on how busy the node is. Hold that thought; it matters for the capacity dip.
 
 [.checkpoint]
 ****
-✔ *Verify (diagnosed):* The schema strategy is `drop-and-create`; a write to `CLM-1001` *vanished* after a single pod restart — reverting to the seed `UnderReview` — proving every pod boot reseeds the *shared* `claims-db`. Under the 500m CPU limit the replacement took ~27 s to reach `Ready`.
+✔ *Verify (diagnosed):* The schema strategy is `drop-and-create`; a write to `CLM-1001` *vanished* after a single pod restart — reverting to the seed `UnderReview` — proving every pod boot reseeds the *shared* `claims-db`. You noted how long the replacement took to reach `Ready` under the 500m CPU limit.
 ****
 
 === Fix it at the source
@@ -936,7 +940,7 @@ Your `claims-db` is already populated (the app seeded it while it was still `dro
 ====
 
 *Step 2 — harden the roll (pin the capacity floor, and speed the cold-start).*
-`maxSurge: 1`/`maxUnavailable: 0` brings a new pod up *before* retiring an old one, and raising the container's CPU *limit* gives the JVM cold-start more headroom to burn — so a fresh pod reaches `Ready` in about *15 s* instead of ~27 s.
+`maxSurge: 1`/`maxUnavailable: 0` brings a new pod up *before* retiring an old one, and raising the container's CPU *limit* gives the JVM cold-start more headroom. On a busy node that cut the time to `Ready` from ~27 s to ~15 s; on a quiet one both limits measured 12–14 s. Treat it as headroom for busy days, not a guaranteed speed-up.
 
 [IMPORTANT]
 .The default is a *percentage* — it protects you at three replicas and quietly stops at four
@@ -1209,7 +1213,7 @@ That is the budget a node drain spends. In exercise 6 you spend it yourself, thr
 
 [.checkpoint]
 ****
-✔ *Verify:* You traced the drops to a *boot-time reseed* of the shared database (a planted `CLM-1001` value reverted to its seed after one pod restart), fixed it at the source with `schema-management=none` (the value now *survives* a restart), sped the cold-start with a raised CPU limit (~27 s → ~15 s) that still fits the namespace's `limits.cpu` quota, held *available replicas flat at 3* through a roll (18/18 samples) *and confirmed the roll actually landed* with `oc rollout status`, re-measured the drop count *lower than the default roll* (and understood why it is not zero), and protected the service with a `PodDisruptionBudget` that reports `ALLOWED DISRUPTIONS: 2`.
+✔ *Verify:* You traced the drops to a *boot-time reseed* of the shared database (a planted `CLM-1001` value reverted to its seed after one pod restart), fixed it at the source with `schema-management=none` (the value now *survives* a restart), gave the cold-start headroom with a raised CPU limit that still fits the namespace's `limits.cpu` quota, held *available replicas flat at 3* through a roll (18/18 samples) *and confirmed the roll actually landed* with `oc rollout status`, re-measured the drop count *lower than the default roll* (and understood why it is not zero), and protected the service with a `PodDisruptionBudget` that reports `ALLOWED DISRUPTIONS: 2`.
 ****
 
 == 6. Read how the platform shapes the cluster, then drain through your budget
@@ -1227,23 +1231,24 @@ echo "cluster nodes: $NODES"
 # $3 is DESIRED (columns are NAMESPACE NAME DESIRED CURRENT READY …) — the count the DaemonSet
 # controller WANTS, which is what "runs on every node" means. $4 (CURRENT) would drop a DaemonSet
 # mid-rollout that is still the answer to the question being asked.
-oc get ds -A | awk -v n="$NODES" 'NR==1 || $3>=n' | head -12
+echo "agents on every node: $(oc get ds -A | awk -v n="$NODES" 'NR>1 && $3>=n' | wc -l)"
+oc get ds -A | awk -v n="$NODES" 'NR==1 || $3>=n' | grep -E 'NAMESPACE|ovnkube-node|node-exporter|machine-config-daemon'
 ----
 
-.Expected output (each runs on every node — `DESIRED` equals your node count, 6 here; your cluster may list more or fewer such agents)
+// Re-captured as user2 on OCP 4.22.22, 2026-11-12 (columns trimmed). The list is filtered to the three
+// agents the prose names: unfiltered, ovnkube-node sat at row 13 of 13 and fell off the old `head -12`.
+.Expected output (`DESIRED` equals your node count, 6 here; the agent count varies with what the cluster runs)
 [source,texinfo]
 ----
 cluster nodes: 6
-NAMESPACE                                NAME                    DESIRED   CURRENT   READY   NODE SELECTOR
-openshift-cluster-node-tuning-operator   tuned                   6         6         6       kubernetes.io/os=linux
-openshift-dns                            node-resolver           6         6         6       kubernetes.io/os=linux
-openshift-machine-config-operator        machine-config-daemon   6         6         6       kubernetes.io/os=linux
-openshift-monitoring                     node-exporter           6         6         6       kubernetes.io/os=linux
-openshift-multus                         multus                  6         6         6       kubernetes.io/os=linux
-openshift-ovn-kubernetes                 ovnkube-node            6         6         6       kubernetes.io/os=linux
+agents on every node: 13
+NAMESPACE                           NAME                    DESIRED   CURRENT   READY   NODE SELECTOR
+openshift-machine-config-operator   machine-config-daemon   6         6         6       kubernetes.io/os=linux
+openshift-monitoring                node-exporter           6         6         6       kubernetes.io/os=linux
+openshift-ovn-kubernetes            ovnkube-node            6         6         6       kubernetes.io/os=linux
 ----
 
-The CNI (`ovnkube-node`), the monitoring agent (`node-exporter`), the machine-config daemon — all DaemonSets, one on every node.
+The CNI (`ovnkube-node`), the monitoring agent (`node-exporter`), the machine-config daemon — all DaemonSets, one on every node. Drop the `grep` to see all of them.
 Some target only a *subset* of nodes using the very `nodeSelector` + `tolerations` you learned — a control-plane-only agent, for instance:
 
 [source,sh,role=execute]
@@ -1353,6 +1358,17 @@ parasol-claims-6745f45b89-4kx86   0/1     ContainerCreating   worker-3
 parasol-claims-6745f45b89-qvlm8   1/1     Running             control-plane-1
 parasol-claims-6745f45b89-xr6dn   1/1     Running             control-plane-3
 ----
+
+// Seen by the 2026-11 smoke run in `oc get pods`, and caught as user2 on 2026-11-12 by polling an evicted
+// pod: phase=Failed exitCode=143 reason=Error, gone ~3 s after the eviction.
+A fourth row may show for a second or two — the pod you just evicted, as `0/1 Error`:
+
+[source,texinfo]
+----
+parasol-claims-57b86c4d4f-8fzsq   0/1     Error               control-plane-1
+----
+
+The eviction sent the JVM a SIGTERM; it stops cleanly but exits with code 143, which Kubernetes reports as `Error`. The row disappears once the deletion completes.
 
 That is `oc adm drain`, node by node: the budget doesn't block maintenance, it paces it.
 Note what `minAvailable: 1` allowed: for a few seconds one pod carried all the traffic. Set the floor from the capacity you need under load, not to `1` by habit.
