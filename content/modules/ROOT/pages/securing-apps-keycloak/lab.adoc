@@ -224,7 +224,14 @@ ifndef::demo[]
 Your realm is your own world on a shared Keycloak: four Parasol *clients* (the applications that talk to it), one *role*, and two Parasol *users*.
 Every token in this module is minted from it, and you administer it.
 
-Open https://keycloak-sso-workshop.{cluster_domain}/admin/realm-{user}/console/[your realm's admin console^] and sign in as `{user}` with your workshop password.
+Print your realm's admin-console address — derived from `$REALM`, like every Keycloak URL on this page — and open it in a browser:
+
+[source,sh,role=execute]
+----
+echo "${REALM%/realms/*}/admin/${REALM##*/}/console/"
+----
+
+Sign in as `{user}` with your *workshop password*, the one you use to sign in to the cockpit and the OpenShift console.
 This is Keycloak's own sign-in page for your realm, not OpenShift's, and your `{user}` account here administers `realm-{user}` and nothing else.
 // TODO(verify-on-cluster): browser sign-in and the console clicks, as user6 — left to the owner / media pass (no password typed
 // into a browser by an agent). user6's realm-admin rights are proven through the admin API; each console step below was
@@ -571,14 +578,17 @@ read -rsp "Your workshop password: " PW; echo
 
 [source,sh,role=execute]
 ----
-KCADM=$(curl -ks "$REALM/protocol/openid-connect/token" -d grant_type=password -d client_id=admin-cli \
-  -d username="$(oc whoami)" --data-urlencode password="$PW" | jq -r .access_token); unset PW
+KCREF=$(curl -ks "$REALM/protocol/openid-connect/token" -d grant_type=password -d client_id=admin-cli \
+  -d username="$(oc whoami)" --data-urlencode password="$PW" | jq -r .refresh_token); unset PW
 API="${REALM%/realms/*}/admin/realms/${REALM##*/}"
-if [ "$KCADM" = null ]; then echo "sign-in failed — re-run the password block"; else echo "signed in to the admin API of ${REALM##*/}"; fi
-VIEWER_ID=$(curl -ks -H "Authorization: Bearer $KCADM" "$API/users?username=viewer&exact=true" | jq -r '.[0].id')
-ROLE=$(curl -ks -H "Authorization: Bearer $KCADM" "$API/roles/claims-adjuster")
+# kc_token -> a fresh admin access token from the sign-in above (no password needed again)
+kc_token() { curl -ks "$REALM/protocol/openid-connect/token" -d grant_type=refresh_token \
+  -d client_id=admin-cli -d refresh_token="$KCREF" | jq -r .access_token; }
+if [ "$KCREF" = null ]; then echo "sign-in failed — re-run the password block"; else echo "signed in to the admin API of ${REALM##*/}"; fi
+VIEWER_ID=$(curl -ks -H "Authorization: Bearer $(kc_token)" "$API/users?username=viewer&exact=true" | jq -r '.[0].id')
+ROLE=$(curl -ks -H "Authorization: Bearer $(kc_token)" "$API/roles/claims-adjuster")
 curl -ks -o /dev/null -w 'assign claims-adjuster to viewer -> HTTP %{http_code}\n' -X POST \
-  -H "Authorization: Bearer $KCADM" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $(kc_token)" -H 'Content-Type: application/json' \
   "$API/users/$VIEWER_ID/role-mappings/realm" -d "[$ROLE]"
 ----
 
@@ -621,7 +631,7 @@ CLI::
 [source,sh,role=execute]
 ----
 curl -ks -o /dev/null -w 'unassign claims-adjuster from viewer -> HTTP %{http_code}\n' -X DELETE \
-  -H "Authorization: Bearer $KCADM" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $(kc_token)" -H 'Content-Type: application/json' \
   "$API/users/$VIEWER_ID/role-mappings/realm" -d "[$ROLE]"
 ----
 
@@ -740,7 +750,27 @@ The Keycloak page reads *"We are sorry... Invalid parameter: redirect_uri"*.
 
 *What happened.* Your app sits behind the OpenShift *edge Route*, which terminates HTTPS and forwards plain HTTP to the pod.
 The app, seeing an HTTP request, built an `http://` `redirect_uri` — but the realm only trusts the `https://` callback it was registered with, so Keycloak refuses it.
-You can see that rule in your admin console: *Clients* → `parasol-web` → *Settings* → *Access settings* → *Valid redirect URIs* holds one pattern, `https://parasol-web-{user}-dev.{cluster_domain}/*`.
+See the rule Keycloak applied:
+
+[tabs]
+====
+Console::
++
+--
+In your admin console, *Clients* → `parasol-web` → *Settings* → *Access settings* → *Valid redirect URIs* holds one pattern, `https://parasol-web-{user}-dev.{cluster_domain}/*`.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+curl -ks -H "Authorization: Bearer $(kc_token)" "$API/clients?clientId=parasol-web" | jq -r '.[0].redirectUris[]'
+----
+
+It prints one pattern, `https://parasol-web-<user>-dev.<cluster-domain>/*`.
+--
+====
+
 The fix is to tell the app to honor the `X-Forwarded-*` headers the Route sets, so it knows the *original* request was HTTPS:
 
 [source,sh,role=execute]
@@ -794,8 +824,29 @@ A batch job like the monthly-statement run in the Jobs, Batch & Queued Workloads
 It has no password to type and no browser to redirect, so the human flows do not apply.
 Instead it authenticates as *itself* with the *client-credentials* flow — a client id and secret it holds — and receives a token that represents the *service account*, not a person.
 
-Your admin console shows how the realm sets that up: *Clients* → `parasol-batch` → *Settings* → *Capability config* has *Client authentication* on, *Service account roles* ticked and *Standard flow* off — a client that can sign in as itself and nothing else.
-Its secret is on the *Credentials* tab.
+See how the realm sets that client up:
+
+[tabs]
+====
+Console::
++
+--
+*Clients* → `parasol-batch` → *Settings* → *Capability config* has *Client authentication* on, *Service account roles* ticked and *Standard flow* off. Its secret is on the *Credentials* tab.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+curl -ks -H "Authorization: Bearer $(kc_token)" "$API/clients?clientId=parasol-batch" \
+  | jq -c '.[0] | {publicClient, serviceAccountsEnabled, standardFlowEnabled}'
+----
+
+It prints `{"publicClient":false,"serviceAccountsEnabled":true,"standardFlowEnabled":false}`.
+--
+====
+
+A confidential client that can sign in as itself and nothing else.
 Ask the token endpoint for its token:
 
 [source,sh,role=execute]
@@ -896,8 +947,30 @@ get_token adjuster | decode | jq -c '{aud}'
 ----
 ====
 
-The stamp comes from your realm: *Clients* → `parasol-web` → *Client scopes* → `parasol-web-dedicated` → *Mappers* → `claims-audience`, an audience mapper whose *Included Client Audience* is `parasol-claims`.
+The stamp comes from your realm, from an audience mapper on the `parasol-web` client:
+
+[tabs]
+====
+Console::
++
+--
+*Clients* → `parasol-web` → *Client scopes* → `parasol-web-dedicated` → *Mappers* → `claims-audience`: its *Included Client Audience* is `parasol-claims`.
+
 // media-pass: screenshot securing-apps-keycloak-12-audience-mapper.png — the claims-audience mapper on parasol-web-dedicated, Included Client Audience parasol-claims, Add to access token on (MEDIUM). Alt: "Keycloak mapper details for claims-audience, an audience mapper adding parasol-claims to access tokens issued to parasol-web."
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+curl -ks -H "Authorization: Bearer $(kc_token)" "$API/clients?clientId=parasol-web" \
+  | jq -c '.[0].protocolMappers[] | {name, protocolMapper, audience: .config["included.client.audience"]}'
+----
+
+It prints `{"name":"claims-audience","protocolMapper":"oidc-audience-mapper","audience":"parasol-claims"}`.
+--
+====
+
 That single claim is why the same token that opens the claims API will be *refused* by the fraud service: a token minted for `parasol-claims` is not valid at `parasol-fraud`.
 That is the exact problem the final exercise solves — and where you will watch this audience get rewritten.
 
@@ -938,7 +1011,89 @@ Console::
 // RESOLVED 2026-07-29 (see the grounded block above): the masthead affordance is the
 // "Quick create" button; it reaches the "Import YAML" page for the selected project.
 // Original marker text, kept for provenance: unified console 4.21 — the "+" / Import YAML action is in the masthead
-. Paste the manifest below, *replace* the `QUARKUS_OIDC_AUTH_SERVER_URL` value with your realm URL (`echo $REALM`), set the namespace to `{user}-dev`, and *Create*.
+. Check that the *Project* selector shows `{user}-dev`, paste this manifest, and click *Create*.
+It reads your realm URL from the `ws-entry-securing-apps-keycloak` ConfigMap — the same value as `$REALM` — so there is nothing to edit:
++
+[source,yaml,subs="attributes"]
+----
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parasol-fraud
+  namespace: {user}-dev
+  labels:
+    app: parasol-fraud
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: parasol-fraud
+  template:
+    metadata:
+      labels:
+        app: parasol-fraud
+    spec:
+      containers:
+        - name: parasol-fraud
+          image: image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-fraud:1.0
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: QUARKUS_OIDC_TENANT_ENABLED
+              value: "true"
+            - name: QUARKUS_OIDC_AUTH_SERVER_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: ws-entry-securing-apps-keycloak
+                  key: authServerUrl
+            - name: QUARKUS_OIDC_APPLICATION_TYPE
+              value: service
+            - name: QUARKUS_OIDC_TOKEN_AUDIENCE
+              value: parasol-fraud
+            - name: QUARKUS_HTTP_AUTH_PERMISSION_FRAUD_PATHS
+              value: /api/fraud,/api/fraud/*
+            - name: QUARKUS_HTTP_AUTH_PERMISSION_FRAUD_POLICY
+              value: authenticated
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: parasol-fraud
+  namespace: {user}-dev
+  labels:
+    app: parasol-fraud
+spec:
+  selector:
+    app: parasol-fraud
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: parasol-fraud
+  namespace: {user}-dev
+  labels:
+    app: parasol-fraud
+spec:
+  to:
+    kind: Service
+    name: parasol-fraud
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+----
 +
 // media-pass: screenshot securing-apps-keycloak-08-import-fraud.png — the + / Import YAML editor with the parasol-fraud manifest pasted (MEDIUM). Alt: "OpenShift console Import YAML editor showing the parasol-fraud Deployment/Service/Route manifest before Create."
 --
@@ -1003,8 +1158,28 @@ curl -ks -o /dev/null -w 'user token (aud=parasol-claims) -> fraud -> HTTP %{htt
 
 It returns `HTTP 401`: right user, valid token, *wrong audience*.
 
-Your realm decides which exchanges are allowed.
-In the admin console, *Clients* → `parasol-claims` → *Settings* → *Capability config* has *Standard Token Exchange* ticked, and its dedicated scope (*Client scopes* → `parasol-claims-dedicated` → *Mappers*) holds one audience mapper, `fraud-audience`, whose *Included Client Audience* is `parasol-fraud`.
+Your realm decides which exchanges are allowed:
+
+[tabs]
+====
+Console::
++
+--
+*Clients* → `parasol-claims` → *Settings* → *Capability config* has *Standard Token Exchange* ticked, and its dedicated scope (*Client scopes* → `parasol-claims-dedicated` → *Mappers*) holds one audience mapper, `fraud-audience`, whose *Included Client Audience* is `parasol-fraud`.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+curl -ks -H "Authorization: Bearer $(kc_token)" "$API/clients?clientId=parasol-claims" \
+  | jq -c '.[0] | {exchange: .attributes["standard.token.exchange.enabled"], mappers: [.protocolMappers[] | {name, audience: .config["included.client.audience"]}]}'
+----
+
+It prints `{"exchange":"true","mappers":[{"name":"fraud-audience","audience":"parasol-fraud"}]}`.
+--
+====
+
 That mapper is what lets `parasol-claims` reach `parasol-fraud`, and nothing in its configuration reaches `parasol-batch` — keep that in mind for the escalation attempt below.
 
 Now do the exchange.
@@ -1149,7 +1324,7 @@ You put a front door on Parasol: a browser login for the web frontend (auth-code
 
 [.checkpoint]
 ****
-✔ *Verify:* `ws verify {module-id}` passes — the claims API is bearer-protected (401 without a token, 200 with an `adjuster` token, 403 for `viewer`) and the web frontend redirects an unauthenticated request to Keycloak (302).
+✔ *Verify:* `ws verify {module-id}` passes — the claims API is bearer-protected (401 without a token, 200 with an `adjuster` token, 403 for `viewer`) and the web frontend redirects an unauthenticated request to Keycloak (302, with an `https` `redirect_uri` and PKCE `S256`).
 ****
 endif::demo[]
 
@@ -1265,7 +1440,7 @@ oc set env deployment/parasol-web -n {user}-dev \
 oc rollout status deployment/parasol-web -n {user}-dev
 ----
 
-*On screen* — the Parasol frontend in a private browser window: the request redirects to the Keycloak login page for `realm-{user}`. Signing in as `adjuster` with the workshop password `parasol` lands back in the application.
+*On screen* — the Parasol frontend in a private browser window: the request redirects to the Keycloak login page for `realm-{user}`. Signing in as `adjuster` with the demo password `parasol` lands back in the application.
 
 *What just happened*
 

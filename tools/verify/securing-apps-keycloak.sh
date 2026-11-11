@@ -4,7 +4,7 @@
 #          OIDC tenant is off) — GET /api/claims returns 200 with NO token; parasol-fraud is not up yet.
 #   End:   the apps are OIDC-protected — GET /api/claims is 401 without a token and 200 with a valid
 #          claims-adjuster token and 403 with a viewer token; the web frontend 302-redirects an
-#          unauthenticated request to Keycloak.
+#          unauthenticated request to Keycloak with an https redirect_uri and PKCE S256.
 # Runnable as the attendee: reads only {user}-dev + the app's OWN Routes, and gets a demo token from the
 # public Keycloak route recorded in the entry marker (no cross-namespace reads — rule 10).
 set -euo pipefail
@@ -78,6 +78,16 @@ route_answers_as() {  # route path expected-code realm-user
   [[ "$(http_code "$OC_OUT" "$path" "$tok")" == "$want" ]]
 }
 
+# The FIXED web login: GET / answers 302 to Keycloak with an https redirect_uri and PKCE S256. A bare 302 is
+# not enough — exercise 4's deliberate break (no proxy forwarding) also 302s, with an http redirect_uri that
+# Keycloak then rejects with 400. Header read with curl; the Route read stays in this predicate's shell.
+web_login_redirect_fixed() {
+  local loc
+  route_host parasol-web || return 1
+  loc="$(curl -ks -o /dev/null -D - --max-time 20 "https://${OC_OUT}/" 2>/dev/null | sed -n 's/^[Ll]ocation: //p' | tr -d '\r')"
+  [[ "$loc" == *"redirect_uri=https%3A%2F%2F"* && "$loc" == *"code_challenge_method=S256"* ]]
+}
+
 # Exchange a subject token for a parasol-fraud-audience token via Keycloak standard token exchange
 # (RFC 8693), authenticating as the confidential parasol-claims client with the fixed workshop secret the
 # lab uses (parasol-claims-secret — not a real credential). Parsed with sed (no jq), so this stays runnable
@@ -137,8 +147,8 @@ else
   # grants claims-adjuster to viewer in the realm and removes it again, and the realm survives a reset.
   check "the role is enforced — a viewer token (no claims-adjuster) is refused — GET /api/claims is 403" \
         route_answers_as parasol-claims /api/claims 403 viewer                                  || hint "not done yet if the API still accepts any valid token: require claims-adjuster on /api/claims (exercise 3). If you did, viewer still holds claims-adjuster in realm-${USER_NAME} — remove it (Users > viewer > Role mapping > Unassign); ws prep does not reset your realm"
-  check "web frontend redirects an unauthenticated request to login (302)" \
-        route_answers parasol-web /api/claims 302                                               || hint "not done yet — the web frontend also starts unprotected on purpose; making it an OIDC web-app (auth-code + PKCE) is a later beat, so this red is expected until you get there"
+  check "web frontend redirects to login with an https redirect_uri and PKCE S256" \
+        web_login_redirect_fixed                                                                || hint "not done yet — the web frontend also starts unprotected on purpose; making it an OIDC web-app (auth-code + PKCE) is exercise 4. If it already redirects, the redirect_uri is still http: set QUARKUS_HTTP_PROXY_PROXY_ADDRESS_FORWARDING=true on parasol-web (exercise 4's fix)"
 
   # --- Ex7 [ADVANCED] token exchange (RFC 8693) — the module's ONLY optional exercise, and what `ws solve`
   # materializes. Never let this beat pass silently: if parasol-fraud is deployed, assert the discriminator
