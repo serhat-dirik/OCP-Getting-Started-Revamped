@@ -1,0 +1,187 @@
+{{- /*
+  sso-realm-admin-seed — make each attendee the administrator of THEIR OWN Keycloak realm, so the
+  securing-apps-keycloak module can use the Keycloak admin console instead of an instructor demo.
+
+  For every attendee {user}: a user `{user}` in realm-{user} (per-user-sso-realm.yaml), password = the
+  shared workshop password (non-secret by design, same as console/Gitea/SonarQube), holding the
+  realm-management client role `realm-admin` IN THAT REALM ONLY. Nothing is created in master, so the
+  account administers its realm and cannot see another attendee's realm or master. Admin console:
+  https://<keycloak route>/admin/realm-{user}/console/ (sign in there with {user} / workshop password).
+
+  WHY A SEED JOB AND NOT THE KeycloakRealmImport: the import runs once per realm and never re-applies
+  (header of per-user-sso-realm.yaml), so it cannot reach realms that already exist, and the password
+  is per-install (vars.yaml), not a value for git. One idempotent Admin-REST job covers fresh and
+  existing clusters and re-syncs the password on every workshop-config sync (e.g. after `adm passwd`).
+*/ -}}
+{{- if and .Values.sso.enabled (include "workshop-config.moduleEnabled" (dict "root" $ "slug" "securing-apps-keycloak")) }}
+{{- $ns := .Values.sso.namespace }}
+# Identity of the realm-admin seed job.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sso-realm-admin-seed
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+---
+# Read the Keycloak bootstrap admin credential (operator-made secret), nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sso-realm-admin-seed
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["sso-workshop-initial-admin"]
+    verbs: ["get"]
+---
+# Binds the seed job to that one-secret read.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sso-realm-admin-seed
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sso-realm-admin-seed
+subjects:
+  - kind: ServiceAccount
+    name: sso-realm-admin-seed
+    namespace: {{ $ns }}
+---
+# Read the shared workshop password (bootstrap/install.sh writes workshop-user-creds in the Gitea ns).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sso-realm-admin-seed-creds
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["workshop-user-creds"]
+    verbs: ["get"]
+---
+# Binds the seed job to the workshop-password read.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sso-realm-admin-seed-creds
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sso-realm-admin-seed-creds
+subjects:
+  - kind: ServiceAccount
+    name: sso-realm-admin-seed
+    namespace: {{ $ns }}
+---
+# Idempotent: ensure user {user} exists in realm-{user}, has the workshop password and realm-admin.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sso-realm-admin-seed
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 1800
+  template:
+    spec:
+      serviceAccountName: sso-realm-admin-seed
+      restartPolicy: Never
+      containers:
+        - name: seed
+          image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+          resources:
+            requests: {cpu: 10m, memory: 128Mi}
+            limits: {memory: 256Mi}
+          env:
+            - name: KC
+              value: http://sso-workshop-service.{{ $ns }}.svc:8080
+            - name: USERS
+              value: "{{ range $i := until (int .Values.userCount) }}{{ $.Values.userPrefix }}{{ add1 $i }} {{ end }}"
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              KC_ADMIN="$(oc get secret sso-workshop-initial-admin -o jsonpath='{.data.username}' | base64 -d)"
+              KC_PASS="$(oc get secret sso-workshop-initial-admin -o jsonpath='{.data.password}' | base64 -d)"
+              WS_PASS="$(oc get secret workshop-user-creds -n {{ .Values.giteaNamespace }} -o jsonpath='{.data.password}' | base64 -d)"
+              export KC_ADMIN KC_PASS WS_PASS
+              exec python3 - <<'PY'
+              import json, os, time, urllib.error, urllib.parse, urllib.request
+              KC = os.environ["KC"]
+              def call(method, path, token=None, body=None, form=None):
+                  data, headers = None, {}
+                  if form is not None:
+                      data = urllib.parse.urlencode(form).encode()
+                      headers["Content-Type"] = "application/x-www-form-urlencoded"
+                  elif body is not None:
+                      data = json.dumps(body).encode()
+                      headers["Content-Type"] = "application/json"
+                  if token:
+                      headers["Authorization"] = "Bearer " + token
+                  req = urllib.request.Request(KC + path, data=data, headers=headers, method=method)
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      raw = r.read()
+                      return json.loads(raw) if raw else None
+              def token():
+                  return call("POST", "/realms/master/protocol/openid-connect/token", form={
+                      "grant_type": "password", "client_id": "admin-cli",
+                      "username": os.environ["KC_ADMIN"], "password": os.environ["KC_PASS"]})["access_token"]
+              for attempt in range(60):  # Keycloak and the realm imports may still be coming up
+                  try:
+                      tok = token(); break
+                  except Exception as e:
+                      print(f"… waiting for Keycloak ({e.__class__.__name__})"); time.sleep(10)
+              else:
+                  raise SystemExit("❌ Keycloak admin API never answered")
+              for user in os.environ["USERS"].split():
+                  realm = f"realm-{user}"
+                  for attempt in range(60):
+                      try:
+                          tok = token(); call("GET", f"/admin/realms/{realm}", tok); break
+                      except urllib.error.HTTPError as e:
+                          if e.code != 404: raise
+                          print(f"… {realm} not imported yet"); time.sleep(10)
+                  else:
+                      raise SystemExit(f"❌ {realm} never appeared")
+                  q = urllib.parse.quote(user)
+                  found = call("GET", f"/admin/realms/{realm}/users?username={q}&exact=true", tok)
+                  if not found:
+                      call("POST", f"/admin/realms/{realm}/users", tok, {
+                          "username": user, "enabled": True, "emailVerified": True,
+                          "email": f"{user}@parasol.example", "firstName": user, "lastName": "Admin"})
+                      found = call("GET", f"/admin/realms/{realm}/users?username={q}&exact=true", tok)
+                  uid = found[0]["id"]
+                  call("PUT", f"/admin/realms/{realm}/users/{uid}/reset-password", tok,
+                       {"type": "password", "value": os.environ["WS_PASS"], "temporary": False})
+                  cid = call("GET", f"/admin/realms/{realm}/clients?clientId=realm-management", tok)[0]["id"]
+                  role = call("GET", f"/admin/realms/{realm}/clients/{cid}/roles/realm-admin", tok)
+                  call("POST", f"/admin/realms/{realm}/users/{uid}/role-mappings/clients/{cid}", tok,
+                       [{"id": role["id"], "name": role["name"]}])
+                  print(f"  ✓ {realm}: {user} is realm-admin (password = workshop password, not shown)")
+              print("✅ every attendee administers their own realm")
+              PY
+{{- end }}
