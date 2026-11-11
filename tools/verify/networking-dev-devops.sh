@@ -5,8 +5,9 @@
 #          every exposure), a demo-client verification pod, and NO NetworkPolicies. {user}-partner
 #          holds a Layer2 Primary UDN + a workload on it (native isolation). Entry marker set.
 #   End:   the attendee ran the lab — default-deny + precise-allow NetworkPolicies are in place, an
-#          edge Route exposes parasol-web, and an unauthorized pod (demo-client) can no longer reach
-#          claims-db (the "db only from api" outcome).
+#          edge Route exposes parasol-web, an unauthorized pod (demo-client) can no longer reach
+#          claims-db (the "db only from api" outcome), and their own Gateway (openshift-default) serves
+#          an HTTPRoute, published by a Route (exercise 6).
 # Runnable as the ATTENDEE: reads only {user}-dev|partner objects the attendee sees via namespace
 # admin, plus the partner UDN via the platform-observer ClusterRole (which grants k8s.ovn.org read).
 # The G1 cockpit smoke runs `--entry-only` as {user}.
@@ -61,6 +62,38 @@ no_web_route() {
 reencrypt_route() {
   oc_present get route -n "$NS" \
     -o jsonpath='{.items[?(@.spec.tls.termination=="reencrypt")].metadata.name}'
+}
+
+# --- exercise 6: the attendee's own Gateway ----------------------------------
+# Matched on the platform's class and on status, never on the lab's names, so any correct solution
+# passes. The implementation labels the Envoy Deployment and Service it creates with the class name
+# (gateway.networking.k8s.io/gateway-class-name), and names the Service <gateway>-openshift-default.
+GW_CLASS_LABEL="gateway.networking.k8s.io/gateway-class-name=openshift-default"
+no_gateway() {
+  oc_present get ns "$NS" -o name || return 1
+  oc_absent get gateways.gateway.networking.k8s.io -n "$NS" -o name
+}
+gateway_programmed() {
+  oc_read get gateways.gateway.networking.k8s.io -n "$NS" \
+    -o jsonpath='{range .items[?(@.spec.gatewayClassName=="openshift-default")]}{.status.conditions[?(@.type=="Programmed")].status}{"\n"}{end}' || return 1
+  grep -qx True <<<"$OC_OUT"
+}
+# Some HTTPRoute is Accepted by a parent AND its backends resolved.
+httproute_attached() {
+  oc_read get httproutes.gateway.networking.k8s.io -n "$NS" \
+    -o jsonpath='{range .items[*].status.parents[*]}{.conditions[?(@.type=="Accepted")].status}{.conditions[?(@.type=="ResolvedRefs")].status}{"\n"}{end}' || return 1
+  grep -qx TrueTrue <<<"$OC_OUT"
+}
+# The Envoy pods are Ready — under default-deny that needs the egress allow to istiod, so this is the
+# behavioural half of the exercise-6 fix, not just an object count.
+gateway_dataplane_ready() {
+  oc_read get deploy -n "$NS" -l "$GW_CLASS_LABEL" -o jsonpath='{range .items[*]}{.status.readyReplicas}{"\n"}{end}' || return 1
+  grep -qE '^[1-9]' <<<"$OC_OUT"
+}
+# A Route points at a Gateway's Service.
+gateway_published() {
+  oc_read get route -n "$NS" -o jsonpath='{range .items[*]}{.spec.to.name}{"\n"}{end}' || return 1
+  grep -q -- '-openshift-default$' <<<"$OC_OUT"
 }
 
 # --- the db-block probe and its CONTROLS -------------------------------------
@@ -142,12 +175,13 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: clean slate — the attendee has built NO exposure and NO policy yet -------------
   check "no default-deny NetworkPolicy yet (attendee writes it)"  no_default_deny || hint "entry ships no NetworkPolicies; if present the lab already started — ws reset networking-dev-devops --user ${USER_NAME}"
   check "no parasol-web Route yet (attendee exposes it)"          no_web_route    || hint "entry ships ClusterIP-only; if a Route exists the lab already started — ws reset networking-dev-devops --user ${USER_NAME}"
+  check "no Gateway yet (attendee builds it in exercise 6)"        no_gateway      || hint "entry ships no Gateway; one left from an earlier run survives the namespace purge — delete it, then reset: oc delete gateways.gateway.networking.k8s.io,httproutes.gateway.networking.k8s.io --all -n ${NS} && ws reset networking-dev-devops --user ${USER_NAME}"
 else
   # --- end state: the lab's OUTCOME — micro-segmentation + exposure in place -----------------------
   # Assert OUTCOMES (a policy exists and blocks; a Route exists), never the exact rule wording, so any
   # correct solution stays green (template rule 14).
   info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
-  # All six below are pure existence checks on objects the ATTENDEE writes, and the entry state asserts
+  # The first six below are pure existence checks on objects the ATTENDEE writes, and the entry state asserts
   # that none of them exists. So there is only one cause for red here, and it is "not done yet".
   check "default-deny NetworkPolicy present"              np_present default-deny-all             || hint "not done yet — the entry state ships ${NS} with no NetworkPolicies at all; writing the default-deny (ingress+egress) is the lab, so this red is expected before you start"
   check "DNS egress allowed (else the fix looks broken)"  np_present allow-dns-egress             || hint "not done yet — this is the companion to the default-deny above (an egress allow to openshift-dns:53, because default-deny blocks DNS too); expected red until you write it"
@@ -155,6 +189,10 @@ else
   check "'db only from api' policy present"               np_present allow-db-from-claims         || hint "not done yet — you write this during the lab: ingress to claims-db:5432 allowed only from parasol-claims pods"
   check "parasol-web is exposed via a Route"              oc get route parasol-web -n "$NS"       || hint "not done yet — the entry state ships ClusterIP-only on purpose; exposing it is the lab: oc create route edge parasol-web --service=parasol-web -n ${NS}"
   check "a re-encrypt Route exists (last hop encrypted)"  reencrypt_route                         || hint "not done yet — the edge Route leaves router→pod in plaintext and re-encrypting is a later beat: oc create route reencrypt parasol-web-secure --service=parasol-web --port=https -n ${NS}"
+  check "a Gateway on openshift-default is Programmed"    gateway_programmed                      || hint "not done yet — exercise 6 creates it. If one exists but says AddressNotAssigned, it lacks the metadata annotation networking.istio.io/service-type: ClusterIP: oc get gateway -n ${NS}"
+  check "an HTTPRoute is attached to it (backend resolved)" httproute_attached                    || hint "not done yet — exercise 6 attaches one; if it exists, read its status: oc get httproute -n ${NS} -o yaml"
+  check "the Gateway's Envoy pods are Ready"               gateway_dataplane_ready                 || hint "not done yet, or default-deny is starving them: they need egress to istiod (openshift-ingress, 15012) — the exercise-6 allow-gateway policy: oc get pods -n ${NS} -l ${GW_CLASS_LABEL}"
+  check "a Route publishes the Gateway"                    gateway_published                       || hint "not done yet — oc create route edge parasol-gw --service=parasol-gateway-openshift-default --port=http --insecure-policy=Allow -n ${NS}"
   # Behavioural proof, gated behind its controls (see the helpers above). demo-client is NOT
   # app=parasol-claims, so default-deny + the 'db only from api' allow must BLOCK it — but a probe
   # that has not been shown to work must never be allowed to certify that.

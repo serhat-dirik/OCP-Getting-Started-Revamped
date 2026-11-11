@@ -252,6 +252,41 @@ oc exec deploy/partner-workload -n $PARTNER -- ip -brief addr show ovn-udn1
 +
 You cannot convert a populated namespace to a Primary UDN; the reset deletes the partner pods, prunes and re-applies the UDN into the still-labeled namespace, then re-creates the workload.
 
+== My Gateway says `PROGRAMMED False` — `AddressNotAssigned`
+
+Symptom:: `oc get gateway -n $NS` shows `PROGRAMMED False`, and its `Programmed` condition reads `AddressNotAssigned` … `address pending`. The `parasol-gateway-openshift-default` Service is `type: LoadBalancer` with `EXTERNAL-IP <pending>`.
+Cause:: Without the annotation, this Gateway implementation fronts every Gateway with a LoadBalancer Service, and a cluster with no load-balancer provider never hands out the address. The annotation must sit on the Gateway's own `metadata.annotations`: the same key placed under `spec.infrastructure.annotations` was not honored for the Service type on the build cluster — the Service stayed `LoadBalancer`.
+Fix:: Annotate the Gateway; the implementation switches the Service to `ClusterIP` and the Gateway turns `PROGRAMMED True` within a few seconds (measured: 2 s):
++
+[source,sh,role=execute]
+----
+oc annotate gateway parasol-gateway -n $NS networking.istio.io/service-type=ClusterIP
+oc wait gateway/parasol-gateway -n $NS --for=condition=Programmed --timeout=60s
+oc get svc parasol-gateway-openshift-default -n $NS
+----
++
+Then publish it with a Route, as exercise 6 does.
+
+== The Gateway is `PROGRAMMED True`, the HTTPRoute is `Accepted`, and the Gateway Route still returns `503`
+
+Symptom:: `curl` through the `parasol-gw` Route returns `503`, although the Gateway and the HTTPRoute both report healthy. The `parasol-gateway-openshift-default-…` pods sit at `0/1`, and their `RESTARTS` climbs; their events show `failed startup probe`.
+Cause:: `Programmed` means the Gateway has an address, not that its proxies serve traffic. The Envoy pods run in `{user}-dev`, so `default-deny-all` applies to them: they cannot reach `istiod` in `openshift-ingress` on port `15012` for their configuration and certificates, so they never become Ready — and without an allow, the router cannot reach them nor they `parasol-web`.
+Fix:: Apply the two exercise-6 policies (`allow-gateway` and `allow-web-from-gateway`), then wait for the rollout:
++
+[source,sh,role=execute]
+----
+oc get networkpolicy allow-gateway allow-web-from-gateway -n $NS
+oc rollout status deploy/parasol-gateway-openshift-default -n $NS --timeout=150s
+----
++
+Recovery took 5 s on the build cluster when the policies went in straight away, and about 60 s when the pods had already spent a couple of minutes in restart backoff — the wait is the kubelet's backoff, not the policy.
+
+== `oc apply` of the Gateway is `Forbidden`
+
+Symptom:: Creating the Gateway fails with `gateways.gateway.networking.k8s.io is forbidden: User "{user}" cannot create resource "gateways"`. The HTTPRoute, by contrast, creates fine.
+Cause:: Kubernetes' built-in `admin` role covers HTTPRoutes but not Gateways — the Gateway API leaves Gateways to platform teams. The workshop grants attendees Gateway create in their own namespaces; a cluster whose workshop layer predates that grant refuses it.
+Fix:: Nothing to fix from the attendee side — tell your instructor. The instructor's pre-flight checks this grant before the session.
+
 '''
 
-_Last verified on OpenShift 4.21.22 (OVN-Kubernetes, 2026-07-13; the three re-encrypt entries 2026-07-25)._
+_Last verified on OpenShift 4.21.22 (OVN-Kubernetes, 2026-07-13; the three re-encrypt entries 2026-07-25; the three Gateway entries on OpenShift 4.22.22, 2026-11-12)._

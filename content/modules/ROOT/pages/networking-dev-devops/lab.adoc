@@ -19,6 +19,8 @@ include::partial$version-attributes.adoc[]
 // user7-dev to user1-dev for page consistency (the same declared scrub as the cluster domain);
 // nothing else in those blocks is altered. Measured command time for that segment: 46 s, of which 26 s
 // is the single parasol-web rollout.
+// Exercise 6 (Gateway API) was rewritten 2026-11-12 from an instructor demo into attendee work and
+// performed end to end on OCP 4.22.22 as user8 — see the comment at the top of that section.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -42,7 +44,7 @@ In this lab you expose the front end deliberately, lock the namespace down to on
 ====
 Most steps below are offered two ways: the *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`), the *CLI* tab uses `oc` in the *Terminal* tab beside these instructions.
 Pick a path once — the tabs stay in sync across the page.
-A few steps are *terminal-only* because the console adds nothing: the throwaway NodePort/LoadBalancer asides and the in-pod reachability probes are quickest in the terminal.
+A few steps are *terminal-only* because the console adds nothing: the throwaway NodePort/LoadBalancer asides, the in-pod reachability probes, and the Gateway API reads are quickest in the terminal.
 Keep the terminal open regardless: the `$NS`/`$PARTNER` shortcuts you just set live there.
 ====
 endif::demo[]
@@ -264,7 +266,7 @@ Yes. A pod on a primary UDN keeps a cluster-network `eth0` for node-level infras
 Because no provider answered — it means "nothing handed out an address," not "failed." A LoadBalancer Service needs a cloud load balancer or an add-on such as MetalLB on bare metal. Where there is none, the external IP never arrives, and the fix is either a Route, which needs no provider, or installing a provider if an L4 external IP is genuinely required.
 
 *Can you show the Gateway API end to end?*::
-Not on a cluster without a LoadBalancer provider. The OpenShift Gateway API implementation provisions its Gateway behind a LoadBalancer Service, which stays `<pending>` for the same reason above, so the Gateway never gets an address. The model — GatewayClass, then a platform-owned Gateway, then HTTPRoutes that application teams attach, including weighted splits — is worth walking through, and the end-to-end path runs on a cluster that has a provider. The Route is the exposure that runs here.
+Yes, even without a LoadBalancer provider. By default the OpenShift Gateway API implementation fronts each Gateway with a LoadBalancer Service, which stays `<pending>` for the same reason as above. Annotate the Gateway `networking.istio.io/service-type: ClusterIP` and publish its Service with a Route, and GatewayClass → Gateway → HTTPRoute runs end to end — the workshop lab does exactly that. Where a provider exists, drop both and the Gateway gets an external address of its own.
 endif::demo[]
 
 // ============================================================================
@@ -1180,47 +1182,320 @@ The catch that makes UDN a platform-team decision: a Primary UDN must exist *bef
 ✔ *Verify:* `{user}-partner` has *no* NetworkPolicy, yet its `partner-workload` sits on `ovn-udn1` (`10.20.0.0/16`, the Layer 2 Primary UDN) with its default route through that interface, can resolve `parasol-web` but *cannot connect* to it — native isolation with zero policy.
 ****
 
-== 6. The Gateway API — the strategic direction (instructor demo)
-⏱ *~4 min* · watch — the modern ingress model, and why the Route is what you ran
+== 6. Expose the front end through the Gateway API
+⏱ *~8 min* · read the platform's GatewayClass, build your own Gateway and HTTPRoute, then open the policy that silences it
 
-The Route you built is the workhorse *today*.
-The *Gateway API* is where portable, multi-tenant ingress is heading, and it is GA.
-Your instructor shows it rather than having you build it, because its data plane also needs a LoadBalancer to get an address — the same mechanism behind your `type=LoadBalancer` Service, so on a cluster with no LoadBalancer provider the Gateway stays unaddressed too.
+// Performed 2026-11-12 on OCP 4.22.22 as user8 (impersonated with the attendee groups), after
+// exercises 1-5, every block verbatim — including the Gateway create, which needs the workshop layer's
+// per-namespace ogsr-gateway-editor grant (Kubernetes' admin role does not cover Gateways). Measured
+// ~39 s of command time; after the policy fix the Envoy pods went Ready in 5-60 s (longer the longer
+// they had sat in restart backoff; 9 s after a 40 s pause). Cluster domain scrubbed to apps.example.com.
 
-:demo-title: The Gateway API model, and the bare-metal exposure gap
-:demo-body: Your instructor shows the GatewayClass, the HTTP(S)/SNI boundary, and why the Gateway stays unaddressed here — so you learn the model now and adopt it when a LoadBalancer provider is present.
-include::partial$instructor-demo.adoc[]
+The Route you built in exercise 2 is the workhorse today.
+The *Gateway API* is where portable, multi-tenant ingress is heading, and it is GA on OpenShift.
+It splits exposure across three objects with three owners: a *GatewayClass* (the platform's implementation), a *Gateway* (a listener), and *HTTPRoutes* (the routing rules an app team attaches).
+You read the first one and build the other two.
 
-Your instructor demonstrates three things (all read-only):
+*First, see what the platform offers.*
+A GatewayClass is cluster-wide and set up by the platform team; you only read it:
 
-. *The model is already installed.* The platform ships a `GatewayClass` named `openshift-default` (its implementation), and the standard `Gateway`, `HTTPRoute`, and `GRPCRoute` APIs — the portable shape of GatewayClass → Gateway → HTTPRoute, with *weighted traffic splits* between versions built into the API.
-+
 [source,sh,role=execute]
 ----
 oc get gatewayclass
 ----
-+
-.Expected output — `openshift-default` is the platform's own implementation and is `Accepted`; your cluster may list only that one row
+
+.Expected output — your cluster may list only the `openshift-default` row
 [source,texinfo]
 ----
 NAME                CONTROLLER                           ACCEPTED   AGE
-istio               istio.io/gateway-controller          True       3d
-istio-remote        istio.io/unmanaged-gateway           True       3d
-openshift-default   openshift.io/gateway-controller/v1   True       2d
+istio               istio.io/gateway-controller          True       12h
+istio-remote        istio.io/unmanaged-gateway           True       12h
+openshift-default   openshift.io/gateway-controller/v1   True       12h
 ----
+
+The row that matters is `openshift-default`: OpenShift's own Gateway API implementation, `Accepted`.
+`istio` and `istio-remote` appear only where the Service Mesh module's stack is installed — one API, several implementations, each advertising itself with its own GatewayClass.
+
+*Next, the honest boundary.*
+The Gateway API here routes HTTP(S) and gRPC.
+Its experimental layer-4 route types are deliberately not installed:
+
+[source,sh,role=execute]
+----
+for c in tcproutes tlsroutes udproutes; do
+  oc get crd $c.gateway.networking.k8s.io >/dev/null 2>&1 && echo "$c: PRESENT" || echo "$c: ABSENT (not on the supported channel)"
+done
+----
+
+.Expected output
+[source,texinfo]
+----
+tcproutes: ABSENT (not on the supported channel)
+tlsroutes: ABSENT (not on the supported channel)
+udproutes: ABSENT (not on the supported channel)
+----
+
+Raw TCP, UDP and TLS passthrough for arbitrary protocols belong to the service mesh (a separate module), not to a Route or to this Gateway.
+
+*Now build your own Gateway — the listener.*
+One annotation decides how it is reached.
+By default this implementation fronts every Gateway with a `type=LoadBalancer` Service, which waits for a provider exactly like the one you created in exercise 2.
+Asking for a `ClusterIP` Service instead keeps the Gateway in-cluster, and you publish it with a Route in a moment:
+
+[tabs]
+====
+Console::
 +
-The row this exercise is about is `openshift-default` — the platform's own implementation, `Accepted`, present on every OpenShift cluster.
-You may also see `istio`/`istio-remote`, as this capture does: those come from the *Service Mesh* module's stack, which this module does not require — a cluster provisioned without it lists `openshift-default` alone.
-Either way the shape is the lesson: one API, several implementations, each advertising itself with its own `GatewayClass`.
+--
+Use the masthead *+* (*Import YAML*) in project `{user}-dev`, paste the YAML between the two `EOF` lines of the *CLI* tab, and *Create*.
+`PROGRAMMED` turns `True` within a few seconds — the `oc get gateway` line of the *CLI* tab shows it.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc apply -n $NS -f - <<'EOF'
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: parasol-gateway
+  annotations:
+    networking.istio.io/service-type: ClusterIP   # an in-cluster Service, no load balancer
+spec:
+  gatewayClassName: openshift-default
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+EOF
+oc wait gateway/parasol-gateway -n $NS --for=condition=Programmed --timeout=60s
+oc get gateway parasol-gateway -n $NS
+----
+--
+====
 
-. *The honest L4 boundary.* Routes and today's Gateway API are HTTP(S)/SNI-centric — the experimental `TCPRoute`/`TLSRoute`/`UDPRoute` APIs are deliberately *not* installed on the supported channel, so raw-TCP and TLS-passthrough ingress belong to the *service mesh* (a later module), not here.
-. *The bare-metal gap.* Creating a `Gateway` here would leave it unaddressed (`Programmed=False`) if no LoadBalancer provider answers, true on most workshop clusters — which is precisely why the *Route* is what you ran in exercise 2 and the Gateway API is what you *model* for the future.
+.Expected output
+[source,texinfo,subs="attributes"]
+----
+gateway.gateway.networking.k8s.io/parasol-gateway created
+gateway.gateway.networking.k8s.io/parasol-gateway condition met
+NAME              CLASS               ADDRESS                                                         PROGRAMMED   AGE
+parasol-gateway   openshift-default   parasol-gateway-openshift-default.{user}-dev.svc.cluster.local   True         3s
+----
 
-You'll find the exact commands, expected output, and the TLS-on-the-listener direction (a cert-manager-issued certificate) in this module's instructor guide.
+`PROGRAMMED True`, with an in-cluster address.
+To get there the implementation created a Deployment of Envoy proxies and a Service, both named `parasol-gateway-openshift-default` — in *your* namespace.
+Keep that in mind.
+
+*Then attach a route — the app team's half.*
+An HTTPRoute names the Gateway it attaches to and the Service that receives the traffic:
+
+[tabs]
+====
+Console::
++
+--
+Use *Import YAML* again in project `{user}-dev`, paste the YAML between the two `EOF` lines of the *CLI* tab, and *Create*.
+The last line of the *CLI* tab reads its status: `Accepted` and `ResolvedRefs`, both `True`.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc apply -n $NS -f - <<'EOF'
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: parasol-web
+spec:
+  parentRefs:
+    - name: parasol-gateway       # the Gateway it attaches to
+  rules:
+    - backendRefs:
+        - name: parasol-web       # the Service that receives the traffic
+          port: 8080
+EOF
+oc wait httproute/parasol-web -n $NS --for=jsonpath='{.status.parents[0].conditions[?(@.type=="Accepted")].status}'=True --timeout=30s
+oc get httproute parasol-web -n $NS -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status}{"  "}{end}{"\n"}'
+----
+--
+====
+
+.Expected output
+[source,texinfo]
+----
+httproute.gateway.networking.k8s.io/parasol-web created
+httproute.gateway.networking.k8s.io/parasol-web condition met
+Accepted=True  ResolvedRefs=True
+----
+
+`Accepted` means the Gateway took the route; `ResolvedRefs` means the backend Service exists.
+This rule has one backend — add a second `backendRefs` entry with a `weight` and the same object splits traffic between two versions.
+
+*Publish the Gateway.*
+Expose the Gateway's Service with an edge Route — the exercise-2 command, pointed at the Gateway instead of at the app:
+
+// Same Create Route form grounded for exercise 2 (Name · Hostname · Path · Service · Target port ·
+// Secure Route → TLS termination / Insecure traffic). The Gateway's Service publishes two ports,
+// 15021 (status) and 80 (http); the listener is the 80 one.
+[tabs]
+====
+Console::
++
+--
+Open *Networking* → *Routes* → *Create Route*.
+Name it `parasol-gw`, *Service* = `parasol-gateway-openshift-default`, *Target port* = `80 → 80`, tick *Secure Route*, *TLS termination* = *Edge*, *Insecure traffic* = *Allow*, then *Create*.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc create route edge parasol-gw --service=parasol-gateway-openshift-default --port=http --insecure-policy=Allow -n $NS
+----
+--
+====
+
+Now reach the app through it:
+
+[source,sh,role=execute]
+----
+GW=$(oc get route parasol-gw -n $NS -o jsonpath='{.spec.host}')
+sleep 5
+curl -sk --max-time 10 -o /dev/null -w "through the Gateway -> HTTP %{http_code}\n" "https://$GW/api/claims"
+oc get pods -n $NS -l gateway.networking.k8s.io/gateway-name=parasol-gateway
+----
+
+.Expected output (pod names differ; `RESTARTS` climbs the longer you wait)
+[source,texinfo]
+----
+through the Gateway -> HTTP 503
+NAME                                                 READY   STATUS    RESTARTS   AGE
+parasol-gateway-openshift-default-6f4bbf7588-5wvjl   0/1     Running   0          17s
+parasol-gateway-openshift-default-6f4bbf7588-bp6dc   0/1     Running   0          2s
+----
+
+`503`, and the Gateway's pods are not Ready.
+Nothing is wrong with the Gateway or the route — this is your exercise 3 at work.
+The Envoy pods run in `{user}-dev`, so `default-deny-all` applies to them too: they cannot reach their control plane, `istiod` in `openshift-ingress` on port `15012`, to fetch their configuration, so they never become Ready.
+Even once Ready, nothing would let the router in or let them out to `parasol-web`.
+
+(An `HTTP 200` here means `{user}-dev` has no `default-deny-all` — exercises 3 and 4 were skipped. Apply the fix below anyway; it changes nothing until a default-deny exists.)
+
+*Fix it the way you fixed the app: name the flows.*
+The Gateway needs three — in from the router, out to `istiod`, out to `parasol-web` — and `parasol-web` must accept it in turn:
+
+[tabs]
+====
+Console::
++
+--
+Use *Import YAML* in project `{user}-dev`, paste *both* policies from the *CLI* tab, and *Create*.
+Then watch *Workloads* → *Pods*: the two `parasol-gateway-openshift-default-…` pods turn `1/1` within a minute.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc apply -n $NS -f - <<'EOF'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway
+spec:
+  podSelector:
+    matchLabels:
+      gateway.networking.k8s.io/gateway-name: parasol-gateway
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:                       # the router, carrying traffic from the parasol-gw Route
+        - namespaceSelector:
+            matchLabels:
+              policy-group.network.openshift.io/ingress: ""
+      ports: [{protocol: TCP, port: 80}]
+  egress:
+    - to:                         # istiod, which hands the Gateway its configuration
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-ingress
+          podSelector:
+            matchLabels:
+              app: istiod
+      ports: [{protocol: TCP, port: 15012}]
+    - to:                         # the HTTPRoute's backend
+        - podSelector:
+            matchLabels:
+              app: parasol-web
+      ports: [{protocol: TCP, port: 8080}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-web-from-gateway
+spec:
+  podSelector:
+    matchLabels:
+      app: parasol-web
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              gateway.networking.k8s.io/gateway-name: parasol-gateway
+      ports: [{protocol: TCP, port: 8080}]
+EOF
+oc rollout status deploy/parasol-gateway-openshift-default -n $NS --timeout=150s
+----
+--
+====
+
+.Expected output (the wait is 5 s to about a minute — longer the longer the pods sat restarting)
+[source,texinfo]
+----
+networkpolicy.networking.k8s.io/allow-gateway created
+networkpolicy.networking.k8s.io/allow-web-from-gateway created
+Waiting for deployment "parasol-gateway-openshift-default" rollout to finish: 1 of 2 updated replicas are available...
+deployment "parasol-gateway-openshift-default" successfully rolled out
+----
+
+Reach the app through the Gateway again:
+
+[source,sh,role=execute]
+----
+GW=$(oc get route parasol-gw -n $NS -o jsonpath='{.spec.host}')
+curl -sk --max-time 10 "https://$GW/api/claims" | head -c 80; echo
+----
+
+.Expected output
+[source,texinfo]
+----
+[{"id":"CLM-1001","policyholder":"Alice Nguyen","type":"Auto","status":"Under Re
+----
+
+The claims JSON.
+For proof of the path, read the Gateway's own access log — the request, its status, and the backend Envoy sent it to:
+
+[source,sh,role=execute]
+----
+oc logs -n $NS -l gateway.networking.k8s.io/gateway-name=parasol-gateway --tail=20 | grep '/api/claims' | tail -1 | grep -o '"GET[^"]*" [0-9]*\|outbound[^ ]*' | paste -sd' ' -
+----
+
+.Expected output
+[source,texinfo,subs="attributes"]
+----
+"GET /api/claims HTTP/1.1" 200 outbound|8080||parasol-web.{user}-dev.svc.cluster.local
+----
+
+That backend is exactly what your HTTPRoute named.
+Two paths now front the same Service: `parasol-web` (Route → app) and `parasol-gw` (Route → Gateway → HTTPRoute → app).
+On a cluster with a load-balancer provider you would drop the annotation and the Route — the Gateway would get an external address of its own.
 
 [.checkpoint]
 ****
-✔ *Verify (observed):* You listed the cluster's GatewayClasses and saw the platform's `openshift-default` as `Accepted` (plus, on a cluster that also runs the Service Mesh stack, its `istio`/`istio-remote` classes — one API, several implementations), learned the GatewayClass → Gateway → HTTPRoute model and its weighted-split capability, and understood why the Route — not the Gateway — is the runnable exposure on a cluster with no LoadBalancer provider.
+✔ *Verify:* You read the platform's `openshift-default` GatewayClass (`Accepted`) and confirmed the layer-4 route types are absent; created a ClusterIP-backed `Gateway` (`PROGRAMMED True`) and an `HTTPRoute` to `parasol-web` (`Accepted`, `ResolvedRefs`); saw the Gateway answer `503` because your default-deny starved its Envoy pods; opened exactly the three flows it needs; and reached the claims JSON through `parasol-gw`, with the Gateway's access log naming `parasol-web` as the backend.
 ****
 
 == Challenge (optional)
@@ -1231,7 +1506,7 @@ Try these on your own:
 
 * *Add a third-party allow.* Suppose a new `reporting` pod (label `app=reporting`) must read the database directly. Write the *two* NetworkPolicies that let *only* it reach `claims-db:5432` (ingress on the db, egress on the reporting pod), deploy a throwaway pod with that label, and prove it connects while `demo-client` still cannot.
 * *Prove the DNS gotcha yourself.* Delete `allow-dns-egress`, re-create it with `port: 53` instead of the named ports, and confirm DNS *stays broken*; then switch back to `dns`/`dns-tcp` and watch it recover. Now you will never lose an afternoon to it.
-* *Compare the two exposure objects.* You have a Route on `parasol-web`. Read its YAML (`oc get route parasol-web -n {user}-dev -o yaml`) and map each field — `host`, `tls.termination`, `to.kind/name` — to how a Gateway `listener` + `HTTPRoute` `backendRef` would express the same intent.
+* *Compare the two exposure paths.* You have a Route straight to `parasol-web` and a Gateway + HTTPRoute in front of it. Read both (`oc get route parasol-web -n {user}-dev -o yaml`, `oc get gateway,httproute -n {user}-dev -o yaml`) and map each Route field — `host`, `tls.termination`, `to.kind/name` — to where the Gateway `listener` or the `HTTPRoute` `backendRef` expresses the same intent. Then sketch where a second `backendRefs` entry with a `weight` would go to split traffic between two versions.
 * *Diff your two Routes.* You now have an edge Route and a re-encrypt Route in front of the *same* Service. Compare their `spec.tls` and `spec.port` (`oc get route parasol-web parasol-web-secure -n {user}-dev -o custom-columns='NAME:.metadata.name,TERMINATION:.spec.tls.termination,PORT:.spec.port.targetPort'`) and explain, without re-reading the lab, why only one of them needs an `https` target port — and what would break if you swapped them.
 
 When you are done, run `ws verify {module-id}` in the Terminal — or run `ws prep {module-id} --yes` to return your world to the flat entry state (no policy, no Route).

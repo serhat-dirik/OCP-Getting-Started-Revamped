@@ -227,134 +227,40 @@ spec:
     # `oc create route reencrypt … --port=https` actually produces (the flag defaults to unset). Solve
     # must reproduce the attendee's end state exactly, not an improved variant of it.
     termination: reencrypt
-{{- if .Values.gatewayApi }}
 ---
-# === GATEWAY API END STATE — materialized ONLY when gatewayApi=true (needs a LoadBalancer provider).
-# On BareMetal without MetalLB the Gateway stays Programmed=False and gets NO envoy data plane
-# (verified live on C2 2026-07-12), so this whole block is off by default. See values.yaml +
-# docs/research/m15-build-note.md (Open risks) + PM decision D-networking-dev-devops-5.
-# why: a visibly-distinct parasol-claims v2 so the weighted split is observable from the demo-client.
-# NOTE: reuses the 1.1 image with a VERSION env as a placeholder — a genuinely distinguishable v2
-# image (X-Claims-Version header) is app-developer work (build note appendix).
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: parasol-claims-v2
-  namespace: {{ .Values.user }}-dev
-  labels:
-    app: parasol-claims
-    version: v2
-    workshop.redhat.com/module: networking-dev-devops
-    workshop.redhat.com/owner: ogsr
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: parasol-claims
-      version: v2
-  template:
-    metadata:
-      labels:
-        app: parasol-claims
-        version: v2
-        workshop.redhat.com/module: networking-dev-devops
-    spec:
-      containers:
-        - name: parasol-claims
-          image: image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims:1.1
-          # Mutable workshop tag - rebuilt in place, so a node-cached IfNotPresent layer served the OLD image (measured 2026-07-29).
-          imagePullPolicy: Always
-          ports:
-            - name: http
-              containerPort: 8080
-          env:
-            - name: POSTGRESQL_HOST
-              value: claims-db
-            - name: VERSION
-              value: v2
-          envFrom:
-            - secretRef:
-                name: claims-db
-          resources:
-            requests:
-              cpu: 200m
-              memory: 256Mi
-            limits:
-              cpu: 500m
-              memory: 512Mi
----
-# why: version-pinned Services so the weighted HTTPRoute can address v1 and v2 as distinct backends.
-apiVersion: v1
-kind: Service
-metadata:
-  name: parasol-claims-v1
-  namespace: {{ .Values.user }}-dev
-  labels:
-    app: parasol-claims
-    workshop.redhat.com/module: networking-dev-devops
-    workshop.redhat.com/owner: ogsr
-spec:
-  selector:
-    app: parasol-claims
-    version: v1
-  ports:
-    - name: http
-      port: 8080
-      targetPort: http
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: parasol-claims-v2
-  namespace: {{ .Values.user }}-dev
-  labels:
-    app: parasol-claims
-    workshop.redhat.com/module: networking-dev-devops
-    workshop.redhat.com/owner: ogsr
-spec:
-  selector:
-    app: parasol-claims
-    version: v2
-  ports:
-    - name: http
-      port: 8080
-      targetPort: http
----
-# why: a per-user Gateway on the openshift-default GatewayClass (istiod-backed). Per-user keeps the
-# entry state self-contained; the shared-multi-tenant variant is a PM/portfolio decision (D-networking-dev-devops-5).
+# === GATEWAY API END STATE (exercise 6) — the attendee's own Gateway + HTTPRoute, published by a Route.
+# why: the listener, on the platform's openshift-default class. The annotation asks the implementation
+# for a ClusterIP Service instead of its default LoadBalancer one, which stays <pending> on a cluster
+# with no LB provider (Programmed=False, AddressNotAssigned — measured on cluster-5vqxc 2026-11-12).
+# It must be a METADATA annotation: the same key under spec.infrastructure.annotations was not honoured
+# for the Service type (the Service stayed LoadBalancer — measured the same day).
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: parasol-gateway
   namespace: {{ .Values.user }}-dev
+  annotations:
+    networking.istio.io/service-type: ClusterIP
+    # The Gateway API CRDs are installed and lifecycled by the cluster ingress operator, not by us.
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
   labels:
     workshop.redhat.com/module: networking-dev-devops
     workshop.redhat.com/owner: ogsr
 spec:
   gatewayClassName: openshift-default
   listeners:
-    - name: https
-      protocol: HTTPS
-      port: 443
-      hostname: "parasol-gw-{{ .Values.user }}.{{ .Values.clusterDomain }}"
-      tls:
-        mode: Terminate
-        certificateRefs:
-          - name: parasol-gateway-cert
     - name: http
       protocol: HTTP
       port: 80
-      allowedRoutes:
-        namespaces:
-          from: Same
 ---
-# why: the weighted traffic split — 90% v1 / 10% v2 through the shared Gateway (HTTPRoute weight is
-# GA in gateway.networking.k8s.io/v1 on this cluster).
+# why: the app team's half — attach to the Gateway above and send everything to parasol-web.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: parasol-claims-split
+  name: parasol-web
   namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true   # CRD from the ingress operator
   labels:
     workshop.redhat.com/module: networking-dev-devops
     workshop.redhat.com/owner: ogsr
@@ -363,30 +269,96 @@ spec:
     - name: parasol-gateway
   rules:
     - backendRefs:
-        - name: parasol-claims-v1
+        - name: parasol-web
           port: 8080
-          weight: 90
-        - name: parasol-claims-v2
-          port: 8080
-          weight: 10
 ---
-# why: a cert-manager-issued cert for the Gateway HTTPS listener (self-signed CA ClusterIssuer minted
-# by the workshop layer; public ACME is rate-limited for per-user certs — build note D-networking-dev-devops-3).
-apiVersion: cert-manager.io/v1
-kind: Certificate
+# why: the Gateway's Envoy pods run in {user}-dev, so default-deny-all applies to them. They need the
+# router in (port 80), istiod in openshift-ingress (15012 — xDS + certificates; without it they never
+# go Ready), and parasol-web out (8080).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
 metadata:
-  name: parasol-gateway-cert
+  name: allow-gateway
   namespace: {{ .Values.user }}-dev
   labels:
     workshop.redhat.com/module: networking-dev-devops
     workshop.redhat.com/owner: ogsr
 spec:
-  secretName: parasol-gateway-cert
-  dnsNames:
-    - "parasol-gw-{{ .Values.user }}.{{ .Values.clusterDomain }}"
-  issuerRef:
-    name: {{ .Values.certIssuerName }}
-    kind: ClusterIssuer
-    group: cert-manager.io
-{{- end }}
+  podSelector:
+    matchLabels:
+      gateway.networking.k8s.io/gateway-name: parasol-gateway
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              policy-group.network.openshift.io/ingress: ""
+      ports:
+        - protocol: TCP
+          port: 80
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-ingress
+          podSelector:
+            matchLabels:
+              app: istiod
+      ports:
+        - protocol: TCP
+          port: 15012
+    - to:
+        - podSelector:
+            matchLabels:
+              app: parasol-web
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# why: the matching ingress side — parasol-web accepts 8080 from the Gateway's pods.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-web-from-gateway
+  namespace: {{ .Values.user }}-dev
+  labels:
+    workshop.redhat.com/module: networking-dev-devops
+    workshop.redhat.com/owner: ogsr
+spec:
+  podSelector:
+    matchLabels:
+      app: parasol-web
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              gateway.networking.k8s.io/gateway-name: parasol-gateway
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# why: publish the ClusterIP Gateway — what the lab's
+# `oc create route edge parasol-gw --service=parasol-gateway-openshift-default --port=http --insecure-policy=Allow`
+# produces. The Service is created by the Gateway implementation, named <gateway>-<gatewayclass>.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: parasol-gw
+  namespace: {{ .Values.user }}-dev
+  labels:
+    workshop.redhat.com/module: networking-dev-devops
+    workshop.redhat.com/owner: ogsr
+spec:
+  to:
+    kind: Service
+    name: parasol-gateway-openshift-default
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Allow
 {{- end }}

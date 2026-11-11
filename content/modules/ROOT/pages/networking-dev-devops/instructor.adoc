@@ -3,13 +3,13 @@
 include::partial$version-attributes.adoc[]
 
 // Internal delivery runbook. Timings MEASURED on the build cluster (OCP 4.21.22, OVN-Kubernetes)
-// as user1 on 2026-07-13 by performing every exercise. The Gateway API segment (exercise 6) is
-// read-only — the GatewayClass state was captured live; a Gateway was deliberately NOT created (it
-// stays Programmed=False on this bare-metal cluster and would install a lightweight Istio in
-// openshift-ingress). Cluster-domain values in output are scrubbed to the placeholder apps.example.com.
+// as user1 on 2026-07-13 by performing every exercise. Exercise 6 (Gateway API) was an instructor
+// demo until 2026-11-12, when it became attendee work and was performed end to end as user8 on OCP
+// 4.22.22. Cluster-domain values in output are scrubbed to the placeholder apps.example.com.
 
 This module has two beats that land, and they bracket the hands-on.
 It *opens* on the flat network — a `demo-client` pod that has nothing to do with the app opening a connection straight to the database (exercise 1) — and it *closes* on the reveal that the same pod is now *blocked* while the API still gets through (exercise 4), followed by a partner namespace isolated *natively* by a UserDefinedNetwork with zero policy (exercise 5).
+Exercise 6 then reuses the lockdown: attendees build their own Gateway, and it answers `503` until they open the flows its Envoy pods need.
 Everything between is the mechanics — Services/endpoints, the exposure tree, default-deny-then-allow — that makes those beats legible.
 Optimize the room for exercise 4 (let the "same database, two answers" land) and exercise 5 (let "no policy at all" land).
 
@@ -20,7 +20,7 @@ include::partial$prep-before-you-teach.adoc[]
 
 == Timing
 
-Total hands-on: *~40 min* (add ~15 min of concept up front, ~5 min buffer).
+Total hands-on: *~44 min* (add ~15 min of concept up front, ~5 min buffer).
 
 [cols="1,4,1,2",options="header"]
 |===
@@ -31,7 +31,7 @@ Total hands-on: *~40 min* (add ~15 min of concept up front, ~5 min buffer).
 | 3 | Lock the namespace down with default-deny | ~5 min | policy apply instant; `parasol-claims` drops to `0/1` within *~30–70 s* (periodSeconds 10 × failureThreshold 3, plus policy-propagation lag); reading the break is the time cost
 | 4 | Re-open only what the app needs | ~10 min | DNS allow → resolves in *~4 s*; db allow pair → `parasol-claims` back to `1/1` in *~10–20 s*; probes instant; the payoff is the point
 | 5 | Native isolation with a UDN | ~6 min | all `oc exec` reads; the isolation probe *times out by design* (~6 s); reading + the "no policy" reveal. Whole group measured at *20 s* of command time
-| 6 | Gateway API `[INSTRUCTOR-DEMO]` | ~4 min | you perform; all read-only; *6 s* of command time — the budget is your talk track. See the script below
+| 6 | Expose the front end through the Gateway API | ~8 min | Gateway `PROGRAMMED True` in *~3 s*; HTTPRoute `Accepted` in *~2 s*; the deliberate `503` is immediate; after the policy fix the Envoy pods go Ready in *5–60 s* (the kubelet's restart backoff, not the policy). Whole group measured at *~39 s* of command time
 |===
 
 [NOTE]
@@ -47,7 +47,10 @@ The re-encrypt beat closing exercise 2 was added later and measured the same way
 The serving-cert Secret appears in *under 5 s* of the annotation.
 Its budget came from re-measuring the three lightest groups rather than from the payoff: exercises 1 and 5 measured *21 s* and *20 s* of command time against 5 and 7 minutes of attendee time, and exercise 6 is *6 s* of read-only commands — so each gave up one minute, and exercise 2 absorbed all three.
 Exercises 3 and 4 were deliberately left alone: exercise 3 contains a genuine 30–70 s wait you cannot compress, and exercise 4 is the module's payoff.
-The total is unchanged at *40 min*.
+The total stayed at *40 min* then.
+
+Exercise 6 became hands-on on 2026-11-12 and was measured as `user8` on OCP 4.22.22: *~39 s* of command time, plus the Envoy pods' recovery after the policy fix — *5 s* when the policies went in at once, *9 s* after a 40 s reading pause, *~60 s* after the pods had spent two minutes in restart backoff.
+The group is budgeted at *8 min* for reading the three-object model and the break; the module total rose to *44 min*.
 ====
 
 == How to know the room can move on
@@ -68,8 +71,8 @@ adm start networking-dev-devops --user user1
 ws verify networking-dev-devops --user user1 --entry-only
 ----
 +
-Expect `✅ all 10 checks passed`.
-The checks cover both namespaces: the `{user}-dev` marker + the three tiers (`claims-db` ready, `parasol-web`/`parasol-claims` present) + `demo-client` ready, and the `{user}-partner` UDN + `partner-workload` on it; plus the clean-slate assertions (no default-deny, no Route yet).
+Expect `✅ all 11 checks passed`.
+The checks cover both namespaces: the `{user}-dev` marker + the three tiers (`claims-db` ready, `parasol-web`/`parasol-claims` present) + `demo-client` ready, and the `{user}-partner` UDN + `partner-workload` on it; plus the clean-slate assertions (no default-deny, no Route, no Gateway yet).
 
 . *The parasol app images are present (this cluster has the imagestreams).*
 +
@@ -136,15 +139,30 @@ yes
 +
 The beat annotates a Service, mounts a Secret into a Deployment, and creates a Route — all three are within the attendee's own namespace role. Checked by impersonation, not assumed.
 
-. *The GatewayClass is Accepted (for the exercise-6 demo) — and attendees can read it.*
+. *Exercise 6 will run: the GatewayClass is Accepted, and an attendee can read it, read the Gateway API CRDs, and create a Gateway.*
 +
 [source,sh,role=execute]
 ----
-oc get gatewayclass openshift-default
-oc auth can-i get gatewayclasses.gateway.networking.k8s.io --as=user1 --as-group=workshop-attendees
+oc get gatewayclass openshift-default --as=user1 --as-group=workshop-attendees --as-group=system:authenticated
+oc get crd httproutes.gateway.networking.k8s.io -o name --as=user1 --as-group=workshop-attendees --as-group=system:authenticated
+cat <<'EOF' | oc apply --dry-run=server -n user1-dev --as=user1 --as-group=workshop-attendees --as-group=system:authenticated -f -
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: {name: preflight-gw, annotations: {networking.istio.io/service-type: ClusterIP}}
+spec: {gatewayClassName: openshift-default, listeners: [{name: http, protocol: HTTP, port: 80}]}
+EOF
 ----
 +
-Expect `ACCEPTED=True` and `yes`. The GatewayClass is a cluster-wide singleton set up by the platform; you only read it. The `yes` matters because the lab's exercise-6 block has *attendees* run `oc get gatewayclass` — the read comes from the `platform-observer` ClusterRole (workshop-config ≥0.1.26); a `no` means the workshop-config layer is stale — sync it before the session.
+.Expected output
+[source,texinfo]
+----
+NAME                CONTROLLER                           ACCEPTED   AGE
+openshift-default   openshift.io/gateway-controller/v1   True       12h
+customresourcedefinition.apiextensions.k8s.io/httproutes.gateway.networking.k8s.io
+gateway.gateway.networking.k8s.io/preflight-gw created (server dry run)
+----
++
+Real reads and a server-side dry run, as the attendee, rather than `oc auth can-i`. The GatewayClass and CRD reads come from the `platform-observer` ClusterRole; the Gateway create comes from the per-namespace `ogsr-gateway-editor` grant (Kubernetes' `admin` role covers HTTPRoutes but not Gateways). A `Forbidden` on any line means the workshop-config layer is stale — sync it before the session. The CRD read matters more than it looks: the lab's layer-4 loop prints `ABSENT` for any failed read, so an attendee who cannot read CRDs would see the right answer for the wrong reason.
 
 . *A representative attendee command actually works — from the cockpit, as the attendee.*
 +
@@ -155,69 +173,18 @@ adm smoke networking-dev-devops user1     # execs the in-cluster demo-client and
 +
 This is the only pre-flight instrument that runs *as the attendee*, in the real cockpit terminal — everything above runs as cluster-admin. `demo-client` is the verification substrate this module leans on for every Route/NetworkPolicy/exposure probe; expect all checks to pass.
 
-== Instructor demo — the Gateway API (exercise 6)
+== Exercise 6 — what the room will see
 
-All read-only.
-*Do not create a `Gateway` live:* on this bare-metal cluster it stays `Programmed=False` (no LoadBalancer to give it an address) and creating one makes the ingress operator install a lightweight Istio in `openshift-ingress` — cruft you do not want mid-session.
-Show the *model* and the *boundary* instead.
-
-=== The model is installed and GA
-
-[source,sh,role=execute]
-----
-oc get gatewayclass
-oc get crd | grep -E '^(gateways|httproutes|grpcroutes|referencegrants)\.gateway\.networking\.k8s\.io' | awk '{print $1}'
-----
-
-.Expected output — captured on a cluster that also runs the Service Mesh stack; `openshift-default` is the only row this module guarantees
-[source,texinfo]
-----
-NAME                CONTROLLER                           ACCEPTED   AGE
-istio               istio.io/gateway-controller          True       3d
-istio-remote        istio.io/unmanaged-gateway           True       3d
-openshift-default   openshift.io/gateway-controller/v1   True       2d
-gateways.gateway.networking.k8s.io
-grpcroutes.gateway.networking.k8s.io
-httproutes.gateway.networking.k8s.io
-referencegrants.gateway.networking.k8s.io
-----
-
-IMPORTANT: *Check the list before you promise it.* This module's `stacks:` is empty (`/modules.yaml`) — the `istio`/`istio-remote` rows come from the *Service Mesh* module's stack, and on a cluster provisioned without it you get `openshift-default` alone. Run `oc get gatewayclass` in your pre-flight and adapt the talk track: the one-API-many-implementations beat is a bonus where the rows exist, never a promise.
-
-Talk track: the portable shape is *GatewayClass* (an implementation's advertisement — the platform's is `openshift-default`, `Accepted` on every cluster; where the shared Service Mesh control plane is installed it registers `istio`/`istio-remote` of its own, a nice one-API-many-implementations beat) → *Gateway* (a listener the platform team owns) → *HTTPRoute* (routing rules app teams attach, including `backendRefs` with `weight` for a traffic split). It is GA on OpenShift 4.19+; the same three-object model runs on any conformant platform.
-
-=== The honest L4 boundary
-
-[source,sh,role=execute]
-----
-for c in tcproutes tlsroutes udproutes; do
-  oc get crd $c.gateway.networking.k8s.io >/dev/null 2>&1 && echo "$c: PRESENT" || echo "$c: ABSENT (not on the supported channel)"
-done
-----
-
-.Expected output
-[source,texinfo]
-----
-tcproutes: ABSENT (not on the supported channel)
-tlsroutes: ABSENT (not on the supported channel)
-udproutes: ABSENT (not on the supported channel)
-----
-
-Talk track: Routes and today's Gateway API are HTTP(S)/SNI-centric. The experimental L4 route types are deliberately not installed (a validating admission policy blocks even cluster-admin from adding them), so raw-TCP/passthrough ingress is the *service mesh's* job — the advanced Service Mesh module. This is the same boundary the spec calls out; don't promise attendees L4 ingress via a Route.
-
-=== The bare-metal gap (and the TLS direction)
-
-Explain, do not perform: creating a `Gateway` on `openshift-default` here leaves it `Programmed=False` because no LoadBalancer provider answers — the same reason the exercise-2 `type=LoadBalancer` sat at `<pending>`.
-On a cluster *with* a provider (a cloud LB, or MetalLB on bare metal), the Gateway gets an address and the model runs end-to-end.
-The TLS direction is a cert-manager-issued certificate referenced from the Gateway listener's `certificateRefs` (a self-signed CA issuer for per-user certs, since public ACME is rate-limited at event scale).
-The module's `adm solve` ships that whole end state — Gateway + weighted `HTTPRoute` + cert-manager `Certificate` — behind a `gatewayApi=true` flag that is *off by default* precisely because of this gap; flip it only on a cluster that has an LB provider.
+* *`PROGRAMMED True` is not "serving".* The Gateway reports `Programmed` as soon as its Service has an address. Under exercise 3's `default-deny-all` its Envoy pods cannot reach `istiod` (`openshift-ingress`, port 15012), so they never go Ready and the `parasol-gw` Route returns `503`. That is the planned break; let it land before the fix — "the Gateway is pods in *your* namespace, so *your* policy applies to it."
+* *The annotation is the bare-metal answer.* Without `networking.istio.io/service-type: ClusterIP` the implementation asks for a `LoadBalancer` Service, which stays `<pending>` here (`AddressNotAssigned`). It must be a `metadata` annotation — the same key under `spec.infrastructure.annotations` was not honored for the Service type on the build cluster.
+* *Each Gateway is two Envoy pods.* The `openshift-default` class sets a HorizontalPodAutoscaler with `minReplicas: 2`; each proxy requests 100m CPU / 128Mi and is limited to 2 CPU / 1Gi. Per attendee that is 4 CPU of `limits.cpu` against the namespace quota of 8 — enough for the lab, measured with the rest of the module running, but tight during a Gateway rollout.
 
 == Demo-mode notes
 
 Beyond the Say/Show/Do arc in the demo flavor:
 
 * *Run the demo from the entry state, not `adm solve`.*
-The whole story is *building* the controls from a flat network. `adm solve networking-dev-devops` renders the finished end state (policies + Route in place) — use it to *show the destination* or pre-stage, never as the demo's start.
+The whole story is *building* the controls from a flat network. `adm solve networking-dev-devops` renders the finished end state (policies, Routes and the exercise-6 Gateway in place) — use it to *show the destination* or pre-stage, never as the demo's start.
 * *Let the break breathe (beat 2).*
 After `default-deny`, pause on `parasol-claims` at `0/1` and the DB health-`DOWN` log line. This is the moment that makes "the network is a control plane" concrete — the app didn't crash, the *network* stopped it.
 * *Land the payoff line (beat 4).*
@@ -265,10 +232,11 @@ A Primary UDN pod keeps a cluster-network `eth0` for node-level infrastructure (
 OVN-Kubernetes enforces the isolation regardless of the extra interface: the pod cannot reach workload pods in other namespaces (verified — the connection to `parasol-web` times out), even though it can still resolve DNS via the shared cluster service.
 The presence of `eth0` is an implementation detail, not a leak.
 
-*7. "Can we demonstrate the Gateway API end-to-end here?"*::
-Not on this cluster.
-The OpenShift Gateway API implementation provisions the Gateway behind a LoadBalancer Service, which — as with question 2 — stays `<pending>` on bare metal, so the Gateway never gets an address and never reaches `Programmed=True`.
-Show the *model* (GatewayClass → Gateway → HTTPRoute, weighted splits) and the *boundary* (no L4 route types), and run the end-to-end path on a cluster that has an LB provider. The Route is the runnable exposure here.
+*7. "Why does my Gateway need a Route in front of it? Isn't the Gateway the ingress?"*::
+On a cluster with a load-balancer provider, it is: the implementation gives each Gateway a `LoadBalancer` Service and the Gateway gets its own external address.
+This cluster has no provider, so that Service would sit `<pending>` exactly like question 2, and the Gateway would report `AddressNotAssigned`.
+The lab asks for a `ClusterIP` Service instead (the `networking.istio.io/service-type` annotation) and publishes it through the cluster's router with an edge Route.
+The three-object model — GatewayClass → Gateway → HTTPRoute — is identical either way; only how the Gateway's address reaches the outside world changes.
 
 == Watchouts
 
@@ -287,9 +255,9 @@ The readiness probe checks the plaintext port, so `parasol-web` goes `1/1` wheth
 * *The two `oc set` commands trigger two rollouts.*
 `oc set volume` and `oc set env` each patch the Deployment, so the second supersedes the first mid-roll; `oc rollout status` after both is what settles it (measured 26 s). An attendee who runs `oc rollout status` between them will see it complete twice and may think something is wrong.
 * *LoadBalancer `<pending>` and Gateway `Programmed=False` are the same root cause.*
-Bare metal, no LB provider. If asked why the Gateway API isn't hands-on, it is this — not a version or licensing gap.
-* *Don't create a Gateway live.*
-It stays unaddressed *and* triggers a lightweight Istio install in `openshift-ingress`. Keep exercise 6 read-only.
+Bare metal, no LB provider. A Gateway showing `AddressNotAssigned` is missing the `networking.istio.io/service-type: ClusterIP` annotation (or carries it under `spec.infrastructure` instead of `metadata`) — `oc annotate` fixes it in place in about 2 s.
+* *The Gateway `503` is the planned break, not a fault.*
+Under default-deny the Envoy pods restart on a failing startup probe until `allow-gateway` lets them reach `istiod`. If an attendee's pods stay `0/1` *after* the fix, check that policy's `podSelector` label (`gateway.networking.k8s.io/gateway-name`) matches their Gateway's name.
 * *The `EndpointSlice` deprecation warning on `oc get endpoints` is cosmetic.*
 `oc get endpoints` prints `v1 Endpoints is deprecated … use discovery.k8s.io/v1 EndpointSlice`. It is the clearest view for teaching Service→endpoints; the warning is informational and harmless.
 
@@ -303,3 +271,7 @@ The *re-encrypt* beat closing exercise 2 was added on 2026-07-25 and performed e
 The 503 failure mode was reproduced deliberately by pointing a reencrypt Route at the plaintext port.
 The beat was also checked *against the rest of the lab*: with exercise 3's `default-deny-all` and exercise 4's `allow-web-from-router` in place, both the edge and the re-encrypt Route still return `HTTP 200` (that policy sets no port restriction, so 8443 is covered — exercise 4 needed no change), and `ws verify networking-dev-devops user7` reports *all 14 checks passed* with the beat applied.
 The claim that the router auto-verifies an infrastructure-generated backend certificate is grounded in the Route API's own field documentation (`oc explain route.spec.tls.destinationCACertificate`), not recalled.
+
+Exercise 6 was rebuilt on 2026-11-12 from a read-only instructor demo into attendee work, and performed end to end as `user8` on OpenShift 4.22.22 before it was written: the GatewayClass and CRD reads, the ClusterIP-backed Gateway (`PROGRAMMED True` in ~3 s), the HTTPRoute (`Accepted`, `ResolvedRefs`), the `503` with the Envoy pods held at `0/1` by `default-deny-all`, the two policies, and the claims JSON plus the Gateway access-log line naming `parasol-web` as the upstream.
+Two behaviours were measured rather than assumed: the same annotation under `spec.infrastructure.annotations` left the Service `LoadBalancer` and the Gateway `AddressNotAssigned`, while the `metadata` annotation switched it to `ClusterIP` in 2 s; and the pods' recovery after the fix ranged from 5 s to ~60 s with the time they had spent in restart backoff.
+With the whole lab applied, `ws verify networking-dev-devops --user user8` reported *all 19 checks passed*.
