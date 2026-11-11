@@ -10,7 +10,7 @@ This module is where developers feel the platform work *for* them for the first 
 Optimize for that "oh — that's it?" moment.
 The two ideas that must land are the *inner loop* (seconds-scale edit-run-observe) and the *devfile as a contract in Git*; the debugging, Valkey-cache, and reach-and-ship exercises are reinforcement.
 
-The single biggest delivery risk is *workspace start time*, and it is entirely about image pull — plan for it (see Pre-flight and Watchouts).
+Workspace start time used to be the biggest delivery risk, and it is entirely about image pull; the installer now pre-pulls the workspace images onto every node (see Watchouts).
 
 include::partial$prep-before-you-teach.adoc[]
 
@@ -50,7 +50,7 @@ On the build cluster (OCP 4.21.22, Dev Spaces 3.29.0) on 2026-07-09, a workspace
 * *Exercise 7 (added 2026-07-15)* — `oc -n <user>-dev port-forward svc/claims-db 5432:5432` establishes the tunnel instantly (`Forwarding from 127.0.0.1:5432 -> 5432`); the `oc new-app` S2I build + rollout is the same source-to-Deployment on-ramp measured in Ways to Build & Deliver Apps — ~4.5 min on a warm cluster, up to ~11 min for the first build on a fresh one (cold Maven egress, no layer cache). The `registry.redhat.io/rhel9/valkey-8` image and its digest were confirmed by pulling and running it on this cluster.
 
 The *Attendee time* column adds realistic reading, IDE-navigation, and checkpoint overhead on top of that core.
-Image Puller is *not* enabled on this cluster, so the cold-start number is a genuine per-node pull — it is the number to plan around.
+Re-measured on cluster-5vqxc (Dev Spaces 3.31) on 2026-11-12: a node with none of the workspace images took *109 s* to `Running` (the 5.3 GB developer image alone took 65 s); with the installer's pre-pull in place the same start took *37 s*.
 ====
 
 == Pre-flight checklist
@@ -79,9 +79,9 @@ ws verify devspaces-inner-loop --user user1 --entry-only
 +
 Expect `✅ all 7 checks passed` (namespace, marker, quota, Gitea fork, claims-db ready, parasol-claims ready, Route 200).
 
-. *A workspace actually starts — and this warms the image on a node.*
+. *A workspace actually starts.*
 Sign in to `{devspaces_url}` as `user1`, click the *parasol-claims* workspace that `ws prep` declared, wait for the che-code editor, and run `java -version` in the workspace terminal (expect openjdk 21).
-Doing this before the room arrives pulls the universal developer image onto at least one node, so the first attendee workspaces on that node start in ~20 s instead of ~85 s.
+No warming is needed: the installer's `ogsr-image-prepull` DaemonSet already holds the workspace images on every schedulable node — `oc get ds ogsr-image-prepull -n ogsr-parasol-images` shows `READY` equal to `DESIRED`.
 
 . *Governance is as expected.*
 +
@@ -95,14 +95,11 @@ Expect `max/user=2  idle=1800s`.
 Attendees can run two workspaces at once and idle after 30 minutes — tell them so a stopped workspace does not read as broken.
 
 [NOTE]
-.Recommended for events of ~30 users: enable the Image Puller
+.Workspace images are pre-pulled at install
 ====
-This cluster does *not* run the Kubernetes Image Puller, so every workspace start pulls the universal developer image (and the editor) per node on first use.
-With ~30 attendees starting near-simultaneously, that is a pull storm that makes first starts slow and uneven.
-
-For a large event, have the platform team enable pre-pulling in the Dev Spaces stack — set `spec.components.imagePuller.enable: true` on the CheCluster (and let it seed `registry.redhat.io/devspaces/udi-rhel9:3.29` — the exact tag the workshop devfile pins — plus the editor image).
-This is a *platform change*, not something to apply live from the instructor seat — flag it during provisioning.
-Warming one workspace per node (pre-flight step 3) is the manual fallback if the puller is not available.
+The installer runs a small DaemonSet, `ogsr-image-prepull` in `ogsr-parasol-images`, that pulls the developer image, the editor image and the project-clone image onto every schedulable node, so ~30 near-simultaneous first starts do not become a pull storm.
+A node tainted `NoSchedule` (the batch pool) is skipped on purpose — workspaces cannot land there either.
+A node added after install gets the images as soon as the DaemonSet schedules onto it.
 ====
 
 . *`adm smoke` passes for a sample attendee — the only pre-flight check that runs as the attendee, in the real cockpit terminal.*
@@ -161,21 +158,20 @@ It idles after 30 minutes, is capped at two per user, and dev mode is for iterat
 Production comes from the outer loop: the `git push` at the end feeds pipelines and GitOps in later modules.
 
 *5. "My workspace is slow to start / stuck. Is it broken?"*::
-Almost always it is a first-time image pull (the universal developer image is large) — give it up to ~90 s on a cold node.
+A start takes ~40 s with the images pre-pulled; give it up to two minutes on a node the pre-pull missed.
 If it is genuinely stuck past a few minutes, it is usually image pull or scheduling; the troubleshooting page has the exact `oc get devworkspace` / events checks.
-Enabling the Image Puller (see Pre-flight) removes this for large events.
 
 == Watchouts
 
-* *First start is an image pull, full stop.*
-~83 s cold, ~21 s warm on this cluster.
-Everything about pacing follows from warming nodes ahead of time.
+* *Start time is image pull, and the installer has already done it.*
+~37 s with the pre-pull, ~109 s on a node without it (cluster-5vqxc, 2026-11-12).
+If starts are slow, check the pre-pull DaemonSet first.
 * *Two workspaces per user, max.*
 `maxNumberOfRunningWorkspacesPerUser=2`.
 If an attendee left the debug workspace running and starts another, they may hit the cap — tell them to stop old ones (the dashboard lists them).
 * *Start storms at ~30 users.*
-Simultaneous first starts hammer image pull and per-user PVC provisioning.
-Stagger the "open your workspace" step across the room, or (better) enable the Image Puller during provisioning.
+Images are pre-pulled, but simultaneous first starts still hammer per-user PVC provisioning.
+Stagger the "open your workspace" step across the room if starts queue.
 * *Git push needs credentials the first time.*
 This is the exercise-5 break-and-fix and it will generate questions; the fix (credential helper, or the che-code Source Control panel which prompts) is in the lab and troubleshooting.
 Because the source repos are public, clone works with no credentials — only *push* needs them.

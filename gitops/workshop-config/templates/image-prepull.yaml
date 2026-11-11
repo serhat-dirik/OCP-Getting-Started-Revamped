@@ -1,0 +1,108 @@
+{{- /*
+  image-prepull — put the workshop's heaviest images on every schedulable node at INSTALL, so no
+  attendee pays a cold pull in the middle of an exercise.
+
+  WHAT: one DaemonSet in the shared ogsr-parasol-images namespace. Each image is a container that
+  does nothing: the extra images run `true` as init containers and exit, and the pod's one long-lived
+  container is parasol-claims running `sleep infinity`. A pod whose containers were created keeps its
+  images "in use", so kubelet image GC never evicts them.
+
+  WHY A DAEMONSET OF OUR OWN AND NOT THE CHECLUSTER imagePuller. Turning on
+  spec.components.imagePuller makes the Dev Spaces operator subscribe the Kubernetes Image Puller
+  operator from the community catalog — a second operator, a catalog this workshop otherwise never
+  needs (absent on disconnected or catalog-trimmed clusters), and an edit to a CheCluster that on an
+  adopted cluster belongs to the org. It also only pre-pulls for Dev Spaces, while two of the three
+  images here are not Dev Spaces images. This is one workshop-owned object in a workshop-owned
+  namespace, removed with it by ogsr-uninstall.sh.
+
+  WHAT GETS PULLED, and only when an enabled module needs it (workshop-config.moduleEnabled):
+    parasol-claims  always — 18 modules run it, and the shared build here always runs. Main container,
+                    so `adm rebuild-images` finds it as a consumer and rolls it onto the new digest.
+    UDI, che-code,  devspaces-inner-loop, ai-assisted-development — every image a cold workspace start
+    project-clone   pulled (6.9GB; 109s to Running cold on cluster-5vqxc, see values.yaml).
+    openshift/tools the seven modules whose entry states run it (multi-tenancy-workload-security first:
+                    its lab used to tell attendees to warm it by hand).
+  "Schedulable" means what the scheduler means: no tolerations, so a node tainted NoSchedule (the
+  batch pool, tainted masters) is skipped — the workloads these images serve cannot land there either.
+
+  Health: Argo reports this DaemonSet Progressing until every node has pulled, so the install's
+  workshop-config wait covers the pull. parasol-claims retries (ImagePullBackOff) until its build here
+  finishes, ~80s after sync on a measured install.
+*/ -}}
+{{- define "workshop-config.prepullContainerSpec" -}}
+resources:
+  requests:
+    cpu: 1m
+    memory: 8Mi
+  limits:
+    cpu: 10m
+    memory: 32Mi
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+{{- end }}
+{{- $udi := false }}
+{{- range $slug := list "devspaces-inner-loop" "ai-assisted-development" }}
+{{- if include "workshop-config.moduleEnabled" (dict "root" $ "slug" $slug) }}{{ $udi = true }}{{ end }}
+{{- end }}
+{{- $tools := false }}
+{{- range $slug := list "multi-tenancy-workload-security" "deployment-targets-scheduling" "eventing-deep-dive" "networking-dev-devops" "resilience-multicluster-dr" "serverless-zero-to-hero" "service-mesh-advanced-gateways" }}
+{{- if include "workshop-config.moduleEnabled" (dict "root" $ "slug" $slug) }}{{ $tools = true }}{{ end }}
+{{- end }}
+# Pre-pulls the workshop's heavy images onto every schedulable node so first use is a warm start.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ogsr-image-prepull
+  namespace: {{ .Values.parasolImages.namespace }}
+  labels:
+    app.kubernetes.io/name: ogsr-image-prepull
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ogsr-image-prepull
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ogsr-image-prepull
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 0
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if or $udi $tools }}
+      initContainers:
+      {{- if $udi }}
+        - name: udi
+          image: {{ .Values.imagePrepull.udi | quote }}
+          command: ["true"]
+          {{- include "workshop-config.prepullContainerSpec" . | nindent 10 }}
+        - name: che-code
+          image: {{ .Values.imagePrepull.cheCode | quote }}
+          command: ["true"]
+          {{- include "workshop-config.prepullContainerSpec" . | nindent 10 }}
+        - name: project-clone
+          image: {{ .Values.imagePrepull.projectClone | quote }}
+          command: ["true"]
+          {{- include "workshop-config.prepullContainerSpec" . | nindent 10 }}
+      {{- end }}
+      {{- if $tools }}
+        - name: tools
+          # Same reference the labs use, so the node caches it under that exact name.
+          image: image-registry.openshift-image-registry.svc:5000/openshift/tools:latest
+          command: ["true"]
+          {{- include "workshop-config.prepullContainerSpec" . | nindent 10 }}
+      {{- end }}
+      {{- end }}
+      containers:
+        - name: parasol-claims
+          image: image-registry.openshift-image-registry.svc:5000/{{ .Values.parasolImages.namespace }}/parasol-claims:1.0
+          # Workshop-built, rebuilt in place under a mutable tag (entry-states README rule 8).
+          imagePullPolicy: Always
+          command: ["sleep", "infinity"]
+          {{- include "workshop-config.prepullContainerSpec" . | nindent 10 }}
