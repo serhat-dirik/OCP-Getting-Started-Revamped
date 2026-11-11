@@ -12,10 +12,13 @@ include::partial$version-attributes.adoc[]
 // quota and wedged the roll behind a flat available=3/3). Cold-start figures and the quota arithmetic
 // re-measured as user2 that day on Kubernetes 1.35; the exercise-5 END-TO-END total is still unmeasured
 // because that cluster had no node headroom for a maxSurge pod.
+// 2026-11-12: the instructor-performed taint-and-drain segment of exercise 6 is gone. Exercise 6 is
+// attendee work now (a read of the batch-pool node, then evictions of their own pods), measured as
+// user2 on OCP 4.22.22 / Kubernetes 1.35 that day.
 
 This module has two beats that land, and they bracket the hands-on.
 The *break-and-fix* is exercise 4 — the batch pod stuck `Pending` on an untolerated taint, then *snapping* onto the batch node the instant the toleration is added — which makes the single most important distinction concrete: *a selector attracts, a taint repels, a toleration only permits*.
-The *proof* is exercise 5 — attendees *diagnose* why a rollout drops requests (a value planted in the database reverts to its seed after one pod restart, because every boot reseeds the *shared* `claims-db`), fix it at the source (`schema-management=none`), then watch `maxUnavailable: 0` hold available replicas flat at 3 through a live rollout and a PodDisruptionBudget *refuse* an eviction rather than breach its floor.
+The *proof* is exercise 5 — attendees *diagnose* why a rollout drops requests (a value planted in the database reverts to its seed after one pod restart, because every boot reseeds the *shared* `claims-db`), fix it at the source (`schema-management=none`), then watch `maxUnavailable: 0` hold available replicas flat at 3 through a live rollout. Exercise 6 closes it: attendees spend their PodDisruptionBudget the way a node drain does and watch it *refuse* the eviction that would breach its floor.
 Everything between is the mechanics — requests/QoS, anti-affinity, topology spread — that make those beats legible.
 
 The single most common confusion is *"I set a nodeSelector for the pool and my pod won't schedule."*
@@ -26,7 +29,7 @@ include::partial$prep-before-you-teach.adoc[]
 
 == Timing
 
-Total hands-on: *~40 min* (add ~12 min of concept up front, ~5 min buffer). Exercise 5 grew with the diagnose-then-fix arc added after the 2026-07-16 grounding — re-time it on the next full run.
+Total hands-on: *~42 min* (add ~12 min of concept up front, ~5 min buffer). Exercise 5 grew with the diagnose-then-fix arc added after the 2026-07-16 grounding — re-time it on the next full run.
 
 [cols="1,4,1,2",options="header"]
 |===
@@ -36,8 +39,8 @@ Total hands-on: *~40 min* (add ~12 min of concept up front, ~5 min buffer). Exer
 | 2 | Direct the API with pod anti-affinity | ~8 min | anti-affinity roll *~70 s* (2 replicas; re-measured 2026-07-31 at 72 s — the earlier ~38 s estimate did not hold up); delete → reschedule *~12 s*; scale-to-6 → `Pending` + `FailedScheduling` event in *~3 s*
 | 3 | Spread with topology spread constraints | ~5 min | each roll *~40–120 s* — required anti-affinity makes the rollout *sequential* (the surge pod waits for a node to free); reading the spread is the point
 | 4 | Reserve a dedicated pool (break-and-fix) | ~7 min | `nodeSelector` alone → `Pending` in *~10 s*; the event is immediate; toleration → lands on the pool node in *~8 s*
-| 5 | Make the rollout zero-downtime | ~10 min | default-roll probe *55 s* (*dropped 4* of ~292, measured 2026-07-29); marker diagnose/fix adds two single-pod restarts (JVM cold-start *~27 s* at the 500m limit — 23/25/33 s measured 2026-07-28 — and *~15 s* at `limits.cpu: 1` — 14/14/14/15/15/15 s across two rolls); the hardening roll itself *27 s* for 3 replicas (measured 2026-07-29); capacity sample *18 × 4 s* — an *88 s* window with the restart — plus an `oc rollout status` confirmation; re-measured drop probe *55 s* (*dropped 1–3*, not zero — see the reseed note); PDB create/exhaust/evict *instant* (429). Hardening half ≈ *3 min* of machine time
-| 6 | Read how the platform shapes the cluster `[INSTRUCTOR-DEMO]` | ~5 min | all read-only; you perform the taint/drain segment — see the script below
+| 5 | Make the rollout zero-downtime | ~10 min | default-roll probe *55 s* (*dropped 4* of ~292, measured 2026-07-29); marker diagnose/fix adds two single-pod restarts (JVM cold-start *~27 s* at the 500m limit — 23/25/33 s measured 2026-07-28 — and *~15 s* at `limits.cpu: 1` — 14/14/14/15/15/15 s across two rolls); the hardening roll itself *27 s* for 3 replicas (measured 2026-07-29); capacity sample *18 × 4 s* — an *88 s* window with the restart — plus an `oc rollout status` confirmation; re-measured drop probe *55 s* (*dropped 1–3*, not zero — see the reseed note); PDB create *instant*. Hardening half ≈ *3 min* of machine time
+| 6 | Read how the platform shapes the cluster, then drain through your budget | ~7 min | the reads are instant; the three-pod eviction loop *~5 s*; the retry loop accepted after *12 s* (two `429` refusals first) — measured 2026-11-12 as `user2`
 |===
 
 [NOTE]
@@ -168,7 +171,17 @@ That is a cluster-provisioning problem, not a lab defect — see the sizing note
 oc get clusterrole platform-observer -o jsonpath='{range .rules[*]}{.apiGroups}:{.resources}{"\n"}{end}' | grep -E 'daemonset|nodes'
 ----
 +
-Expect both `["apps"]:["daemonsets"]` and a rule covering `nodes`. Without the daemonsets grant, attendees can't `oc get ds -A` and exercise 6 becomes instructor-only.
+Expect both `["apps"]:["daemonsets"]` and a rule covering `nodes`. Without the daemonsets grant, exercise 6's first read fails; without `nodes`, so does its batch-pool read.
+
+. *The attendee can call the Eviction API in their own namespace (exercise 6).*
++
+[source,sh,role=execute]
+----
+POD=$(oc get pods -n user2-dev -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+echo '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"'"$POD"'"},"deleteOptions":{"dryRun":["All"]}}' | oc create --raw /api/v1/namespaces/user2-dev/pods/$POD/eviction -f - --as=user2 --as-group=workshop-attendees --as-group=system:authenticated
+----
++
+Expect `{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Success","code":201}`. The `dryRun` option means nothing is evicted. A `Forbidden` here means the attendee cannot create `pods/eviction` in `{user}-dev`, and exercise 6's evictions will fail the same way.
 
 . *A representative attendee command actually works — from the cockpit, as the attendee.*
 +
@@ -179,40 +192,13 @@ adm smoke deployment-targets-scheduling user2     # proves the batch pool is vis
 +
 This is the only pre-flight instrument that runs *as the attendee*, in the real cockpit terminal — everything above runs as cluster-admin. Expect all checks to pass.
 
-== Instructor demo — taint a pool, and drain through a PDB (exercise 6)
+== Exercise 6 — the drain, from the attendee's side
 
-Both operations are *cluster-wide* — they affect every tenant on a shared cluster — so keep them instructor-performed.
-*Do the drain on a disposable or clearly-safe node only*; on a shared workshop cluster a real `oc adm drain` evicts other users' pods.
+Nothing in this module is instructor-performed. The install labelled and tainted the batch pool before the workshop; attendees read it. They never drain a node either: they call the Eviction API, the call `oc adm drain` makes for each pod on a node, on their own `parasol-claims` pods.
 
-=== Create a pool (how the batch pool was made)
-
-[source,sh,role=execute]
-----
-oc label node <a-worker> workshop.redhat.com/pool=batch
-oc adm taint node <a-worker> workshop.redhat.com/pool=batch:NoSchedule
-oc get nodes -l workshop.redhat.com/pool=batch
-----
-
-Talk track: the label is the *attractor* (a `nodeSelector` target), the taint is the *repeller* (`NoSchedule` keeps untolerated pods off). Together they make a dedicated pool. The label evicts nothing; `NoSchedule` only blocks *new* untolerated pods. This is exactly the pair a platform team applies — often via a MachineSet's `spec.template.spec.metadata.labels` and a machine-config — to build GPU/batch/licensed pools.
-
-=== Drain a node through the PodDisruptionBudget
-
-With a claims pod on `<node>` and the exercise-5 PDB (`minAvailable: 1`) in place:
-
-[source,sh,role=execute]
-----
-oc adm drain <node> --ignore-daemonsets --delete-emptydir-data --pod-selector app=parasol-claims
-----
-
-Talk track: the drain *evicts* the claims pod (the budget allows one — `ALLOWED DISRUPTIONS: 2`), and it reschedules on a *distinct* node because the anti-affinity still holds. If you first exhaust the budget (`oc patch pdb parasol-claims --type=merge -p '{"spec":{"minAvailable":3}}'`), the same drain *waits*, printing:
-
-[source,texinfo]
-----
-error when evicting pods/"parasol-claims-..." -n "user2-dev" (will retry after 5s):
-Cannot evict pod as it would violate the pod's disruption budget.
-----
-
-That message — captured directly from the eviction API on the build cluster — is the whole point of a PDB: a voluntary disruption blocks rather than breaches. Restore `minAvailable: 1` afterwards.
+* *What lands.* Three evictions at once: two accepted (`201`), the third refused (`429`, `Cannot evict pod as it would violate the pod's disruption budget`), because two pods leaving puts the service at exactly `minAvailable: 1`. The retry loop is the drain's own behaviour: refused every 5 s until the replacements are `Ready`, then accepted (12 s on the build cluster).
+* *A different count is not a fault.* The number accepted before the first `429` is the budget's `ALLOWED DISRUPTIONS` at that moment, and a replica that was not yet `Ready` lowers it. The retry loop ends in an accepted eviction either way.
+* *Say the trade-off out loud.* `minAvailable: 1` let the evictions take the API down to one pod for a few seconds. The floor is a capacity decision, not a default.
 
 == Demo-mode notes
 
@@ -289,15 +275,15 @@ you that banner has a *complete* run, not a half-graded one.
 Each `statement-batch` is tiny (50m/64Mi), so ~30 users' batch pods fit comfortably. If a user scales `statement-batch` up hard, it could crowd the node — the `{user}-dev` quota keeps it bounded. Don't add a second dedicated pool per user; it's shared substrate by design.
 * *This module is the catalogue's node-headroom canary.*
 It is the only module that asks the scheduler for *four distinct placements at once* (three anti-affinity-spread replicas plus a surge pod). Every other module's workloads will happily pile onto one node. If the cluster is tight, this module is where you find out — see the pre-flight headroom check.
-* *Never run a real `oc adm drain` on the shared cluster hands-on.*
-It evicts *every* tenant's pods on that node, not just the demo user's. Keep the drain instructor-only, on a disposable or clearly-safe node; the PDB-block message can be shown safely via the eviction API (exercise 5) without draining anything.
+* *Never run a real `oc adm drain` on the shared cluster.*
+It evicts *every* tenant's pods on that node. Exercise 6 makes the same eviction call on the attendee's own pods and gets the same answers, so a real drain adds nothing but risk.
 
 == Provenance
 
 Deployment Targets & Scheduling is a net-new module (the spec's "fresh; fragments in old ops decks" — the ops decks yielded nothing portable for scheduling), built against this repo's live cluster.
 Everything Deployment Targets & Scheduling teaches is *core* OpenShift/Kubernetes — GA on the cluster, no operator or subscription.
 Every command, output, and timing — the `Scheduled`/`FailedScheduling` events, the anti-affinity node spread, the delete-and-reschedule, the topology-spread hostname *and* synthetic-zone results, the `nodeSelector`-alone `Pending` and the toleration fix, the default-roll drop tally, the `maxUnavailable: 0` capacity samples (18/18 at `3/3`), the PDB `ALLOWED DISRUPTIONS: 2` and the eviction `429`, the DaemonSet node-agent inventory, and the hollow bare-metal MachineSet — was captured on OpenShift 4.21.22 as `user2` on 2026-07-13 during the build.
-The instructor drain is described from the verified eviction-API behaviour (a real `oc adm drain` was *not* run against the shared cluster).
+Exercise 6's evictions were captured as `user2` on OpenShift 4.22.22 on 2026-11-12: two `201` responses, one `429`, then accepted on the third retry 12 s later. A real `oc adm drain` is never run, by design — the eviction call is the part of a drain that lives inside the attendee's own namespace.
 The zero-downtime cause was grounded live on 2026-07-16: with the claims API on a *shared* `claims-db`, the entry image's Hibernate `drop-and-create` reseeds that database on *every* pod boot — a planted `CLM-1001` value (`Approved`) reverted to its seed `UnderReview` after a *single* pod restart, and the 500m-limited JVM cold-start throttles the boot.
 Exercise 5's raised CPU limit was *2* until 2026-07-28, when it was found to exceed the `{user}-dev` `limits.cpu` quota (three replicas plus the surge pod ask 7300m against a cap of 6) — the ReplicaSet could never create a pod, and the capacity sampler's flat `available=3/3` made the wedged roll read as a success. Lowering the limit to *1* brings the peak to 5300m; that arithmetic was confirmed against the live quota, and the cold-start re-measured as *23/25/33 s* at 500m versus *14–15 s* at `limits.cpu: 1` (six pods) on OpenShift 4.21.22 / Kubernetes 1.35.
 On 2026-08-14 that quota ceiling moved *6 → 8* (a workshop-wide pipeline-speed change to `per-user-limits.yaml`, which raised the LimitRange CPU default and this quota together across `dev`/`stage`/`prod`/`cicd`). The *recommendation* survived — `1` is still right, and the surge ceiling is now *1675m* — but the counter-example did not: `2` is admissible at a cap of 8, so exercise 5's "and not a bigger number" beat was re-derived and re-run at *4*, which reproduces the original refusal exactly (`requested: limits.cpu=4, used: limits.cpu=4300m, limited: limits.cpu=8`, roll never starts). Both outcomes were measured as user3 on OpenShift 4.22.6 that day, including the partial wedge at `2`. The module's *timing* figures were untouched by the change: every workload here declares an explicit CPU limit, so none of them ever saw the LimitRange default.

@@ -6,7 +6,8 @@
 #          batch pool (a bootstrap-labeled+tainted worker) exists cluster-wide. Entry marker set.
 #   End:   the attendee ran the lab — parasol-claims DECLARES a spread constraint (podAntiAffinity
 #          and/or topologySpreadConstraints) and its replicas do sit on distinct nodes, a
-#          PodDisruptionBudget protects it, and statement-batch DECLARES a batch-pool pin (nodeSelector
+#          PodDisruptionBudget protects it while still leaving a node drain room to evict (exercise 6),
+#          and statement-batch DECLARES a batch-pool pin (nodeSelector
 #          + toleration) and does run ON the dedicated batch pool node. In BOTH beats the declaration is
 #          what is graded and the observed layout corroborates it (see claims_spread_constraint and
 #          batch_pin_declared — the layout ALONE was a false ✅ in both: the default scheduler already
@@ -234,6 +235,19 @@ claims_nodes_at_least() { [[ "${CLAIMS_NODES:-0}" -ge "$1" ]]; }
 # A PodDisruptionBudget guards parasol-claims.
 pdb_present() { oc_present get pdb parasol-claims -n "$NS" -o name; }
 
+# END outcome of exercise 6 (and the Challenge's deliberate deadlock): the budget still lets a drain
+# evict something. Graded from the PDB controller's own arithmetic, not the spec, so minAvailable,
+# maxUnavailable and percentages all count the same: an eviction is possible only while desiredHealthy <
+# expectedPods. Both are derived from the spec and the selected workload's scale, so a pod that is
+# briefly unready mid-roll does not flip this (status.disruptionsAllowed would). expectedPods 0 means
+# the selector matches nothing — a budget that protects nothing is not a pass either.
+pdb_leaves_drain_room() {
+  local want have
+  oc_read get pdb parasol-claims -n "$NS" -o jsonpath='{.status.desiredHealthy} {.status.expectedPods}' || return 1
+  read -r want have <<<"$OC_OUT"
+  [[ "${have:-0}" -ge 1 && "${want:-0}" -lt "$have" ]]
+}
+
 # Entry-clean-slate helpers: return 0 when the solve shaping is ABSENT (nothing built yet).
 # Each requires the underlying Deployment to actually exist first — otherwise "absent" is vacuous
 # (true on a cluster where the entry state never materialized at all), not evidence of a clean entry.
@@ -371,7 +385,12 @@ else
   # AND sit on >=2 nodes), never the exact field wording, so any correct solution stays green (template
   # rule 14). Both scheduling beats grade the attendee's DECLARATION first and use the observed layout
   # as corroboration — the layout alone was a false ✅ in both, for two different reasons.
-  check "PodDisruptionBudget protects parasol-claims"    pdb_present                          || hint "create a PDB (minAvailable 1) selecting app=parasol-claims (see the lab)"
+  if check "PodDisruptionBudget protects parasol-claims" pdb_present; then
+    check "…and it leaves a node drain room to evict (desired healthy pods below the replica count)" pdb_leaves_drain_room \
+      || hint "a budget that admits no eviction deadlocks every node drain (the lab's Challenge does this on purpose) — set it back: oc patch pdb parasol-claims -n ${NS} --type=merge -p '{\"spec\":{\"minAvailable\":1}}'"
+  else
+    hint "create a PDB (minAvailable 1) selecting app=parasol-claims (see the lab)"
+  fi
   # THE BATCH-POOL BEAT, graded in the same two parts as the spread beat below — the attendee's
   # DECLARATION first, the observed placement only as corroboration. Grading the placement alone was a
   # false ✅ on any cluster below the taint floor (see batch_pin_declared): there the pool node carries

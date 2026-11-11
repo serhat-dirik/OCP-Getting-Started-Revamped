@@ -28,6 +28,11 @@ include::partial$version-attributes.adoc[]
 // Re-measured as user3 on OCP 4.22.6: describe-quota reads 4300m/8; at 4 the first surge pod is refused
 // at 8300m with the roll never starting; at 2 two of three replicas are admitted and only the third is
 // refused (used 6300m). See the NOTE at exercise 5 for the full provenance.
+// 2026-11-12, as user2 on OCP 4.22.22 / Kubernetes 1.35: exercise 6's instructor-only taint-and-drain
+// segment is gone. Attendees now read the batch-pool node's label and taint, then evict their own
+// parasol-claims pods through the Eviction API (two 201s, one 429, then a 5 s retry loop accepted after
+// 12 s). Exercise 5's minAvailable:3 exhaust-and-evict step moved there: the refusal now comes from the
+// budget's own arithmetic, not from a patched floor.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -1200,36 +1205,15 @@ parasol-claims   1               N/A               2                     3s
 image::deployment-targets-scheduling/deployment-targets-scheduling-04-pdb-allowed-disruptions.png["The PodDisruptionBudgets list for this project with one row, parasol-claims. Selector reads app=parasol-claims, Availability reads Min available 1, and the column the exercise is about — Allowed disruptions, in sentence case, not the CLI's upper-case heading — reads 2. That is three healthy replicas minus the one the budget insists on keeping."]
 
 `ALLOWED DISRUPTIONS: 2` — 3 healthy minus the 1 you must keep.
-The eviction API that `oc adm drain` uses checks this budget. Prove it: *exhaust* the budget (tighten `minAvailable` to 3, so *zero* disruptions are allowed) and try to evict a pod — the API *refuses*, with the exact message a node drain hits:
-
-[source,sh,role=execute]
-----
-oc patch pdb parasol-claims -n $NS --type=merge -p '{"spec":{"minAvailable":3}}'
-sleep 3
-POD=$(oc get pods -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
-echo '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"'"$POD"'"}}' | oc create --raw /api/v1/namespaces/$NS/pods/$POD/eviction -f - || true
-# restore the sensible budget
-oc patch pdb parasol-claims -n $NS --type=merge -p '{"spec":{"minAvailable":1}}'
-----
-
-.Expected output
-[source,texinfo]
-----
-poddisruptionbudget.policy/parasol-claims patched
-Error from server (TooManyRequests): Cannot evict pod as it would violate the pod's disruption budget.
-poddisruptionbudget.policy/parasol-claims patched
-----
-
-That refusal is exactly what makes a node drain *wait its turn* instead of taking your last replica.
-Back at `minAvailable: 1`, a drain can evict one claims pod (the reschedule respects your anti-affinity), then the next — one at a time, service up throughout.
+That is the budget a node drain spends. In exercise 6 you spend it yourself, through the same API a drain calls.
 
 [.checkpoint]
 ****
-✔ *Verify:* You traced the drops to a *boot-time reseed* of the shared database (a planted `CLM-1001` value reverted to its seed after one pod restart), fixed it at the source with `schema-management=none` (the value now *survives* a restart), sped the cold-start with a raised CPU limit (~27 s → ~15 s) that still fits the namespace's `limits.cpu` quota, held *available replicas flat at 3* through a roll (18/18 samples) *and confirmed the roll actually landed* with `oc rollout status`, re-measured the drop count *lower than the default roll* (and understood why it is not zero), and protected the service with a `PodDisruptionBudget` that reported `ALLOWED DISRUPTIONS: 2` then *blocked* an eviction once exhausted.
+✔ *Verify:* You traced the drops to a *boot-time reseed* of the shared database (a planted `CLM-1001` value reverted to its seed after one pod restart), fixed it at the source with `schema-management=none` (the value now *survives* a restart), sped the cold-start with a raised CPU limit (~27 s → ~15 s) that still fits the namespace's `limits.cpu` quota, held *available replicas flat at 3* through a roll (18/18 samples) *and confirmed the roll actually landed* with `oc rollout status`, re-measured the drop count *lower than the default roll* (and understood why it is not zero), and protected the service with a `PodDisruptionBudget` that reports `ALLOWED DISRUPTIONS: 2`.
 ****
 
-== 6. Read how the platform shapes the cluster (instructor demo)
-⏱ *~5 min* · watch — the node agents, native sidecars, and the pools you targeted
+== 6. Read how the platform shapes the cluster, then drain through your budget
+⏱ *~7 min* · read the node agents and the batch pool; evict your own pods the way a drain does
 
 The pools and node agents you've been working around are *built* with the same primitives you just used.
 Read them live (the `platform-observer` role grants you cluster-wide *read*).
@@ -1293,20 +1277,89 @@ No resources found
 On a cloud cluster that MachineSet would carry the replica count a platform team scales to grow a pool, with a *MachineAutoscaler* sizing it to demand.
 Here it's a stub — the nodes are bare metal — but the *shape* is the same: this is the object platform teams edit to create the batch and GPU pools your workloads pin onto.
 
-:demo-title: Taint a pool live, and drain a node through a PDB
-:demo-body: Your instructor labels + taints a node into a pool with oc adm taint, then drains a node and shows the PodDisruptionBudget forcing the eviction to wait — the cluster-wide operations you just read the results of.
-include::partial$instructor-demo.adoc[]
+Your batch pool was built by hand instead. Before the workshop, the install ran two commands: `oc label node <worker> workshop.redhat.com/pool=batch`, then `oc adm taint nodes <worker> workshop.redhat.com/pool=batch:NoSchedule`.
+Both change a node, so they are cluster-wide and not yours to run. Read what they left behind:
 
-Your instructor demonstrates the two *cluster-wide* operations you only read above (they affect every tenant, so they're not hands-on):
+// Captured live as user2 on OCP 4.22.22 (Kubernetes 1.35), 2026-11-12, on a 6-node cluster with a tainted
+// batch pool. custom-columns prints <none> for a missing field — confirmed the same day on an untainted node.
+[source,sh,role=execute]
+----
+oc get nodes -l workshop.redhat.com/pool=batch -o custom-columns='NODE:.metadata.name,POOL:.metadata.labels.workshop\.redhat\.com/pool,TAINT:.spec.taints[*].key,VALUE:.spec.taints[*].value,EFFECT:.spec.taints[*].effect'
+----
 
-. *Creating a pool.* `oc label node <worker> workshop.redhat.com/pool=batch` + `oc adm taint node <worker> workshop.redhat.com/pool=batch:NoSchedule` — exactly how *your* batch pool was made.
-. *Draining through a PDB.* `oc adm drain <node> --ignore-daemonsets --delete-emptydir-data` on a node hosting a claims pod — the drain evicts it (your PDB allows one), it reschedules on a distinct node (anti-affinity), and if the budget were exhausted the drain would *wait*, printing the same *"Cannot evict pod"* message you saw.
+.Expected output (below the 3-worker floor, `TAINT`, `VALUE` and `EFFECT` read `<none>` — exercise 4 explains why)
+[source,texinfo]
+----
+NODE       POOL    TAINT                      VALUE   EFFECT
+worker-1   batch   workshop.redhat.com/pool   batch   NoSchedule
+----
 
-You'll find the exact commands and expected output in this module's instructor guide.
+The label is what your `nodeSelector` matched in exercise 4; the taint is what your toleration answered.
+
+The other cluster-wide operation is the *drain*.
+`oc adm drain <node>` cordons the node, then evicts every pod on it through the *Eviction API*, the API your PodDisruptionBudget guards. When the budget says no, the drain waits 5 seconds and asks again.
+You can't drain a node, but you can call that API on your own pods.
+Your three claims replicas sit on three different nodes, so evicting all three at once is what three drains in parallel would ask for:
+
+// Captured live as user2 on OCP 4.22.22, 2026-11-12, at the exercise-5 end state (3 Ready replicas,
+// PDB minAvailable 1). The same command also ran from the cockpit terminal's oc 4.21.8 (the server, not
+// the client, answered). The success body is a Status with no trailing newline — hence `&& echo`.
+[source,sh,role=execute]
+----
+for POD in $(oc get pods -n $NS -l app=parasol-claims -o jsonpath='{.items[*].metadata.name}'); do
+  echo "evict $POD:"
+  echo '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"'"$POD"'"}}' | oc create --raw /api/v1/namespaces/$NS/pods/$POD/eviction -f - && echo
+done
+oc get pdb parasol-claims -n $NS
+----
+
+.Expected output (your pod names differ)
+[source,texinfo]
+----
+evict parasol-claims-6745f45b89-2mx8j:
+{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Success","code":201}
+
+evict parasol-claims-6745f45b89-mkjkn:
+{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Success","code":201}
+
+evict parasol-claims-6745f45b89-n7ljb:
+Error from server (TooManyRequests): Cannot evict pod as it would violate the pod's disruption budget.
+NAME             MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+parasol-claims   1               N/A               0                     85s
+----
+
+Two evictions accepted (`201`), the third refused with HTTP `429 TooManyRequests`.
+With two pods already leaving, one is left — exactly `minAvailable: 1` — so the budget has nothing more to give.
+A drain doesn't give up here; it retries. Do the same for the refused pod (`$POD` still holds its name):
+
+[source,sh,role=execute]
+----
+for i in $(seq 1 12); do
+  OUT=$(echo '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"'"$POD"'"}}' | oc create --raw /api/v1/namespaces/$NS/pods/$POD/eviction -f - 2>&1) && { echo "$(date +%T) evicted $POD"; break; }
+  echo "$(date +%T) $OUT (retry in 5s)"
+  sleep 5
+done
+oc get pods -n $NS -l app=parasol-claims -o wide
+----
+
+.Expected output (a refusal or two, then accepted once the replacements are `Ready` — 12 s on the build cluster)
+[source,texinfo]
+----
+02:21:48 Error from server (TooManyRequests): Cannot evict pod as it would violate the pod's disruption budget. (retry in 5s)
+02:21:54 Error from server (TooManyRequests): Cannot evict pod as it would violate the pod's disruption budget. (retry in 5s)
+02:21:59 evicted parasol-claims-6745f45b89-n7ljb
+NAME                              READY   STATUS              NODE
+parasol-claims-6745f45b89-4kx86   0/1     ContainerCreating   worker-3
+parasol-claims-6745f45b89-qvlm8   1/1     Running             control-plane-1
+parasol-claims-6745f45b89-xr6dn   1/1     Running             control-plane-3
+----
+
+That is `oc adm drain`, node by node: the budget doesn't block maintenance, it paces it.
+Note what `minAvailable: 1` allowed: for a few seconds one pod carried all the traffic. Set the floor from the capacity you need under load, not to `1` by habit.
 
 [.checkpoint]
 ****
-✔ *Verify (observed):* You read the platform's own `DaemonSet` node agents (`DESIRED` equal to your node count, one per node), saw a control-plane-only DaemonSet target a node subset with a `nodeSelector`, and inspected the `MachineSet` that platform teams scale to build the pools your workloads target.
+✔ *Verify:* You read the platform's own `DaemonSet` node agents (`DESIRED` equal to your node count), a control-plane-only DaemonSet that targets a node subset with a `nodeSelector`, the `MachineSet` behind node pools, and the batch-pool node's label and taint. Then you drove the Eviction API a drain uses on your own pods: two evictions accepted, the third refused with `429` until the replacements were `Ready`, then accepted.
 ****
 
 == Challenge (optional)
@@ -1317,7 +1370,7 @@ Try these on your own:
 
 * *Guarantee a QoS class.* Edit `parasol-web` so its requests *equal* its limits, roll it, and confirm its pod reports `qosClass: Guaranteed` (`oc get pod -o jsonpath='{.status.qosClass}'`). Explain why `Guaranteed` pods are the *last* to be evicted under node memory pressure.
 * *Make the spread a hard rule.* Change the `parasol-claims` `topologySpreadConstraints` `whenUnsatisfiable` from `ScheduleAnyway` to `DoNotSchedule`, scale to 6, and predict-then-verify which pods go `Pending` and what the event says. Then reason about why `DoNotSchedule` can *block a deploy* where `ScheduleAnyway` wouldn't.
-* *Deadlock a drain on purpose.* Set the PDB `minAvailable` equal to the replica count, and explain (from the eviction behaviour you saw) why a node drain would now hang forever. What `minAvailable` keeps the service up *and* lets maintenance proceed?
+* *Deadlock a drain on purpose.* Set the PDB `minAvailable` equal to the replica count and re-run exercise 6's first eviction loop. Explain why a node drain would now hang forever. What `minAvailable` keeps the service up *and* lets maintenance proceed? Set it back before you run `ws verify`, which checks that the budget leaves a drain room.
 
 When you are done, run `ws verify {module-id}` in the Terminal — or run `ws prep {module-id} --yes` to return your world to the entry state (default scheduling, batch worker unpinned, no PDB).
 
