@@ -5,7 +5,10 @@
 #          topologySpread + probes, meshed), echoing SITE=A / SITE=B. {user}-client runs the external
 #          curl-loop client and the mesh ingress gateway (the stable endpoint). NO failover routing yet —
 #          the stable endpoint 404s until the attendee wires it. Entry marker set.
-#   End:   the attendee built the cross-site failover routing on OSSM3 — a ServiceEntry + DestinationRule
+#   Both:  site-a's budget admits exactly one eviction at the HPA floor (minAvailable = floor - 1) — the
+#          precondition for exercise 1's eviction beat (201, then 429, then 201 once a replacement is Ready).
+#   End:   site-a is back at full strength after the evictions (PDB disruptionsAllowed >= 1, polled).
+#          The attendee built the cross-site failover routing on OSSM3 — a ServiceEntry + DestinationRule
 #          (locality LB + outlier detection) + a VirtualService on the gateway (retries) — and then FAILED
 #          THE PRIMARY SITE (lab exercise 2: `oc scale deploy/parasol-claims -n {user}-site-a --replicas=0`)
 #          and watched the client keep getting 200s from site-b. The graded OUTCOME, mechanism-agnostic
@@ -106,6 +109,39 @@ site_resilient() {
   oc_present get horizontalpodautoscaler parasol-claims -n "$ns" -o name || return 1
   oc_read get deploy parasol-claims -n "$ns" -o jsonpath='{.spec.replicas}' || return 1
   [[ -n "$OC_OUT" && "$OC_OUT" -ge 2 ]]
+}
+
+# ── the eviction beat (lab exercise 1) ────────────────────────────────────────────────────────────
+# The attendee evicts two site-a pods back to back and must see 201 then 429. That only happens when
+# the budget leaves EXACTLY ONE disruption of room at the replica floor: minAvailable = HPA floor - 1.
+# minAvailable = floor gives two 429s (a deadlocked drain), floor - 2 gives two 201s, and either way
+# the lesson is gone. Read against the HPA floor, not .spec.replicas, so a site the attendee has just
+# scaled to 0 in exercise 2 still grades on its policy (its readiness has its own check).
+# A percentage minAvailable ("66%") is not the integer this compares and is graded ❌ on purpose.
+site_budget_paces_evictions() {  # $1=namespace
+  local min floor
+  oc_read get poddisruptionbudget parasol-claims -n "$1" -o jsonpath='{.spec.minAvailable}' || return 1
+  min="$OC_OUT"
+  oc_read get horizontalpodautoscaler parasol-claims -n "$1" -o jsonpath='{.spec.minReplicas}' || return 1
+  floor="$OC_OUT"
+  [[ "$min" =~ ^[0-9]+$ && "$floor" =~ ^[0-9]+$ ]] || return 1
+  (( min >= 1 && min == floor - 1 ))
+}
+
+# END STATE: after the evictions (and the failover/failback) site-a is back at full strength — the
+# budget has its one disruption of room again. Evictions leave no object behind, so this is the only
+# durable trace of that beat: a site that never got its replacement Ready stays at 0. POLLED to the
+# shared settle budget (_lib.sh VERIFY_SETTLE_BUDGET_S), because a verify run seconds after an
+# eviction or a failback meets a replacement that is still starting — the same false-❌ shape
+# deploy_ready polls for. rc 2 (could not ask) propagates at once, as in _ready_poll.
+site_budget_restored() {  # $1=namespace
+  local deadline=$(( SECONDS + VERIFY_SETTLE_BUDGET_S ))
+  while :; do
+    oc_read get poddisruptionbudget parasol-claims -n "$1" -o jsonpath='{.status.disruptionsAllowed}' || return $?
+    if [[ "$OC_OUT" =~ ^[0-9]+$ ]] && (( OC_OUT >= 1 )); then return 0; fi
+    if (( SECONDS >= deadline )); then return 1; fi
+    sleep "$VERIFY_SETTLE_POLL_S"
+  done
 }
 
 # Any ServiceEntry AND any VirtualService exist in the client ns (mechanism-agnostic: don't pin the names).
@@ -474,6 +510,8 @@ check "${SITEB_NS} is istio-discovery=enabled (mesh tenant)"  ns_discovery_label
 check "entry marker ws-entry-resilience-multicluster-dr present"              oc get cm ws-entry-resilience-multicluster-dr -n "$CLIENT_NS"   || hint "entry app not synced — ws reset resilience-multicluster-dr --user ${USER_NAME}"
 check "site-a claims service is RESILIENT (>=2 replicas + PDB + HPA)" site_resilient "$SITEA_NS" || hint "the primary site must be resilient — ws reset resilience-multicluster-dr --user ${USER_NAME}"
 check "site-b claims service is RESILIENT (>=2 replicas + PDB + HPA)" site_resilient "$SITEB_NS" || hint "the secondary site must be resilient — ws reset resilience-multicluster-dr --user ${USER_NAME}"
+check "site-a budget admits one eviction at a time (PDB minAvailable = HPA floor - 1)" site_budget_paces_evictions "$SITEA_NS" \
+  || hint "exercise 1 evicts two pods and expects 201 then 429, which needs exactly one disruption of room — compare: oc get pdb,hpa parasol-claims -n ${SITEA_NS}; to restore the shipped policy: ws reset resilience-multicluster-dr --user ${USER_NAME}"
 check "site-a claims has >=1 ready replica"            deploy_ready parasol-claims "$SITEA_NS"   || hint "wait for rollout: oc rollout status deploy/parasol-claims -n ${SITEA_NS}"
 check "site-b claims has >=1 ready replica"            deploy_ready parasol-claims "$SITEB_NS"   || hint "wait for rollout: oc rollout status deploy/parasol-claims -n ${SITEB_NS}"
 check "external client (claims-client) has >=1 ready replica" deploy_ready claims-client "$CLIENT_NS" || hint "the client loop isn't up — oc get pods -l app=claims-client -n ${CLIENT_NS}"
@@ -491,6 +529,8 @@ else
     || hint "build the failover routing: a ServiceEntry spanning both sites, a DestinationRule (locality LB + outlier detection), and a VirtualService with retries on claims-gateway (see the lab)"
   check "the stable endpoint serves HTTP 200"          stable_serves \
     || hint "the ingress gateway isn't routing — check the VirtualService is bound to gateway claims-gateway and the ServiceEntry host matches"
+  check "site-a is back at full strength (its budget allows a disruption again)" site_budget_restored "$SITEA_NS" \
+    || hint "a site-a replacement is not Ready, so the budget is still exhausted — oc get pods -n ${SITEA_NS} -l app=parasol-claims; if site-a is still scaled down from exercise 2: oc scale deploy/parasol-claims -n ${SITEA_NS} --replicas=3"
 
   # ── the routing is scoped to THIS attendee, not the whole mesh ──────────────────────────────────
   # END STATE ONLY, and it has to be: the attendee creates these three CRs during the lab, and the

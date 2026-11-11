@@ -14,6 +14,9 @@ include::partial$version-attributes.adoc[]
 // to 0 flipped the external client from SITE=A to SITE=B in ~4s with ZERO failed requests, and back on
 // recovery; and the RHSI Skupper v2 VAN (Site/Connector/Listener/AccessGrant→AccessToken) reading a remote
 // site's claims (SITE=B) through a local address. Sample user is user1; cluster domain is a placeholder.
+// Exercise 1's eviction beat was PERFORMED on OCP 4.22.22 on 2026-11-12 as user3 (impersonated, attendee
+// groups): the Terminal 2 loop + the two Terminal 1 blocks verbatim — 201, 429, budget back in ~10 s, 201,
+// loop DONE: 345 served, 0 failed. The two eviction outputs are from an earlier run of the same blocks.
 // Console click-paths for mesh CRs are dual-path [tabs]; the client-log tail and curl reads are terminal-only.
 
 ifndef::demo[]
@@ -212,7 +215,7 @@ endif::demo[]
 ifndef::demo[]
 
 == 1. Prove in-site resiliency — survive a pod loss
-⏱ *~7 min* · meet the resilient claims service and watch it absorb a pod kill
+⏱ *~11 min* · meet the resilient claims service, kill a pod, then evict two under live traffic
 
 Before a service can fail *over* to another site, it has to be resilient *where it lives*. Meet the primary site's claims service — the Observability/Deployment Targets & Scheduling primitives, made concrete.
 
@@ -284,17 +287,100 @@ parasol-claims-65d8cc85fd-v2wth   2/2     Running    0          2m
 parasol-claims-65d8cc85fd-z5r22   2/2     Running    0          2m
 ----
 
-Each pod reads *`2/2`*, not `1/1`: it runs *two* containers — the claims app *and* its injected Istio sidecar (these pods are mesh members). The two survivors stay `2/2 Running` and never stop serving; the replacement (`2t2hf`) is created instantly but takes *a moment* to become Ready — re-run the `oc get pods` command and you'll watch it climb `0/2 Init:0/2` → `1/2` → `2/2 Running` over roughly ten to fifteen seconds. That brief not-yet-Ready window is exactly why you keep a *quorum*: the PDB holds the two survivors up to carry the traffic while the replacement initializes. *That* is what replicas + a PDB + spread buy you: a pod or node loss is a non-event. But it is precisely what they *cannot* do — survive the loss of the *whole site* — that the next exercise is about.
+Each pod reads *`2/2`*, not `1/1`: it runs *two* containers — the claims app *and* its injected Istio sidecar (these pods are mesh members). The two survivors stay `2/2 Running` and never stop serving; the replacement (`2t2hf`) is created instantly but takes *a moment* to become Ready — re-run the `oc get pods` command and you'll watch it climb `0/2 Init:0/2` → `1/2` → `2/2 Running` over roughly ten to fifteen seconds. That brief not-yet-Ready window is exactly why you keep a *quorum*.
 
-[NOTE,role=instructor-demo]
-.`[INSTRUCTOR-DEMO]` — drain a node, watch the PDB pace it
-====
-A great five-minute live beat: the instructor *cordons and drains a node* the claims service runs on (`oc adm drain <node> --ignore-daemonsets --delete-emptydir-data`). The PodDisruptionBudget *paces* the eviction — one pod at a time — so a quorum stays up throughout, and attendees watch `oc get pods -n {user}-site-a -w` absorb it with no outage. The lesson to name: this is *in-site* resilience; the next exercise is the failure it can't survive.
-====
+=== Evict pods under live traffic
+
+A deleted pod is a crash. Maintenance works differently: a node drain asks the *Eviction API* to remove each pod, and the API checks the PodDisruptionBudget before it agrees. Send the same request for your own pods while callers are hitting the service, and watch what the callers see.
+
+In *Terminal 2* (the lower terminal), start a request loop. The client calls site A's claims service twice a second for three minutes and prints a running count of served and failed requests, plus the pod that answered:
+
+[source,sh,role="execute send-to-tty-bottom",subs="attributes"]
+----
+oc exec deploy/claims-client -n {user}-client -- sh -c 'ok=0; failed=0; end=$(( $(date +%s) + 180 ))
+while [ $(date +%s) -lt $end ]; do
+  if r=$(curl -sf -m2 http://claims.{user}-site-a.svc:8080/); then ok=$((ok+1)); else failed=$((failed+1)); fi
+  echo "$(date -u +%T)  ok=$ok  failed=$failed  $(echo "$r" | grep -o "parasol-claims-[a-z0-9]*-[a-z0-9]*")"
+  sleep 0.5
+done
+echo "DONE: $ok served, $failed failed"'
+----
+
+Back in *Terminal 1*, define an `evict` helper. It posts an `Eviction` for one pod, the same request `oc adm drain` sends. Then evict two claims pods back to back:
+
+[source,sh,role=execute]
+----
+evict() { echo '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"'"$1"'"}}' | oc create --raw /api/v1/namespaces/$SITEA/pods/$1/eviction -f - ; echo; }
+P1=$(oc get pod -n $SITEA -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+P2=$(oc get pod -n $SITEA -l app=parasol-claims -o jsonpath='{.items[1].metadata.name}')
+evict $P1
+evict $P2
+oc get pdb parasol-claims -n $SITEA
+----
+
+.Expected output (the first eviction is admitted; the second is refused with HTTP 429)
+[source,texinfo]
+----
+{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Success","code":201}
+
+Error from server (TooManyRequests): Cannot evict pod as it would violate the pod's disruption budget.
+
+NAME             MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+parasol-claims   2               N/A               0                     4m41s
+----
+
+The budget had room for one disruption, so the first eviction went through (`201`). Its replacement is still starting, so a second eviction would leave fewer than two Ready pods. The API answers `429 TooManyRequests` and `ALLOWED DISRUPTIONS` drops to `0`. A drain that gets this answer does not fail; it waits and retries. Do the same: wait for the budget to reopen, then retry the refused pod:
+
+[source,sh,role=execute]
+----
+oc wait pdb/parasol-claims -n $SITEA --for=jsonpath='{.status.disruptionsAllowed}'=1 --timeout=90s
+evict $P2
+oc wait pdb/parasol-claims -n $SITEA --for=jsonpath='{.status.disruptionsAllowed}'=1 --timeout=90s
+oc get deploy,pdb,hpa -n $SITEA
+----
+
+.Expected output (each wait returns in about ten seconds, once the replacement is Ready; the site ends at 3/3 with one disruption of room again)
+[source,texinfo]
+----
+poddisruptionbudget.policy/parasol-claims condition met
+{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Success","code":201}
+
+poddisruptionbudget.policy/parasol-claims condition met
+NAME                             READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/parasol-claims   3/3     3            3           4m57s
+
+NAME                                        MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+poddisruptionbudget.policy/parasol-claims   2               N/A               1                     4m57s
+
+NAME                                                 REFERENCE                   TARGETS       MINPODS   MAXPODS   REPLICAS   AGE
+horizontalpodautoscaler.autoscaling/parasol-claims   Deployment/parasol-claims   cpu: 3%/80%   3         6         3          4m57s
+----
+
+An eviction removes a pod but leaves the Deployment's desired count at three, the floor the autoscaler holds. The ReplicaSet creates a replacement at once, which is why the count comes back by itself.
+
+Now read *Terminal 2*. The evicted pods drop out of the answers, the replacements join, and the `failed` count never moves:
+
+.Expected output (an excerpt of the loop; the pod names and counts will differ)
+[source,texinfo]
+----
+22:27:00  ok=15  failed=0  parasol-claims-5b546d46bc-fcsl8     <- last answer from the first evicted pod
+22:27:01  ok=16  failed=0  parasol-claims-5b546d46bc-qrbsd
+...
+22:27:07  ok=27  failed=0  parasol-claims-5b546d46bc-qrbsd     <- last answer from the second evicted pod
+22:27:07  ok=28  failed=0  parasol-claims-5b546d46bc-x898s
+22:27:08  ok=29  failed=0  parasol-claims-5b546d46bc-x898s
+22:27:08  ok=30  failed=0  parasol-claims-5b546d46bc-zfzkv     <- the first replacement is serving
+...
+22:27:13  ok=40  failed=0  parasol-claims-5b546d46bc-pxkcj     <- the second replacement is serving
+...
+DONE: 345 served, 0 failed
+----
+
+The loop stops by itself after three minutes; press `Ctrl-C` in Terminal 2 to stop it sooner. Two pods evicted under load, and no caller saw a failure. *That* is what replicas, a PDB, and spread buy you: a node drain is a non-event. What they *cannot* do is survive the loss of the *whole site*, and that is the next exercise.
 
 [.checkpoint]
 ****
-✔ *Verify:* You found the resilient primary claims service — `parasol-claims` at *3/3* with a `PodDisruptionBudget` (min available 2), a `HorizontalPodAutoscaler` (floor 3, ceiling 6), and replicas *spread across three nodes* — then *killed a pod* and watched the service stay up (two replicas never dipped, a replacement appeared in seconds). In-site resiliency, proven.
+✔ *Verify:* You found the resilient primary claims service — `parasol-claims` at *3/3* with a `PodDisruptionBudget` (min available 2), a `HorizontalPodAutoscaler` (floor 3, ceiling 6), and replicas *spread across three nodes*. You *killed a pod* and watched a replacement appear in seconds. Then, with a request loop running, you *evicted two pods* through the Eviction API: the first was admitted, the second refused with `429` until a replacement was Ready, and the loop finished with `0 failed`. In-site resiliency, proven.
 ****
 
 == 2. Cross-site failover with Service Mesh — fail an entire site

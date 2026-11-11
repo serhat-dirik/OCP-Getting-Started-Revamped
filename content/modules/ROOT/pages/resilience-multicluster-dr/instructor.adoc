@@ -14,8 +14,12 @@ include::partial$version-attributes.adoc[]
 // or failover misbehaves; (2) the site namespace quota must leave headroom for the Skupper router in the
 // RHSI section; (3) the gateway's istio-locality label is what makes site A the primary. NAMESPACE in
 // output is user1; cluster domain is a placeholder.
+// Exercise 1's eviction beat (replaced the node-drain instructor demo) was PERFORMED on OCP 4.22.22 / Istio
+// 1.28.6 on 2026-11-12 as user3 (impersonated with --as-group=workshop-attendees): two evictions through
+// `oc create --raw .../pods/<pod>/eviction` under a twice-a-second request loop — 201, then 429, budget
+// reopened ~10 s later, 201 — three runs, 229 / 228 / 345 served (the last with the lab's 180 s loop), 0 failed in each.
 
-This module has one spine and it climbs: *prove in-site resiliency (kill a pod, the PDB holds) → wire cross-site failover on the mesh → fail an entire site and watch the client flip A→B with no dropped requests → recover → (add-on) link two sites over an RHSI VAN*.
+This module has one spine and it climbs: *prove in-site resiliency (kill a pod, then evict two under live traffic while the PDB paces them) → wire cross-site failover on the mesh → fail an entire site and watch the client flip A→B with no dropped requests → recover → (add-on) link two sites over an RHSI VAN*.
 The beat that lands hardest is the *failover* (exercise 2): the attendee scales the whole primary site to *zero* and the client's live log *keeps printing `200`* while the site marker flips to `B`. It makes "cross-site failover" concrete instead of a slide — hold on it, and keep the client log tailing on screen the whole time.
 The reframe to state plainly: this module's *graded work is application-level failover* — designing a service to survive a whole-site loss. Platform backup/restore (OADP) and GitOps re-materialization are the *DR safety net* underneath, covered as a *concept* (an instructor mention is fine; there is no hands-on backup lab).
 
@@ -26,13 +30,13 @@ include::partial$prep-before-you-teach.adoc[]
 
 == Timing
 
-Total core (exercises 1–3): *~30 min*, plus ~12–15 min of concept up front; the `[ADD-ON]` RHSI section (~10 min) is the first thing to cut if you're tight. The command latencies are small; the real clock is *reading and deciding* plus the failover/failback waits.
+Total core (exercises 1–3): *~34 min*, plus ~12–15 min of concept up front; the `[ADD-ON]` RHSI section (~10 min) is the first thing to cut if you're tight. The command latencies are small; the real clock is *reading and deciding* plus the failover/failback waits.
 
 [cols="1,4,1,2",options="header"]
 |===
 | # | Exercise group | Attendee time | Measured core
 
-| 1 | Prove in-site resiliency (+ node-drain `[INSTRUCTOR-DEMO]`) | ~7 min | reads instant; the pod-kill replacement lands in *~6 s*; the optional node-drain drill is the time sink
+| 1 | Prove in-site resiliency (pod kill, then two evictions under live traffic) | ~11 min | reads instant; the pod-kill replacement is Ready in *~6–20 s* (20 s on 2026-11-12); each eviction's budget reopens *~10 s* later, so the whole eviction sequence is *~20 s* of commands inside a 3-minute request loop
 | 2 | Cross-site failover with Service Mesh | ~13 min | CRs apply instantly, *~8 s* to program the gateway; failover A→B in *~4 s* (zero dropped requests); failback *~30–90 s* after recovery
 | 3 | `[ADD-ON]` RHSI cross-site VAN | ~10 min | Sites Ready in *tens of seconds*; Link Ready *seconds* after the token redemption; the cross-site read instant
 |===
@@ -42,6 +46,7 @@ Total core (exercises 1–3): *~30 min*, plus ~12–15 min of concept up front; 
 ====
 On the build cluster (OCP 4.21.22) on 2026-07-13, every exercise was performed in `user1-client` / `user1-site-a` / `user1-site-b` and timed.
 The `oc` commands are fast. The genuine waits are three: *~8 s* for the mesh to program the gateway after the CRs apply; the *~4 s* failover (measured against a client hitting the stable endpoint once a second — the marker flipped `SITE=A`→`SITE=B` with *every one of ~90 continuous requests returning `200`*); and *~30–90 s* failback after site A recovers (the three fresh site-A pods must reschedule, pull their image, and pass readiness before the locality-aware load balancer returns traffic to the primary — image-cache warmth and cluster load drive the spread). The RHSI waits are the two Skupper Sites reaching Ready (tens of seconds) and the Link forming after the AccessToken redemption (seconds). Budget for the *reading and deciding* too — the resilience-ladder framing and the mesh-vs-RHSI distinction are the real time, not command latency.
+The eviction beat in exercise 1 was measured separately, on OCP 4.22.22 on 2026-11-12, as `user3`: the first eviction returns `201` at once, the second `429`, and the budget reopens about *10 s* later when the replacement is Ready, so the retry and the final wait add another *~10 s*. The request loop in Terminal 2 served every request in all three runs (`0 failed`).
 Note: `ws reset resilience-multicluster-dr` re-materializes all three namespaces via Argo and waits up to *5 minutes* for the sync to converge (no module-specific `waitSeconds` is declared, so this is the engine default) — a ceiling, not an expected duration, but budget it and run it *before* the session, not during.
 ====
 
@@ -64,6 +69,18 @@ ws verify resilience-multicluster-dr --user user1 --entry-only
 ----
 +
 Expect all entry checks green: the three namespaces present *and* `istio-discovery=enabled`, the `ws-entry-resilience-multicluster-dr` marker, `parasol-claims` resilient in *both* sites (≥2 replicas + PDB + HPA) and ready, the `claims-client` and `claims-gateway` up, and the clean-slate assertion (no failover routing, no `ws-solve-resilience-multicluster-dr` marker yet).
+
+. *The attendee identity can evict its own claims pods (exercise 1).*
++
+[source,sh,role=execute]
+----
+POD=$(oc get pod -n user1-site-a -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+echo '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"'"$POD"'"},"deleteOptions":{"dryRun":["All"]}}' \
+  | oc create --raw /api/v1/namespaces/user1-site-a/pods/$POD/eviction -f - --as=user1 --as-group=workshop-attendees --as-group=system:authenticated; echo
+oc get pdb parasol-claims -n user1-site-a
+----
++
+Expect `{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Success","code":201}` and `ALLOWED DISRUPTIONS 1`. The `dryRun` makes it a real, server-side permission check that removes no pod; `oc auth can-i` is not a substitute for it. A `Forbidden` means the attendee is not admin on the site namespace (workshop-layer RBAC). `ALLOWED DISRUPTIONS 0` means the site is not at full strength, and the attendee's first eviction would be refused too.
 
 . *The shared Service Mesh is healthy and all three namespaces are mesh tenants.*
 +
@@ -147,16 +164,19 @@ Two mesh features cooperate. *Outlier detection* on the `DestinationRule` notice
 *2. "Why does traffic prefer site A instead of splitting 50/50 across A and B?"*::
 Because the ingress gateway is *pinned to site A's locality* (an `istio-locality` label on the gateway pod), and the `DestinationRule` turns on `localityLbSetting`. Istio's locality-aware load balancing sends traffic to the *nearest* locality first — site A is priority 0, site B is the failover at priority 1 — so you get *primary/backup*, not active-active. Remove the locality pin and the same resources would round-robin both sites. This is the one deliberate "the gateway lives at the primary site" choice.
 
-*3. "In the RHSI section, the site-b Skupper router won't schedule — why?"*::
+*3. "My second eviction got a 429. Is the budget broken?"*::
+No, that is the budget doing its job. `minAvailable: 2` over three replicas leaves room for one disruption. The first eviction used it, and until that pod's replacement is Ready a second eviction would leave fewer than two pods serving, so the API refuses it with `429 TooManyRequests`. `oc adm drain` gets the same answer and simply retries; the lab's `oc wait` on `disruptionsAllowed` is that retry done by hand. If an attendee got *two* `201` answers, they ran the evictions far enough apart that the first replacement was already Ready, which also shows the budget working. If the budget *never* reopens, the replacement is not becoming Ready; see the troubleshooting page.
+
+*4. "In the RHSI section, the site-b Skupper router won't schedule — why?"*::
 Almost always *quota*. A Skupper `Site` starts a router pod (~1 CPU) in each site namespace, *on top of* the meshed claims pods (each of which carries an istio-proxy sidecar that itself reserves CPU/memory). If the site namespace's `ResourceQuota` is sized only for the claims tier, the router is refused with `exceeded quota`. The workshop layer sizes the site namespaces with headroom for both — if you see `FailedCreate ... exceeded quota` on `skupper-router`, the namespace quota is too tight (or was reverted to an older, smaller value). Widen `limits.cpu`/`limits.memory` on the site's `workshop-quota`.
 
-*4. "Is this a real multi-cluster failover, or simulated?"*::
+*5. "Is this a real multi-cluster failover, or simulated?"*::
 It's a *single-cluster simulation*: three namespaces stand in for the client and two sites, all in one mesh. What's *real* is the mechanism — the `ServiceEntry`/`DestinationRule`/`VirtualService` failover routing, the locality-aware load balancing, the outlier detection and retries, and (in the add-on) the Skupper VAN. The *identical* resources work across two real clusters in two regions: you'd point the ServiceEntry endpoints at the other cluster's services (reached over the RHSI VAN) and pin the gateway to the local region. The lab teaches the multi-site pattern; the topology is simulated, the plumbing is real.
 
-*5. "Where's the OADP backup/restore that this module used to have?"*::
+*6. "Where's the OADP backup/restore that this module used to have?"*::
 Reframed. The *graded lab* is now *application-level failover* — the part that's genuinely the app team's job. Platform *disaster recovery* — OADP backup/restore of data plus GitOps re-materialization of the platform — is covered as the *DR safety net concept* in the concept page (an instructor mention or a quick `Backup`/`Restore` show-and-tell is fine). The distinction to land: the platform *has your back* for DR; *your* job is to design the service to be resilient and to fail over — which is what the lab builds.
 
-*6. "Every one of us just created a `ServiceEntry` for the same hostname — don't we collide?"*::
+*7. "Every one of us just created a `ServiceEntry` for the same hostname — don't we collide?"*::
 You would, and that is why all three resources set `+exportTo: ["."]+`. Istio's default export is the whole mesh, so without that field istiod would hold one merged view of `claims.parasol.internal` assembled from every attendee's endpoints, and a gateway could be programmed with someone else's sites — returning `200` the whole time, which is what makes it nasty to spot. `["."]` keeps each attendee's definition inside their own client namespace. The hostname is *deliberately* shared and stable (a single global service name is the pattern being taught); the scope, not the name, is what provides isolation. Same answer in production on any multi-tenant mesh: export only what other namespaces genuinely need to reach.
 
 == Watchouts
@@ -169,6 +189,8 @@ The workshop layer (`per-user-resilience.yaml`) labels `{user}-client`, `{user}-
 The ingress gateway pod carries `istio-locality: east.site-a`. That is the *only* thing that makes the mesh prefer site A (priority 0) and treat site B as the failover. If it's absent, traffic round-robins A/B (active-active) and the "flip" isn't a clean primary→backup story. It's set by the entry chart; if you edit the gateway, preserve the label.
 * *[BUILD SURPRISE] The site quota must leave room for the Skupper router (RHSI `[ADD-ON]`).*
 Each Skupper `Site` adds a router pod (~1 CPU) to a site namespace that already runs the *meshed* claims tier (claims pods + istio-proxy sidecars are CPU-heavy). Size the site `workshop-quota` with headroom, or the router is refused with `exceeded quota` and the Link never forms. This is only a concern for the add-on.
+* *The eviction beat needs both terminals, and the evictions back to back.*
+The request loop goes to *Terminal 2* (the block is tagged to send there) and runs for three minutes; the evictions run in *Terminal 1*, which needs `SITEA` from the lab's first block. With `SITEA` empty, both commands answer `Forbidden` naming the namespace `"-l"` or `"pods"` instead of a `201`; re-run the lab's first block in that terminal. The two `evict` calls sit in one block on purpose: run minutes apart, the first replacement is already Ready and the second eviction is admitted, so the `429` never shows. Each attendee evicts only pods in their own site namespace, so a full room running it at once disturbs nobody else's service.
 * *The responder dies fast on "scale to 0" by design.*
 The claims responder handles `SIGTERM` and its pod has a short `terminationGracePeriodSeconds`, so `--replicas=0` removes the site *promptly* and the failover is crisp. A workload that ignores `SIGTERM` would linger through its grace period and the failover would look delayed — worth knowing if you swap the responder image.
 * *`baseEjectionTime` tuning is a trade-off.*
