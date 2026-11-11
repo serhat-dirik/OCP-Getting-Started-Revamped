@@ -3,9 +3,9 @@
 include::partial$version-attributes.adoc[]
 
 // Internal delivery runbook. Timings MEASURED on the build cluster (OCP 4.21.22) as user1 on
-// 2026-07-12 by performing every exercise. The cluster-wide instructor-demo commands below were
-// performed with guaranteed revert (self-provisioning disable/restore captured live; the project
-// template was validated by rendering, not activated cluster-wide — see Watchouts).
+// 2026-07-12 by performing every exercise. Exercise 7 (rebuilt 2026-11-12 from an instructor demo
+// into attendee work) was performed and timed on OCP 4.22.22 as user7; its cluster-wide settings are
+// applied by the install, never by the instructor during a session.
 
 This module has two beats that land, and they bracket the session.
 It *opens* on workload security — attendees scale a root-demanding Deployment and watch *restricted-v2* reject it live (exercise 1) — and it *closes* on the reveal that the platform governed *them* exactly the way they just governed the payments team (exercise 6).
@@ -19,7 +19,7 @@ include::partial$prep-before-you-teach.adoc[]
 
 == Timing
 
-Total hands-on: *~40 min* (add ~15 min of concept up front, ~5 min buffer).
+Total hands-on: *~43 min* (add ~15 min of concept up front, ~5 min buffer).
 
 `ws prep multi-tenancy-workload-security` waits up to *5 minutes* for the entry state to converge (the engine default sync window; this module declares no longer budget in `ws-meta.yaml`). It normally returns well inside that — the ceiling is a timeout, not a duration. Attendees start it themselves from the top of the *concept* page, so deliver the concept at its normal pace and it converges under you.
 
@@ -33,7 +33,7 @@ Total hands-on: *~40 min* (add ~15 min of concept up front, ~5 min buffer).
 | 4 | Author a least-privilege custom Role | ~5 min | Role apply + bind instant; `can-i` proofs *~1 s* each
 | 5 | The quota and limits you live under | ~6 min | quota-exceed rejection instant; fix rollout *~2 s*; LimitRange inject instant
 | 6 | How you were provisioned | ~5 min | all read-only, instant
-| 7 | Cluster-wide levers `[INSTRUCTOR-DEMO]` | ~5 min | you perform; see the scripts below
+| 7 | Every namespace born governed | ~8 min | all eleven blocks ran in *~62 s* of command time; each cross-namespace `probe` *~5–6 s*, a blocked one adds its 3 s timeout; the rest is reading
 |===
 
 [NOTE]
@@ -57,8 +57,8 @@ adm start multi-tenancy-workload-security --user user1
 ws verify multi-tenancy-workload-security --user user1 --entry-only
 ----
 +
-Expect `✅ all 10 checks passed` when run as admin.
-The checks cover the namespace, the entry marker, the three seeded ServiceAccounts (`payments-ci`, `payments-ops`, `root-demander`), the standing quota, the `root-demander` Deployment at *0 replicas*, and (impersonation-guarded) that the teammates are still *ungoverned*.
+Expect `✅ all 12 checks passed` when run as admin.
+The checks cover the namespace, the entry marker, the three seeded ServiceAccounts (`payments-ci`, `payments-ops`, `root-demander`), the standing quota, the `root-demander` Deployment at *0 replicas*, that no NetworkPolicy isolates `user1-dev` yet, and (impersonation-guarded) that the teammates are still *ungoverned*.
 
 . *The root-demander workload is seeded correctly (root-demanding, scaled to 0).*
 +
@@ -100,141 +100,50 @@ adm smoke multi-tenancy-workload-security user1
 +
 Every module declares `smokeCommands` in `ws-meta.yaml`; unlike the checks above (run from an admin context), `adm smoke` execs into the attendee's own Showroom terminal as `user1` and proves the representative commands work under their real identity, PATH, and namespace isolation — not just that the objects exist.
 
+. *Exercise 7's install-time settings are in place.*
++
+Exercise 7 has attendees *feel* cluster-wide settings, so the workshop install must have applied them before the session:
++
+[source,sh,role=execute]
+----
+oc get clusterrolebinding self-provisioners -o jsonpath='subjects=[{.subjects[*].name}] autoupdate={.metadata.annotations.rbac\.authorization\.kubernetes\.io/autoupdate}{"\n"}'
+oc get project.config.openshift.io cluster -o jsonpath='template={.spec.projectRequestTemplate.name}{"\n"}'
+oc get template project-request -n openshift-config -o name
+echo -n "attendee can request a project? "; oc auth can-i create projectrequests --as=user1 \
+  --as-group=workshop-attendees --as-group=system:authenticated --as-group=system:authenticated:oauth 2>/dev/null
+echo -n "attendee can read the template? "; oc auth can-i get templates/project-request -n openshift-config --as=user1 \
+  --as-group=workshop-attendees --as-group=system:authenticated --as-group=system:authenticated:oauth
+----
++
+Expect `subjects=[] autoupdate=false`, `template=project-request`, `template.template.openshift.io/project-request`, then `no` and `yes`.
+Include `system:authenticated:oauth` in the impersonation: it is the group the default self-provisioning grant names, so leaving it out makes `can-i` say `no` on a cluster where real logins still get `yes`.
+If the first line still reads `subjects=[system:authenticated:oauth]`, attendees *will* create projects in exercise 7 — raise it with whoever ran the install rather than patching it mid-session.
+
 [NOTE]
 .What "done" looks like
 ====
 You do not need a separate rubric for when the room is ready to move on: each exercise in the lab ends on its own ✔ *Verify:* line, which is the per-exercise move-on signal — when an attendee's output matches it, that exercise is done. For a whole-module self-check, attendees can run `ws verify multi-tenancy-workload-security` themselves at any point in the Showroom terminal; it is the same script pre-flight step 1 above runs for you (with `--entry-only`).
 ====
 
-== Cluster-wide instructor demos (exercise 7)
+== Exercise 7: what the install set, and what to say
 
-These mutate *cluster singletons*.
-Sequence and revert them, or `oc new-project` and later modules (Registry, Images & Catalog Governance especially) break for every attendee.
-All commands verified on the build cluster 2026-07-12.
+Exercise 7 used to be an instructor demo that changed cluster singletons live.
+It is now attendee work, because the cluster is dedicated to the workshop and the install sets the cluster-wide levers before anyone signs in:
 
-=== Demo A — disable and restore self-provisioning
+* the `self-provisioners` ClusterRoleBinding emptied and pinned with `rbac.authorization.kubernetes.io/autoupdate=false` (without the pin, the cluster restores the default grant on its own);
+* a `project-request` Template in `openshift-config` (the default Project and `admin` RoleBinding, plus `deny-by-default`, four narrow allows, and a count-only `starter-quota`), named in `project.config.openshift.io/cluster`;
+* read access for `workshop-attendees` to `projects` and `oauths` (through `platform-observer`) and to the one template.
 
-By default any authenticated user may create projects, via a ClusterRoleBinding whose subject is the virtual group `system:authenticated:oauth`.
-The binding carries `autoupdate=true`, so a naive removal is silently reconciled back — you *must* pin `autoupdate=false` first.
+You change nothing during the session.
+Attendees are refused `oc new-project`, read the policy, then apply the template's first two NetworkPolicies to `{user}-dev` and probe it from `{user}-prod`.
 
-[source,sh,role=execute]
-----
-# Show the default grant
-oc get clusterrolebinding self-provisioners -o jsonpath='subjects={.subjects[*].name}  autoupdate={.metadata.annotations.rbac\.authorization\.kubernetes\.io/autoupdate}{"\n"}'
+*Talk track for the template.* Point at the four allows: a bare default-deny would also cut off the router, monitoring, and the Dev Spaces gateway, so a real template pairs the deny with the few sources the platform itself needs.
+The quota is count-only on purpose: a `requests.*` quota would refuse every Pod that declares no requests, and this template has no LimitRange to fill them in.
 
-# 1) Stop the controller reconciling it back, then 2) disable (empty the subjects — atomic + reversible)
-oc annotate clusterrolebinding self-provisioners rbac.authorization.kubernetes.io/autoupdate=false --overwrite
-oc patch clusterrolebinding self-provisioners --type=merge -p '{"subjects":[]}'
-----
-
-Now, *as a normal workshop user* (or by having an attendee try it), `oc new-project demo-selfprov` is refused:
-
-.Expected output (the refusal)
-[source,texinfo]
-----
-Error from server (Forbidden): You may not request a new project via this API.
-----
-
-Then *restore it* — return the subject and re-enable autoupdate:
-
-[source,sh,role=execute]
-----
-oc patch clusterrolebinding self-provisioners --type=merge \
-  -p '{"subjects":[{"apiGroup":"rbac.authorization.k8s.io","kind":"Group","name":"system:authenticated:oauth"}]}'
-oc annotate clusterrolebinding self-provisioners rbac.authorization.kubernetes.io/autoupdate=true --overwrite
-oc get clusterrolebinding self-provisioners -o jsonpath='restored subjects={.subjects[*].name}{"\n"}'
-----
-
-Expect `restored subjects=system:authenticated:oauth`.
-
-[WARNING]
-.The `add/remove-cluster-role-from-group` wrapper leaves a mess — use the patch above
-====
-The documented CLI wrappers (`oc adm policy remove-cluster-role-from-group self-provisioner system:authenticated:oauth` / `add-cluster-role-to-group …`) do *not* round-trip cleanly: `remove` empties the canonical `self-provisioners` binding, and `add` creates a *second*, differently-named binding (`self-provisioner`), leaving two bindings for one grant.
-This was hit and repaired on the build cluster 2026-07-12.
-The `oc patch` on `self-provisioners` shown above is the clean, reversible path.
-If you (or a prior session) used the wrappers, check for the stray binding: `oc get clusterrolebinding | grep self-provision` should show *one* row (`self-provisioners`); delete any stray `self-provisioner` and patch the subject back onto `self-provisioners`.
-====
-
-=== Demo B — a project template that bakes in guardrails
-
-Show that every new project can be born with a default-deny NetworkPolicy and a starter quota.
-
-[source,sh,role=execute]
-----
-# The default template ships just a Project + admin RoleBinding:
-oc adm create-bootstrap-project-template -o yaml | grep -E '^\s*kind:' | sort -u
-----
-
-Author an augmented template adding a `NetworkPolicy` and `ResourceQuota`, and *prove it renders* (this is safe — it activates nothing):
-
-[source,sh,role=execute]
-----
-oc process -f - PROJECT_NAME=acme PROJECT_ADMIN_USER=alice -o jsonpath='{range .items[*]}{.kind}/{.metadata.name}{"\n"}{end}' <<'EOF'
-apiVersion: template.openshift.io/v1
-kind: Template
-metadata: {name: project-request}
-objects:
-  - {apiVersion: project.openshift.io/v1, kind: Project, metadata: {name: "${PROJECT_NAME}"}}
-  - apiVersion: rbac.authorization.k8s.io/v1
-    kind: RoleBinding
-    metadata: {name: admin, namespace: "${PROJECT_NAME}"}
-    roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: admin}
-    subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: "${PROJECT_ADMIN_USER}"}]
-  - apiVersion: networking.k8s.io/v1
-    kind: NetworkPolicy
-    metadata: {name: default-deny, namespace: "${PROJECT_NAME}"}
-    spec: {podSelector: {}, policyTypes: [Ingress]}
-  - apiVersion: v1
-    kind: ResourceQuota
-    metadata: {name: team-quota, namespace: "${PROJECT_NAME}"}
-    spec: {hard: {pods: "20", requests.cpu: "2", requests.memory: 4Gi}}
-parameters:
-  - {name: PROJECT_NAME}
-  - {name: PROJECT_ADMIN_USER}
-EOF
-----
-
-.Expected output
-[source,texinfo]
-----
-Project/acme
-RoleBinding/admin
-NetworkPolicy/default-deny
-ResourceQuota/team-quota
-----
-
-To *activate* it cluster-wide (the real "every namespace born governed" step): `oc create -f template.yaml -n openshift-config`, then `oc patch project.config.openshift.io/cluster --type=merge -p '{"spec":{"projectRequestTemplate":{"name":"project-request"}}}'`.
-Revert by clearing it: `oc patch project.config.openshift.io/cluster --type=merge -p '{"spec":{"projectRequestTemplate":null}}'` and deleting the template.
-
-[IMPORTANT]
-.Activation is slow and cluster-wide — prefer the render, or do it well ahead
-====
-Wiring `projectRequestTemplate` triggers an *openshift-apiserver* rollout (minutes), and while active it changes *every* `oc new-project` on the cluster.
-On the build cluster this demo was validated by *rendering* the template (the `oc process` above), *not* by activating it cluster-wide, precisely to avoid the blast radius and the reload.
-For a live session, either show the render (fast, safe, makes the point) or activate it *before* the session and revert *after* — never mid-day while other attendees are creating projects.
-====
-
-=== Demo C — the identity provider tour (read-only)
-
-No mutation — just show that cluster login is IdP-driven, and that the same Keycloak from the app-security module also backs the cluster:
-
-[source,sh,role=execute]
-----
-oc get oauth cluster -o jsonpath='{range .spec.identityProviders[*]}{.name}  ({.type}){"\n"}{end}'
-----
-
-.Expected output (this cluster — yours will differ)
-[source,texinfo]
-----
-rhbk  (OpenID)
-workshop-users  (HTPasswd)
-----
-
-Talk track: read out whatever the command actually returned rather than the sample above — the list is a property of the cluster you are on, and a customer's carries their own providers.
-`workshop-users` is the htpasswd file this workshop appends; it is the one attendees sign in with.
-Anything else was already there, and on this particular cluster that is `rhbk`, the *Red Hat build of Keycloak* the attendees use to secure application logins later — one identity system, two jobs: app SSO and cluster login.
-Note the OAuth CR is a *merge-hazard singleton* — its `identityProviders` list is atomic, so GitOps can't own it without risking locking everyone out; that's why the workshop appends the htpasswd provider imperatively.
+*Talk track for the identity providers.* Read out whatever the attendees' `oc get oauth cluster` returned rather than a fixed list — it is a property of the cluster.
+`workshop-users` is the htpasswd provider the workshop appends; it is the one attendees sign in with.
+On this build cluster the other is `rhbk`, Red Hat build of Keycloak: one identity system serving both app SSO and cluster login.
+The OAuth CR is a merge-hazard singleton — its `identityProviders` list is replaced as a whole — which is why the workshop appends its provider imperatively instead of letting GitOps own the list.
 
 == Demo-mode notes
 
@@ -278,7 +187,13 @@ User1's node access comes from the `workshop-attendees` *group* binding (`platfo
 Add the groups (`--as-group=workshop-attendees …`) to evaluate group-granted access, or test as a real login.
 This is why the lab verifies the *ServiceAccounts* (direct bindings, which impersonation reflects correctly) and inspects the user's own access by reading the *bindings*, not by impersonating.
 
-*5. "Should each team get its own namespace, or its own cluster?"*::
+*5. "Why can't I create my own project? Every other cluster lets me."*::
+Because the platform team turned self-provisioning off: nothing grants your login `create projectrequests`, so `oc new-project` is refused.
+On a fresh OpenShift cluster that grant goes to every OAuth-authenticated user.
+Removing it, and stamping the projects the platform does create from a template, is how "anyone can make a wide-open namespace" becomes "every namespace is born governed."
+The trade is a request process for new namespaces, which is why most platform teams automate it (a portal form, a GitOps pull request) rather than leave it to tickets.
+
+*6. "Should each team get its own namespace, or its own cluster?"*::
 Default to *namespace-per-team*: RBAC + quota + NetworkPolicy isolate teams cheaply and densely on a shared cluster, and it's what the whole workshop runs on.
 Step up only for a *real* boundary — hard regulatory separation or a contractually capped blast radius — and even then, *Hosted Control Planes* (a per-tenant API server sharing worker capacity) is usually the right rung before a full cluster-per-team.
 Isolation is a cost multiplier; buy only what a specific requirement forces you to.
@@ -289,11 +204,14 @@ Isolation is a cost multiplier; buy only what a specific requirement forces you 
 `oc auth can-i --as=<user>` reflects direct user bindings but *not* group-granted access (platform-observer, self-provisioning).
 Add `--as-group=…` or test with a real login.
 Attendees who verify their own group access with plain `--as` will see false "no"s — steer them to reading the *bindings* (as the lab does).
-* *The self-provisioning revert quirk (see Demo A).*
-The `add/remove-cluster-role-from-group` wrappers leave a stray parallel binding; use the `oc patch` on `self-provisioners` instead, and set `autoupdate=false` *before* disabling or the controller reconciles it back.
-* *Project-template activation is cluster-wide and slow.*
-Wiring `projectRequestTemplate` rolls the openshift-apiserver (minutes) and affects every `oc new-project`.
-Demonstrate by *rendering* (safe) or activate well before/after the session; never mid-day (breaks Registry, Images & Catalog Governance's project-creation beats).
+* *Exercise 7 needs the install's settings.*
+If an attendee's `oc new-project` *succeeds*, self-provisioning is still on: have them `oc delete project <name>` and run pre-flight step 6.
+Do not fix it mid-session — emptying the binding is the install's job, and `oc adm policy remove-cluster-role-from-group` leaves a stray parallel binding behind when it is later undone.
+* *No other module creates projects.*
+Every attendee namespace is created by Argo CD as a `Namespace` object, which never goes through the project request template, so the template does not touch them.
+Dev Spaces can create `{user}-devspaces` itself when a module has not pre-created it (its ServiceAccount holds `create projectrequests`); a namespace made that way is stamped from the template, which is why the template carries `allow-from-openshift-devspaces`.
+* *Exercise 7's NetworkPolicies stay in `{user}-dev` until a reset.*
+`ws prep`/`ws reset` purge every NetworkPolicy in `{user}-dev`, and every other module that shares that namespace preps with the same purge, so the next module starts open.
 * *`ws reset` now purges attendee-authored RoleBindings too.*
 This is the first module where attendees *create* RBAC as the core exercise; the `ws reset` namespace purge clears workloads/Secrets *and* the `edit`/`deployer` bindings and `deployer` Role declared in this module's `ws-meta.yaml` (`purgeRbac`).
 The impersonation-guarded entry check "teammates are ungoverned" confirms this on every run.
@@ -306,5 +224,6 @@ The lab mints tokens and decodes only their *claims*; the token itself is a live
 
 Multi-Tenancy & Workload Security is a net-new module (the spec's "Mine: fresh build"), built against this repo's own live, proven multi-tenancy (`gitops/workshop-config/templates/` — the `platform-observer` ClusterRole, `workshop-attendees` group, per-user `admin` bindings, and standing quota/limits attendees inspect in exercise 6) and the OpenShift Authentication & authorization and SCC documentation.
 Every command, output, admission-rejection string, the UID range, the who-can count (101), and the self-provisioning forbidden message was captured on OpenShift 4.21.22 as `user1` on 2026-07-12 during the build.
-The scoped-SCC grant, self-provisioning disable, and IdP tour were performed with guaranteed revert; the project template was validated by rendering (not activated cluster-wide — see Watchouts).
+Exercise 7 was rebuilt and performed on OpenShift 4.22.22 as `user7` on 2026-11-12: the escalation refusal for a self-granted `nonroot-v2`, the `oc new-project` refusal (impersonating `user7` without the `system:authenticated:oauth` group, which is the post-install state), the live IdP read, both probes, and the quota refusal are real captures.
+The template's `allow-from-openshift-ingress` was proven on that cluster's host-network router: a Route to a policy-isolated Pod timed out until the allow was applied, then returned `200`.
 No content ported from stale material.

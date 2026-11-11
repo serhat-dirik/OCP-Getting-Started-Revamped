@@ -6,7 +6,12 @@ include::partial$version-attributes.adoc[]
 // seeds. Format: Symptom / Cause / Fix. Commands use $NS = {user}-dev (set it once: NS={user}-dev).
 
 Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
-Set the project shortcut first: `NS={user}-dev` (and `PROD={user}-prod`).
+Set the project shortcuts the fixes below use first:
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev; PROD={user}-prod
+----
 
 == Scaling `root-demander` produces no Pod — the Deployment sits at `0/1`
 
@@ -21,7 +26,8 @@ oc get events -n $NS --field-selector involvedObject.name=$RS -o jsonpath='{.ite
 ----
 +
 The decisive line is `restricted-v2: .containers[0].runAsUser: Invalid value: 0`.
-Patch the Deployment to run non-root (the exercise-1 fix), or, only if the workload genuinely needs a fixed UID, grant a scoped SCC to its ServiceAccount: `oc adm policy add-scc-to-user nonroot-v2 -z root-demander -n {user}-dev`.
+Patch the Deployment to run non-root (the exercise-1 fix).
+Only if the workload genuinely needs a fixed UID does it need a scoped SCC for its ServiceAccount — and that grant comes from the platform team: as namespace `admin` you are refused it (`attempting to grant RBAC permissions not currently held`), by design.
 
 == `oc auth can-i --as=<user>` says "no" for something the user can actually do
 
@@ -102,23 +108,54 @@ oc create token payments-ci -n $NS --duration=10m
 The token is time-limited and audience-scoped; a Pod that mounts a projected SA token gets one that's rotated automatically and invalidated when the Pod is deleted.
 Never print or paste the token into chat.
 
-== Self-provisioning won't stay disabled (it comes back)
+== `oc new-project` succeeded in exercise 7
 
-Symptom:: You removed the `self-provisioner` grant, but a moment later users can create projects again.
-Cause:: The `self-provisioners` ClusterRoleBinding carries `rbac.authorization.kubernetes.io/autoupdate=true`, so the cluster-policy controller *reconciles it back* to its default (with the group) within seconds.
-Fix:: Pin `autoupdate=false` *before* disabling, and use `oc patch` (the CLI wrappers leave a stray parallel binding):
+Symptom:: Exercise 7 expects `oc new-project {user}-sandbox` to be refused, but the project was created; `oc auth can-i create projectrequests` says `yes`.
+Cause:: Self-provisioning is still on.
+The workshop install empties the `self-provisioners` ClusterRoleBinding and pins it with `rbac.authorization.kubernetes.io/autoupdate=false`; on this cluster that has not happened, or the pin was missing and the cluster restored the default grant.
+Fix:: Remove the project you just created, then tell your instructor (pre-flight step 6 of the instructor guide checks the setting):
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc delete project {user}-sandbox
+----
++
+Carry on with the rest of exercise 7; only its first two steps depend on the setting.
+
+== The project config shows `spec: {}`, or the template read is Forbidden / NotFound
+
+Symptom:: In exercise 7, `oc get project.config.openshift.io cluster -o yaml` prints `spec: {}` instead of a `projectRequestTemplate`, or `oc get template project-request -n openshift-config` returns `Forbidden` or `NotFound`.
+Cause:: Both are install-time settings: the template in `openshift-config`, its name in the cluster `Project` config, and a read grant on that one template for `workshop-attendees`.
+`spec: {}` or `NotFound` means the template was not installed; `Forbidden` means the read grant is missing.
+Fix:: Nothing to change on your side; tell your instructor.
+The objects the template stamps are listed in the lab's expected output, so you can continue with the *Do it* step, which uses only your own namespace.
+
+== The probe from `{user}-prod` still connects after the policies
+
+Symptom:: After applying `deny-by-default` and `allow-from-same-namespace`, `probe $PROD` still prints `connected`.
+Cause:: The policies are not in `{user}-dev`: the Console's *Import YAML* ran with another project selected, or the CLI apply errored (with `$NS` unset it prints `error: Unexpected args: [-]` and applies nothing).
+Fix:: Re-set the shortcuts (the first block on this page), then check where the policies are:
 +
 [source,sh,role=execute]
 ----
-oc annotate clusterrolebinding self-provisioners rbac.authorization.kubernetes.io/autoupdate=false --overwrite
-oc patch clusterrolebinding self-provisioners --type=merge -p '{"subjects":[]}'
-# ... demonstrate the block, then restore:
-oc patch clusterrolebinding self-provisioners --type=merge \
-  -p '{"subjects":[{"apiGroup":"rbac.authorization.k8s.io","kind":"Group","name":"system:authenticated:oauth"}]}'
-oc annotate clusterrolebinding self-provisioners rbac.authorization.kubernetes.io/autoupdate=true --overwrite
+oc get networkpolicy -n $NS
 ----
 +
-If you used `oc adm policy remove-cluster-role-from-group`, check for a stray binding: `oc get clusterrolebinding | grep self-provision` should show *one* row.
+Expect `deny-by-default` and `allow-from-same-namespace`.
+If they are missing, re-run the apply step; OVN-Kubernetes enforces a new policy within a second or two.
+
+== The probe from inside `{user}-dev` is blocked too
+
+Symptom:: After the policies, `probe $NS` prints `blocked (no answer in 3s)` as well.
+Cause:: Only `deny-by-default` was applied.
+On its own it refuses all inbound traffic, including from Pods in the same namespace; `allow-from-same-namespace` is the policy that lets them back in.
+Fix:: Apply the second policy (both documents of the exercise's YAML), then probe again: `oc get networkpolicy -n $NS` must list both.
+
+== `oc run web` says `AlreadyExists`
+
+Symptom:: Re-running exercise 7's setup block prints `Error from server (AlreadyExists): pods "web" already exists`.
+Cause:: The web server from an earlier run is still there; the block also defined `probe`, which is all a re-run needs.
+Fix:: Keep the running server and go on to `probe $PROD`, or remove it first with `oc delete pod/web svc/web -n $NS` and re-run the block.
 
 == A custom Role appears bound but grants nothing (or too much)
 
@@ -138,7 +175,7 @@ The `deployer` rules must include `apps/deployments` verbs but *no* `secrets` ru
 == The teammates aren't "ungoverned" after `ws reset`
 
 Symptom:: After `ws reset multi-tenancy-workload-security`, the entry check or a fresh demo shows `payments-ci`/`payments-ops` still holding access.
-Cause:: The `ws reset` namespace purge clears workloads, Secrets, and ConfigMaps, and also removes the `edit`/`deployer` RoleBindings and the `deployer` Role this lab's declared exercises create (`ws-meta.yaml` `purgeRbac`).
+Cause:: The `ws reset` namespace purge clears workloads, Secrets, ConfigMaps and NetworkPolicies, and also removes the `edit`/`deployer` RoleBindings and the `deployer` Role this lab's declared exercises create (`ws-meta.yaml` `purgeRbac`).
 If a teammate is still governed after a reset, the most likely cause is an *ad-hoc* binding outside that declared set — e.g. the optional Challenge's `admin` grant to `payments-ops`, if it was never reverted.
 Fix:: Delete the extra binding, then re-verify:
 +
@@ -154,4 +191,4 @@ The impersonation-guarded entry check makes leftover governance visible to CI/in
 
 '''
 
-_Last verified on OpenShift 4.21.22 (2026-07-12)._
+_Last verified on OpenShift 4.21.22 (2026-07-12); exercise 7 entries on OpenShift 4.22.22 (2026-11-12)._

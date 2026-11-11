@@ -5,8 +5,12 @@
 #          (root-demander) scaled to 0 (the attendee scales it up to watch restricted-v2 reject it).
 #          The standing workshop quota/limits (workshop layer) are present to read. Entry marker set.
 #   End:   the attendee ran the lab — the workload is FIXED and running non-root, payments-ci holds
-#          edit-in-dev + view-in-prod, and payments-ops holds a custom `deployer` Role (Deployments
-#          yes, Secrets no).
+#          edit-in-dev + view-in-prod, payments-ops holds a custom `deployer` Role (Deployments
+#          yes, Secrets no), and {user}-dev is ingress-isolated by NetworkPolicy (exercise 7).
+#   Exercise 7 also depends on INSTALL-time cluster settings (self-provisioning off, the project
+#   request template). Those are deliberately NOT graded here: they are not the attendee's work, a
+#   reset cannot fix them, and an entry-mode ❌ would make `ws prep` report a broken materialization.
+#   The instructor guide's pre-flight checks them.
 # Runnable as the ATTENDEE end-to-end: the shared/namespace checks read only {user}-dev|prod objects the
 # attendee sees via namespace admin. The RBAC-outcome checks impersonate the teammate SAs — and the stock
 # OpenShift `admin` ClusterRole every attendee holds on their own namespaces GRANTS `impersonate` on
@@ -64,8 +68,9 @@ sa_cannot() {
 }
 
 # The FIXED workload is actually running as a NON-ROOT uid — asserted on the running Pod, not inferred
-# from the Deployment being Ready. "Ready" alone cannot tell the taught fix from the [INSTRUCTOR-DEMO]
-# alternative the content also teaches: grant root-demander a permissive SCC (anyuid) and the UNCHANGED
+# from the Deployment being Ready. "Ready" alone cannot tell the taught fix from the scoped-SCC
+# alternative the content also describes (a platform-team grant — attendees are refused it): grant
+# root-demander a permissive SCC (anyuid) and the UNCHANGED
 # root-demanding pod admits, goes Ready, and the old check called that "now runs non-root".
 # The effective uid: a container-level securityContext.runAsUser wins over the pod-level one. When the
 # attendee's fix pins no uid at all, restricted-v2's MustRunAsRange STAMPS one onto the container at
@@ -91,6 +96,23 @@ root_demander_runs_nonroot() {
   [[ -n "$uid" && "$uid" != "0" ]]
 }
 
+# Every Pod in the namespace is ingress-isolated: some NetworkPolicy selects ALL Pods ({} selector)
+# for Ingress. That is the OUTCOME of exercise 7 whatever the policies are called — the moment any
+# policy selects a Pod for Ingress, only explicitly allowed sources reach it. A policy written with
+# ingress rules but no policyTypes is defaulted to ["Ingress"] by the API (read back live 2026-11-12),
+# so matching on the read-back policyTypes covers both spellings.
+ns_ingress_isolated() {
+  oc_read get networkpolicy -n "$NS" -o jsonpath='{range .items[*]}{.spec.podSelector}{"|"}{.spec.policyTypes}{"\n"}{end}' || return 1
+  grep -q '^{}|.*"Ingress"' <<<"$OC_OUT"
+}
+# Entry: the namespace is still open. rc 1 from the predicate means the API answered and nothing
+# isolates it; a could-not-ask (VERIFY_INCONCLUSIVE) must not certify that, so it is re-checked.
+ns_open() {
+  local rc=0
+  ns_ingress_isolated || rc=$?
+  (( rc == 1 && VERIFY_INCONCLUSIVE == 0 ))
+}
+
 # Guard for the RBAC-outcome checks: only a caller who can impersonate SAs (admin/CI) can evaluate them.
 # "Could not ask" (rc 2) keeps the guard OPEN on purpose. A closed guard makes the three entry-state RBAC
 # checks vanish from the output with no line at all — and a check that silently disappears on an
@@ -113,6 +135,7 @@ check "root-demander Deployment present"                oc get deploy root-deman
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: the workload has NOT been run and the teammates are UNGOVERNED -----------------
   check "root-demander is not running yet (scaled to 0)" deploy_idle root-demander                   || hint "entry ships it at 0 replicas; if it is running, the lab already started — ws reset multi-tenancy-workload-security --user ${USER_NAME}"
+  check "${NS} is not network-isolated yet (no NetworkPolicy selects every Pod)" ns_open || hint "a NetworkPolicy from an earlier run is still in ${NS} — ws reset multi-tenancy-workload-security --user ${USER_NAME} (the purge removes every NetworkPolicy there)"
   if [[ "$IMPERSONATE_OK" == "true" ]]; then
     # A leftover lab binding would fail these — makes a not-fully-clean reset VISIBLE (see ws-meta note).
     check "payments-ci is ungoverned in ${NS} (no edit yet)"   sa_cannot payments-ci "$NS" update deployments   || hint "a leftover RoleBinding governs payments-ci — remove lab-created bindings, then ws reset multi-tenancy-workload-security --user ${USER_NAME}"
@@ -130,7 +153,8 @@ else
   # name / which securityContext field), so any correct solution stays green (template rule 14).
   info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
   check "root-demander is running (>=1 ready replica)"        deploy_ready root-demander             || hint "not done yet — the entry state ships root-demander at 0 replicas on purpose; fixing the workload (drop runAsUser:0) and scaling it up IS the lab, so this red is the expected state before you start (or: adm solve multi-tenancy-workload-security --user ${USER_NAME})"
-  check "root-demander's pod actually runs as a NON-ROOT uid" root_demander_runs_nonroot            || hint "not done yet, or done the wrong way — if root-demander is not running at all this follows from the check above. If it IS running as root, that is the scoped-SCC route ([INSTRUCTOR-DEMO]), not the fix: drop runAsUser:0 from the pod spec so restricted-v2 assigns a uid from the namespace range. Inspect: oc get pod -l app=root-demander -n ${NS} -o jsonpath='{.items[0].spec.containers[0].securityContext}'"
+  check "root-demander's pod actually runs as a NON-ROOT uid" root_demander_runs_nonroot            || hint "not done yet, or done the wrong way — if root-demander is not running at all this follows from the check above. If it IS running as root, it was admitted through a wider SCC grant, not the fix: drop runAsUser:0 from the pod spec so restricted-v2 assigns a uid from the namespace range. Inspect: oc get pod -l app=root-demander -n ${NS} -o jsonpath='{.items[0].spec.containers[0].securityContext}'"
+  check "every Pod in ${NS} is ingress-isolated by a NetworkPolicy (exercise 7)" ns_ingress_isolated || hint "not done yet — the entry state leaves ${NS} open by design; applying the template's deny-by-default + allow-from-same-namespace is exercise 7. Inspect: oc get networkpolicy -n ${NS}"
   if [[ "$IMPERSONATE_OK" == "true" ]]; then
     # These five grade RBAC the attendee writes during the lab. The entry state deliberately leaves both
     # ServiceAccounts UNGOVERNED (the entry checks above assert exactly that), so red here before the lab

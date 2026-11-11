@@ -35,7 +35,7 @@ In this lab you make that sandbox safe: reject a root-demanding workload and fix
 ====
 Most steps below are offered two ways: the *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`), the *CLI* tab uses `oc` in the *Terminal* tab beside these instructions.
 Pick a path once — the tabs stay in sync across the page.
-A few steps are *terminal-only* because the console adds nothing: minting a bound token, `oc adm policy who-can` audits, and the read-only "how you were provisioned" tour.
+A few steps are *terminal-only* because the console adds nothing: minting a bound token, `oc adm policy who-can` audits, the read-only "how you were provisioned" tour, and the cluster-policy reads and connection probes in exercise 7.
 Keep the terminal open regardless: the `$NS`/`$PROD` shortcuts you just set live there, and the verify steps rely on them.
 ====
 endif::demo[]
@@ -409,18 +409,34 @@ uid=1000960000(1000960000) gid=0(root) groups=0(root),1000960000
 The workload runs as the bottom UID of your namespace's range (`1000960000` in this sample) — non-root, drawn from the band the annotation declares, under the `restricted-v2` SCC it never had to ask for.
 No image rebuild, no exception, no root.
 
-[NOTE]
-.The other resolution: a scoped SCC exception (instructor demonstrates)
-====
 Sometimes a workload *genuinely* needs a fixed or elevated UID — a legacy database image, a node agent.
 The answer is *not* to run everything as root; it is a *narrowly scoped* exception: a namespaced RoleBinding to a less-restrictive SCC (`nonroot-v2`, or `anyuid` only if UID 0 is truly required) targeting *one ServiceAccount*.
-`oc adm policy add-scc-to-user nonroot-v2 -z root-demander -n {user}-dev` writes exactly that binding.
-Your instructor demonstrates the grant (and its audit trail) live — see the concept page for why "fix the image" almost always wins over "grant the exception."
-====
+Try to grant that exception yourself.
+`--dry-run=server` asks the API for its decision and changes nothing:
+
+// Performed 2026-11-12 on OCP 4.22.22 as user7 (impersonated with its real groups). The refusal is
+// RBAC escalation prevention, not a missing verb: admin may create RoleBindings, but not one that
+// hands out `use` on an SCC the caller does not hold. Dry-run keeps it safe if a cluster ever DID
+// allow it — a real system:openshift:scc:* binding is skipped by purge_ns and would survive resets.
+[source,sh,role=execute]
+----
+oc adm policy add-scc-to-user nonroot-v2 -z root-demander -n $NS --dry-run=server
+----
+
+.Expected output (the groups list is abridged)
+[source,texinfo,subs="attributes"]
+----
+Error from server (Forbidden): rolebindings.rbac.authorization.k8s.io "system:openshift:scc:nonroot-v2" is forbidden: user "{user}" (groups=[...]) is attempting to grant RBAC permissions not currently held:
+{APIGroups:["security.openshift.io"], Resources:["securitycontextconstraints"], ResourceNames:["nonroot-v2"], Verbs:["use"]}
+----
+
+You are `admin` in this namespace, and you still cannot hand out `use` of an SCC you do not hold yourself.
+The exception is a platform-team grant: requested, reviewed, and scoped to one ServiceAccount.
+That friction is deliberate, and it is why fixing the image almost always wins.
 
 [.checkpoint]
 ****
-✔ *Verify:* Scaling `root-demander` produced *no Pod* and a `restricted-v2 … runAsUser: Invalid value: 0` rejection naming your namespace's own UID range (the number differs per namespace — you read it off the annotation); after dropping the forced root, the Pod runs as a non-root UID drawn from that range under the `restricted-v2` SCC.
+✔ *Verify:* Scaling `root-demander` produced *no Pod* and a `restricted-v2 … runAsUser: Invalid value: 0` rejection naming your namespace's own UID range (the number differs per namespace — you read it off the annotation); after dropping the forced root, the Pod runs as a non-root UID drawn from that range under the `restricted-v2` SCC; and your own attempt to grant `nonroot-v2` was refused as an escalation.
 ****
 
 == 2. Give the workload a safe identity
@@ -870,7 +886,7 @@ sum by (label_workshop_redhat_com_user) (
 ----
 
 This workshop stamps `workshop.redhat.com/user` on every namespace it creates, so the join resolves here; in your own cluster substitute whatever label carries your team or cost-centre name.
-Reading every namespace this way needs `cluster-monitoring-view`, which a tenant does not have — so this one is your instructor's screen, not yours, and that asymmetry is the point: showback is a platform-team view built from tenant-scoped facts.
+Reading every namespace this way needs `cluster-monitoring-view`, which a tenant does not have, and that asymmetry is the point: showback is a platform-team view built from tenant-scoped facts.
 ====
 
 Clean up the two workloads you created here:
@@ -966,27 +982,248 @@ That is what makes the sandbox safe to hand out.
 ✔ *Verify:* You saw the `{user}-admin` RoleBinding that grants you `admin` (the platform governing you the way you governed the team), read cluster nodes/storage through your group's `platform-observer` grant but were refused a peer's Pods and the full namespace list, and confirmed your namespace `admin` returns `no` for creating a ResourceQuota or an SCC.
 ****
 
-== 7. The platform team's cluster-wide levers (instructor demo)
-⏱ *~5 min* · watch — these change the whole cluster
+== 7. Every namespace born governed
+⏱ *~8 min* · feel the cluster's project policy, read it, then put its guardrails on your own namespace
 
-The last three controls are *cluster singletons*: change one and every tenant feels it.
-So your instructor drives them while you watch — you'll see the same objects you governed at namespace scope, now at cluster scope.
+So far you governed what happens *inside* a namespace.
+The platform team also decides how a namespace comes to *exist*, with two cluster-wide settings the workshop install applied before you arrived:
 
-:demo-title: The platform team's cluster-wide levers
-:demo-body: Your instructor performs the next three actions live — each changes a cluster singleton that affects every tenant, so you watch rather than run them.
-include::partial$instructor-demo.adoc[]
+* *Self-provisioning is off.* By default any signed-in user may create projects; on this cluster only the platform team can.
+* *A project request template* stamps every project the platform does create with a default-deny NetworkPolicy and a starter quota.
 
-Your instructor demonstrates three things (all sequenced and reverted so later modules keep working):
+These are cluster singletons, so you do not change them.
+You feel them, read them, and then apply the same guardrails to a namespace you own.
+Every step here is terminal-only except the policy apply, which has a Console tab.
 
-. *Self-provisioning* — by default any authenticated user can create their own projects. The instructor removes that grant (and pins it with an `autoupdate=false` annotation so the cluster doesn't silently restore it), then shows a `new-project` attempt refused with `You may not request a new project via this API.` — then restores it.
-. *A project request template* — a Template in `openshift-config`, wired via the cluster `Project` config, that stamps *every* new project with a default-deny NetworkPolicy and a starter quota. The instructor shows the augmented template rendering `Project` + `RoleBinding` + `NetworkPolicy` + `ResourceQuota` — "every namespace born governed."
-. *The identity provider* — a read-only tour of `oc get oauth cluster -o yaml`, reading out whichever IdPs this cluster actually has wired up. On your instructor's cluster that is an htpasswd file plus *Red Hat build of Keycloak* (OpenID) — the same product that secured your application logins earlier in the workshop, here also backing *cluster* login: one identity system, two jobs. Yours may list different providers; the tour is about reading the live config, not memorizing this list.
+// Exercise 7 replaces the former instructor demo (owner rule 2026-11-12: no instructor-only exercise;
+// the cluster is DEDICATED, so the install sets the cluster-wide levers before the workshop).
+// Performed 2026-11-12 on OCP 4.22.22 as user7 (impersonated: --as=user7 --as-group=workshop-attendees
+// --as-group=system:authenticated[:oauth]). What was and was not live at the time:
+//  * The new-project refusal and the can-i "no" were captured by impersonating user7 WITHOUT the
+//    system:authenticated:oauth group — the only subject of the default self-provisioners binding —
+//    which is exactly the post-install state. The refusal text is the API's own default message
+//    (the install sets no projectRequestMessage, on purpose, so this text stays true).
+//  * Reads, as user7: the OAuth IdP list ran live (platform-observer gained oauths/projects/SCCs
+//    read on 2026-11-12, platform task D1). project.config ran live too but printed `spec: {}`,
+//    because the install had not yet set projectRequestTemplate; the template read was Forbidden
+//    (it needs the install's template AND a get grant on templates/project-request in
+//    openshift-config). Those two expected outputs are written from the install spec and are
+//    carry a verify-on-cluster TODO until re-run after the install lands.
+//  * The probes, the policy apply and the quota refusal were performed live as user7.
 
-You'll find the exact commands, expected output, and the cluster-wide watchouts in this module's instructor guide.
+=== Feel it: you cannot create a project
+
+Try to create a project of your own:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc new-project {user}-sandbox
+----
+
+.Expected output
+[source,texinfo]
+----
+Error from server (Forbidden): You may not request a new project via this API.
+----
+
+Ask the API the same question directly:
+
+[source,sh,role=execute]
+----
+echo -n "can I request a project? "; oc auth can-i create projectrequests 2>/dev/null
+----
+
+.Expected output
+[source,texinfo]
+----
+can I request a project? no
+----
+
+A `ProjectRequest` is how `oc new-project` and the console's *Create Project* button ask for a namespace.
+Nothing grants it to you, so every namespace you work in was created by the platform on purpose, your own `{user}-*` projects included.
+
+=== Read it: the policy behind the refusal
+
+The cluster's project settings name the template every new project is stamped from:
+
+// TODO(verify-on-cluster): the read works for attendees today; the value needs the install's projectRequestTemplate.
+[source,sh,role=execute]
+----
+oc get project.config.openshift.io cluster -o yaml | sed -n '/^spec:/,$p'
+----
+
+.Expected output
+[source,texinfo]
+----
+spec:
+  projectRequestTemplate:
+    name: project-request
+----
+
+List what that template creates:
+
+// TODO(verify-on-cluster): needs the install's template in openshift-config and a get grant on it for workshop-attendees.
+// The jsonpath was run against the install-spec template file (--dry-run=client) and printed exactly this.
+[source,sh,role=execute]
+----
+oc get template project-request -n openshift-config -o jsonpath='{range .objects[*]}{.kind}/{.metadata.name}{"\n"}{end}'
+----
+
+.Expected output
+[source,texinfo]
+----
+Project/${PROJECT_NAME}
+RoleBinding/admin
+NetworkPolicy/deny-by-default
+NetworkPolicy/allow-from-same-namespace
+NetworkPolicy/allow-from-openshift-ingress
+NetworkPolicy/allow-from-openshift-monitoring
+NetworkPolicy/allow-from-openshift-devspaces
+ResourceQuota/starter-quota
+----
+
+The first two objects are OpenShift's default: the project and an `admin` binding for whoever asked.
+The rest is the platform team's policy.
+`deny-by-default` refuses all inbound traffic, and four narrow allows let back in only the project's own pods, the router, monitoring, and Dev Spaces.
+`starter-quota` caps object counts.
+
+Who may sign in at all is the same kind of cluster singleton.
+Read the identity providers wired into the OAuth server:
+
+// Ran live as user7 on 2026-11-12 (platform-observer grants oauths get).
+[source,sh,role=execute]
+----
+oc get oauth cluster -o jsonpath='{range .spec.identityProviders[*]}{.name}  ({.type}){"\n"}{end}'
+----
+
+.Expected output (sample — yours lists whatever providers this cluster has)
+[source,texinfo]
+----
+rhbk  (OpenID)
+workshop-users  (HTPasswd)
+----
+
+`workshop-users` is the htpasswd provider you signed in with.
+`rhbk` is Red Hat build of Keycloak, which can back cluster login and application login at once.
+
+=== Do it: put the guardrails on your own namespace
+
+You cannot create a project, but you are `admin` of `{user}-dev`, and NetworkPolicy is a namespace object you may write.
+First, prove the namespace is open.
+This block defines a `probe` helper, then starts a small web server, `web`, in `{user}-dev`:
+
+[source,sh,role=execute]
+----
+IMG=image-registry.openshift-image-registry.svc:5000/openshift/tools:latest
+probe() {
+  echo -n "from $1: "
+  oc run probe -n "$1" --image="$IMG" --rm -i --restart=Never --quiet --command -- \
+    sh -c "curl -s -m 3 -o /dev/null http://web.$NS.svc:8080 && echo connected || echo 'blocked (no answer in 3s)'"
+}
+oc run web -n $NS --image=$IMG --port=8080 --expose --command -- python3 -m http.server 8080
+oc wait pod/web -n $NS --for=condition=Ready --timeout=60s
+----
+
+Call it from `{user}-prod`, a different namespace:
+
+[source,sh,role=execute]
+----
+probe $PROD
+----
+
+.Expected output
+[source,texinfo,subs="attributes"]
+----
+from {user}-prod: connected
+----
+
+A namespace is not a network boundary by default.
+Any Pod in any namespace on the cluster could have made that call.
+
+Now apply the template's first two policies to `{user}-dev`, unchanged:
+
+[tabs]
+====
+Console::
++
+--
+Use the masthead *+* (*Import YAML*) with project `{user}-dev` selected, paste the two policies from the *CLI* tab (both documents, including the `---` between them), and *Create*.
+They appear under *Networking* → *NetworkPolicies*.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc apply -n $NS -f - <<'EOF'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-by-default
+spec:
+  podSelector: {}          # every Pod in the namespace
+  policyTypes: [Ingress]   # ...and no ingress rule: nothing may connect
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-same-namespace
+spec:
+  podSelector: {}
+  ingress:
+    - from:
+        - podSelector: {}  # any Pod in THIS namespace
+EOF
+----
+--
+====
+
+Probe again, from the other namespace and from inside:
+
+[source,sh,role=execute]
+----
+probe $PROD
+probe $NS
+----
+
+.Expected output
+[source,texinfo,subs="attributes"]
+----
+from {user}-prod: blocked (no answer in 3s)
+from {user}-dev: connected
+----
+
+The connection from `{user}-prod` is now dropped, and Pods inside `{user}-dev` still reach each other.
+That is what every project the platform creates looks like from its first second.
+
+The template's quota is the other half.
+Try to apply it yourself:
+
+[source,sh,role=execute]
+----
+oc create quota starter-quota --hard=pods=20,persistentvolumeclaims=5 -n $NS --dry-run=server
+----
+
+.Expected output
+[source,texinfo,subs="attributes"]
+----
+error: failed to create quota: resourcequotas is forbidden: User "{user}" cannot create resource "resourcequotas" in API group "" in the namespace "{user}-dev"
+----
+
+You could write the NetworkPolicy, but not the quota.
+That is why the quota lives in the template.
+The platform applies it with its own authority when it creates a project, the same way it applied the `workshop-quota` you read in exercise 5.
+
+Remove the web server, and keep the two policies:
+
+[source,sh,role=execute]
+----
+oc delete pod/web svc/web -n $NS
+----
 
 [.checkpoint]
 ****
-✔ *Verify (observed):* You watched self-provisioning be disabled and restored, a project template render baked-in guardrails, and the live OAuth config list this cluster's actual identity providers — three levers that belong to the platform team, not the tenant.
+✔ *Verify:* `oc new-project` was refused and `can-i create projectrequests` said `no`; you read the cluster's `projectRequestTemplate` and the objects it stamps, plus the live identity providers; after `deny-by-default` and `allow-from-same-namespace`, a probe from `{user}-prod` was blocked while one from `{user}-dev` connected; and the template's quota was refused when you tried to create it.
 ****
 
 == Challenge (optional)
@@ -1000,6 +1237,6 @@ Try these on your own:
 * *Mint a token and use it.* Create a bound token for `payments-ci` (`oc create token payments-ci -n {user}-dev`), then use it with `oc --token=… --server=… get pods -n {user}-dev` to act *as the ServiceAccount*, and confirm the same token is denied `get secrets` in `{user}-prod`.
 
 When you are done, run `ws verify {module-id}` in the Terminal — or run `ws prep {module-id} --yes` to return your world to ungoverned teammates and a not-yet-run workload.
-(`ws prep --yes` also removes the RoleBindings and Role you authored by hand in this lab, so the teammates return to fully ungoverned.)
+(`ws prep --yes` also removes the RoleBindings, Role and NetworkPolicies you authored by hand in this lab, so the teammates return to fully ungoverned and `{user}-dev` is open again.)
 
 endif::demo[]
