@@ -1,22 +1,10 @@
-# Instructor Runbook — Delivering a Live Session
+# Instructor Runbook
 
-The document you follow to actually run this workshop in front of a room, in delivery order:
-provisioning → day before → morning of → during → when something breaks → after.
+What to do, in order, to deliver a live session. Installing and troubleshooting live in
+[INSTALL.md](INSTALL.md). Each module's instructor page (`content/modules/ROOT/pages/<slug>/instructor.adoc`)
+has its own timing table, pre-flight checklist and watchouts.
 
-This runbook does not re-explain the mechanics — **[INSTALL.md](INSTALL.md)** owns installing,
-verifying, and troubleshooting; **[README.md](README.md)** owns the module catalogue and the
-recommended delivery lengths; each module's `instructor.adoc` page (the *Instructor* rendering of
-`site-instructor.yml`, or read directly under `content/modules/ROOT/pages/<slug>/instructor.adoc`)
-owns that module's own timing table, pre-flight checklist, demo notes, top questions, and
-watchouts. This runbook's job is to sequence all of that into one thing you check off on delivery
-day. Every command below is copied from `INSTALL.md`, `README.md`, or `tools/ws/adm --help` /
-`tools/ws/adm` itself — none are invented. Most of what follows is `adm`, the operator surface of
-the workshop CLI; attendees use `ws`, its four-verb surface (`list`/`prep`/`verify`/`reset`), inside
-the cockpit.
-
-**Contents**
-
-1. [Weeks/days before](#1-weeksdays-before)
+1. [Plan](#1-plan)
 2. [Day before](#2-day-before)
 3. [Morning of](#3-morning-of)
 4. [During](#4-during)
@@ -25,285 +13,118 @@ the cockpit.
 
 ---
 
-## 1. Weeks/days before
+## 1. Plan
 
-### Decide the shape of the delivery
-
-Before you order anything, settle three things — they drive the sizing math below:
-
-1. **How many attendees?** Sets `users` in `bootstrap/vars.yaml` and the sizing table's column
-   ([INSTALL.md › Sizing](INSTALL.md#sizing)).
-2. **How long is the session?** [README's delivery table](README.md#workshop-content) gives four
-   proven shapes — half-day taster, full-day essentials, 2-day core, and the 3-day full workshop —
-   or assemble your own subset, since every module is self-contained. Read the module lists and the
-   totals off that table rather than off a copy here: they are summed from the per-module time
-   figure in the module table just above it, which is also what you pace against in
-   [§4](#4-during), so a second copy in this file silently contradicts the real one the first time
-   a module is re-measured — which is exactly what happened to the copy that used to sit here.
-   Whichever shape you pick, its module list is what you translate into `modules_enabled` (list the
-   modules you ARE teaching — usually shorter) or `modules_disabled` (list the ones you are not) in
-   step 3 below.
-3. **Which modules are actually in scope?** Anything you're dropping goes in `modules_disabled`
-   in `vars.yaml` (`mNN` or slug). This isn't just a content choice — it changes what you need to
-   order:
-   - Dropping the RHACS-dependent modules (app-security-testing, trusted-supply-chain) is "the
-     single biggest lever" for a lean install — RHACS alone is ~26 Gi, 46% of the platform's
-     memory ([INSTALL.md › Sizing](INSTALL.md#sizing)).
-   - `deployment-targets-scheduling` needs **5 schedulable worker-role nodes** and **3 dedicated
-     workers**. On RHDP OpenShift Base the control planes count, so 3 workers is enough; on a
-     cluster with tainted control planes, order 5 or drop the module
-     ([INSTALL.md › Node count](INSTALL.md#node-count)).
-   - If any AI module is in scope (jobs-batch-kueue's batch inference, agentic-ai,
-     ai-assisted-development, app-modernization's MTA Lightspeed step), you need an OpenAI-compatible
-     model endpoint decided *now* — MaaS, an on-cluster vLLM runtime, or a public provider — since
-     it's a `vars.yaml` input at install time, not something you bolt on live.
-
-### Order the cluster
-
-Use [INSTALL.md › Sizing](INSTALL.md#sizing) and [Node count](INSTALL.md#node-count) — worker count
-follows from cohort size *and* whether `deployment-targets-scheduling` is in scope, not from headcount
-alone. At Red Hat, order the Field Sourced Content - OpenShift Base item from the Red Hat Demo Platform (see
-INSTALL.md for the catalog link); node count and shape are chosen at order time.
-
-**Lead time:** the repo does not prescribe a fixed number of days — the one hard rule is *get the
-cluster with enough lead time to install and smoke-test before the session, and never plan to
-install in front of the room* ([INSTALL.md §1](INSTALL.md#1-before-you-order)). Budget for the
-install itself (15–20 minutes to the completion banner, more for operators to finish reconciling
-behind it — INSTALL.md §2, step 6), a full pre-flight pass, and time to fix whatever pre-flight finds —
-none of that should be happening the morning of the session.
+1. **Pick the agenda** from the [README delivery table](README.md#workshop-content) (half-day,
+   full day, 2-day, 3-day) or choose your own modules. Put the list in `modules_enabled`.
+2. **AI modules need a model endpoint and key at install time.** That covers jobs-batch-kueue's
+   batch inference, agentic-ai, ai-assisted-development and app-modernization's Lightspeed step.
+3. **Order and size the cluster** with [INSTALL.md › Before you order](INSTALL.md#1-before-you-order).
 
 ---
 
 ## 2. Day before
 
-### Install and verify
+1. **Install and verify:** [INSTALL.md › Install](INSTALL.md#2-install), steps 1–7.
+2. **Run the pre-flight checklist** on the instructor page of every module in your agenda.
+3. **Warm up the slow parts.** The first run of these is much slower than a warm one:
 
-Follow [INSTALL.md §2](INSTALL.md#2-install) start to finish:
-
-```bash
-tools/ws/adm preflight                        # read-only: tooling, cluster access, adoption forecast
-# review the adoption forecast — on a customer cluster, show it to the customer first
-cp bootstrap/vars.example.yaml bootstrap/vars.yaml
-# edit vars.yaml: users, cluster_domain, modules_enabled OR modules_disabled,
-#                 workshop_user_password, maas.*
-./bootstrap/install.sh                       # six phases, idempotent, ~15-20 min to the banner
-tools/ws/adm doctor                           # is the environment sane?
-tools/ws/adm status                           # cohort dashboard: every platform app + every attendee
-```
-
-Then spot-check one module end to end, exactly as INSTALL.md prescribes — `ws verify` is
-**mode-split** (entry-state assertions before the lab, outcome assertions after), so a green check
-at the wrong point proves nothing:
-
-```bash
-tools/ws/adm start m01 --user user1
-tools/ws/ws verify m01 --user user1
-tools/ws/ws reset  m01 --user user1
-```
-
-### Warm and pre-open what the day's modules need
-
-Every module's `instructor.adoc` carries its own **Pre-flight checklist** ("Run these before the
-session") — run the ones for every module in your agenda. A subset of modules call out something
-that specifically needs *warming* or *pre-opening* the day before, because the first live run in
-front of the room is measurably slower than a warm one:
-
-| Module | What to warm/pre-open | Why |
+| Module | Do this | Why |
 |---|---|---|
-| Platform Orientation & First App | Deploy-and-delete the claims image once as a sample user | Warms the 410 MB image on a node — first pull is ~18 s, subsequent starts are seconds |
-| Ways to Build & Deliver Apps | `adm solve build-deliver --user <u>` before the session | First S2I build is ~4.5 min warm but up to **~11 min** on a cold node (Maven Central + no builder-image cache) |
-| Dev Spaces & the Inner Loop | Start one workspace before the room arrives (pulls the universal developer image onto a node) | First workspace start is ~85 s cold vs ~20 s once a node has the image; for a large event, ask the platform team to enable Dev Spaces' `imagePuller` on the CheCluster instead |
-| Pipelines Fundamentals & Task Libraries | `adm solve pipelines-fundamentals --user <u>` before the room — it blocks for a whole pipeline run (measured 7m45s, but 20m49s for the same pipeline on a slower cluster; budget the worst) | The `maven-cache` is a **per-user PVC**, not a node cache: solving `user1` warms `user1` and nobody else, so warming a room costs one full run per attendee. No cached run has been timed yet, so promise the room no number — the alternative is to accept that every attendee's first run is the slow one and let exercise 2 fill the wait, which is what the module is designed for |
-| Trusted Software Supply Chain | Run the seeded pipeline once on a sample user, ~1 hour before the session | The RHACS vulnerability store needs ~1 hour to populate on a freshly installed cluster before the Log4Shell policy fires; separately, materializing this module at all — `adm start`/`solve`, or an attendee's own `prep` — blocks ~8 min building a warm signed image — budget that into provisioning too, not just the day before |
-| Application Security Testing | Have attendees clone and start their first run before you deliver the concept. **Running the demo flavor instead? Stage its six finished PipelineRuns days ahead** — the arc is a tour of runs that have already finished and triggers nothing live, so its prep is one full pass through this module's own lab (**~66 min of pipeline**, and that floor cannot be negotiated down) | No cache survives a run (unit tests ~5.5 min + image build ~4 min every time), so hands-on is ~85–105 min — a genuine double slot, and the module table's 100 min is a figure inside that band, not a slot you can compress. Pre-warming the first run closes part of the gap; the demo flavor (~15 min of room time) is the honest choice if all you have is a single hour — but that 15 min is *room* time only, and its preparation is the ~66 min above, so it is not a way to save the day-before |
-| Multi-Tenancy & Workload Security | Warm the `openshift/tools` image on a node (`oc run` it once, then delete) | Exercise 1's fix and exercise 5's SCC demo both stall on a cold image pull (up to ~20 s) otherwise |
-| Developer Hub & Golden Paths | Sign in as guest and open the Catalog filtered to `parasol-claims` before the room | So the first step is one glance, not a cold login + navigation |
-| GitOps Fundamentals / GitOps at Scale | `adm solve <slug> --user <u>` before the room | Leaves a pre-solved, pre-signed-in state ready as your opening visual — but note it performs a real sync to the entry Git revision, so a private rehearsal of the later steps is a second sync/self-heal cycle against that same revision |
-| Securing Apps with Keycloak | Confirm the workshop `sso-workshop` Keycloak and each attendee's seeded realm are up (pre-flight items 2–3) | The whole module depends on both being healthy; also brief yourself not to let attendees "fix" exercise 4's deliberate break early |
-| Service Mesh 3 & Advanced Gateways | Pre-open Kiali, signed in, correct project selected, on a second screen | It's the visual for the enroll/traffic steps |
-| Resilience, Multi-Cluster & DR | Run `ws reset resilience-multicluster-dr` before the session, not live | It's slow |
-| Serverless Zero-to-Hero | The opposite of warming: let the service settle to **zero** pods (~a minute of no traffic) before step 1 | If you've been poking it, the cold start won't actually fire |
-| Eventing Deep-Dive & Serverless Workflows | `curl` both services once to warm them before you start, *unless* you want the ~14 s cold wake as a deliberate step | Otherwise the demo waits on a cold start mid-sentence |
-| Application Modernization (MTA + Lightspeed) | **Stage three MTA applications, not one** — `parasol-legacy-claims-demo`, `parasol-legacy-claims-fixed-demo` and `parasol-claims-demo`, all in *Source code* mode against the same five targets. Budget **~10–15 min of Hub time** (three analyses at ~3–5 min each, and they overlap) plus the console clicks and the one `git push` that creates the `demo-fixed` branch — the module measures neither, so do it the evening before, not in the last half hour. The repo/branch table and the exact commands live in the Prep block of the module's Demo page; stage from there so there is one recipe and not two. Also warm the Dev Spaces workspace (first start pulls the universal developer image, 2–3 min) | The MTA console keeps **one current report per application**, so re-analysing in place *overwrites* the baseline the first step opens on — three applications is the only way to put a before and an after on screen together. Keep the `-demo` suffix on all three: the Hub's portfolio is shared and flat, so a row named after an attendee hands them the finished analysis the lab asks them to produce. The warm workspace is what keeps the AI-assisted-fix step from stalling on infrastructure |
-| AI-Assisted Development on OpenShift | Re-verify the MaaS key is present and unexpired; run exercise 3 end to end on *your* cluster's model beforehand; do one throwaway `ask-agent` diagnosis right before you present | Models differ in whether they execute a write at all, or write it correctly — check on your own model, don't assume; the first call of the day is also the slowest (cold model, key fetch) |
-
-If a module in your agenda isn't in this table, it still has a Pre-flight checklist — run it, it's
-just read-only verification rather than something to warm.
+| Platform Orientation & First App | Deploy and delete the claims image once as a sample user | First pull of the 410 MB image takes ~18 s |
+| Ways to Build & Deliver Apps | `adm solve build-deliver --user <u>` | The first S2I build takes up to ~11 min on a cold node (~4.5 min warm) |
+| Dev Spaces & the Inner Loop | Start one workspace | Cold start ~85 s, warm ~20 s. For a large event, enable `imagePuller` on the CheCluster |
+| Pipelines Fundamentals | `adm solve pipelines-fundamentals --user <u>` (one full run: 8–21 min) | The Maven cache is per attendee, so this warms only that user. Exercise 2 is designed to fill everyone else's slow first run. |
+| Trusted Software Supply Chain | Run the seeded pipeline once as a sample user, ~1 hour before | RHACS needs ~1 hour after install before the Log4Shell policy fires. Starting this module also takes ~8 min (it builds a signed image). |
+| Application Security Testing | Have attendees start their first run before you teach the concept. For the demo version, stage its six finished PipelineRuns days ahead (~66 min of pipeline). | Nothing is cached, so hands-on takes 85–105 min, a double slot. The demo version takes ~15 min of room time. |
+| Multi-Tenancy & Workload Security | `oc run` the `openshift/tools` image once, then delete it | Exercises 1 and 5 otherwise stall up to ~20 s on the image pull |
+| Developer Hub & Golden Paths | Sign in as guest and open the Catalog filtered to `parasol-claims` | The first step becomes one glance |
+| GitOps Fundamentals / at Scale | `adm solve <slug> --user <u>` | A ready opening visual. It performs a real sync, so a later rehearsal syncs a second time. |
+| Securing Apps with Keycloak | Check the `sso-workshop` Keycloak and the attendee realms are up | The module depends on both. Do not let attendees fix exercise 4's deliberate break early. |
+| Service Mesh 3 & Advanced Gateways | Open Kiali on a second screen, signed in, project selected | It is the visual for the traffic steps |
+| Resilience, Multi-Cluster & DR | `ws reset resilience-multicluster-dr` | Too slow to run live |
+| Serverless Zero-to-Hero | Leave the service idle until it is at zero pods (~1 min) | Otherwise the cold start does not happen |
+| Eventing & Serverless Workflows | `curl` both services once, unless you want the ~14 s cold wake as a step | Avoids a cold start mid-sentence |
+| Application Modernization | The evening before, stage three MTA applications: `parasol-legacy-claims-demo`, `parasol-legacy-claims-fixed-demo`, `parasol-claims-demo` (recipe: the Prep block on the module's Demo page). Start a Dev Spaces workspace. | MTA keeps one report per application, so before-and-after needs three. Keep the `-demo` suffix: the Hub is shared with attendees. Allow 10–15 min of Hub time. |
+| AI-Assisted Development | Check the MaaS key works. Run exercise 3 on your model. Do one throwaway `ask-agent` diagnosis just before you present. | Models differ in whether they carry out writes. The first call of the day is the slowest. |
 
 ---
 
 ## 3. Morning of
 
-**There is no morning login step.** One cockpit serves the whole room behind an OpenShift login,
-and its terminal mints each attendee's kubeconfig from that sign-in every time they open it — there
-is no pod-start token to go stale, so installing the day before is fine. (`adm session-refresh`
-belongs to the retired per-user cockpit; against the shared one it reports `nothing to refresh`.)
+1. **If you changed content since installing:**
 
-**If you pushed content or updated the workshop since installing**, do this — it re-clones each
-cockpit, fixing the "`ws prep` refused with an AppProject error" failure
-([README.md](README.md#starting-the-workshop), [INSTALL.md](INSTALL.md#ws-prep-is-refused-own-appproject-only)):
+   ```bash
+   tools/ws/adm git-refresh --restart-terminals --all
+   ```
 
-```bash
-tools/ws/adm git-refresh --restart-terminals --all
-```
+2. **Check the cluster:** `tools/ws/adm doctor`
+3. **Share the Etherpad link:** `https://ogsr-pad.<apps>/p/workshop`. It holds the Showroom link and
+   a numbered list where each attendee claims a user, so no two people take the same one.
+   - Showroom: `https://ogsr-showroom.<apps>`. Log in as `userN` with the workshop password.
+   - Your demo cockpit, if you use it: `https://ogsr-demos.<apps>`.
+4. **Last check before you start:** `tools/ws/adm status` must end with
+   `shared cockpit showroom-shared ✅ 1/1` and `platform all-Synced ✅`.
 
-Otherwise the morning is: check the room is healthy, hand out the link.
-
-```bash
-tools/ws/adm doctor
-```
-
-**Hand out one link.** The whole room uses the same cockpit — guide + terminal + tool tabs in one
-page — and each person signs in as their own attendee user:
-
-```
-https://ogsr-showroom.<cluster-domain>
-```
-
-They log in as `userN` with the shared workshop password (a deliberately memorable, non-secret
-value you set in `vars.yaml`, printed again at the end of `install.sh`). The terminal comes up
-already logged in as that user, so `oc whoami` is their own identity.
-
-Read the cohort board out instead of the raw URL if you prefer — it carries the same link plus a
-numbered list people claim, which stops two attendees taking the same slot:
-
-```
-https://ogsr-pad.<cluster-domain>/p/workshop
-```
-
-The SA demo cockpit, if you're using it, is
-`https://ogsr-demos.<cluster-domain>`, behind the same login.
-
-**One last glance before the room fills up:**
-
-```bash
-tools/ws/adm status
-```
-
-Confirm `N/N cockpit(s) ready` and `platform all-Synced` before you start talking.
+No login refresh is needed. Each attendee's terminal logs in from their own browser sign-in.
 
 ---
 
 ## 4. During
 
-### Pace against the modules' own timing chips
+**Pacing.** Use the timing table on each module's instructor page.
 
-Each module's `instructor.adoc` has a *Timing* table — total hands-on time, per-exercise-group
-minutes, and a "measured CLI core" column that's the real command time behind the estimate. Use
-those, not a stopwatch on the room. Two things every one of them says the same way, worth knowing
-once rather than relearning per module:
+- The stated time is for a mixed room. Confident attendees finish in about half; newcomers need
+  about a third longer.
+- A module that runs long is almost always waiting on a cold image, build or workspace. That is
+  what the [warm-up table](#2-day-before) prevents.
 
-- **The stated time is a planning figure for a mixed room, not a stopwatch number.** A confident
-  attendee finishes in roughly half; someone new to OpenShift may need about a third longer. Plan
-  the agenda on the stated figure and the room stays together (README.md).
-- **The dominant variable is almost always a cold resource** — an image pull, a Maven build, a
-  workspace start, a scanner warm-up. That's exactly what [§2's warm/pre-open table](#2-day-before)
-  exists to take off the room's clock; if you skipped warming a module that's in today's agenda,
-  expect its first live run to run long.
+**Instructor-only exercises.** Nine modules have one exercise you perform yourself, because it
+changes something cluster-wide. Attendees see the result.
 
-### `[INSTRUCTOR-DEMO]` exercises — what they are and why
+| Module | You demonstrate |
+|---|---|
+| Deployment Targets & Scheduling | Cluster-wide scheduling settings |
+| Networking for Dev & DevOps | Gateway API (the GatewayClass is cluster-wide) |
+| Multi-Tenancy & Workload Security | Cluster-wide platform settings and a scoped SCC exception, reverted afterwards |
+| Registry, Images & Catalog Governance | Import blocking, mirroring, sample curation |
+| Serverless Zero-to-Hero | Building a Function with `kn func` (the attendee terminal cannot build images) |
+| Resilience, Multi-Cluster & DR | Draining a node while a PodDisruptionBudget paces it |
+| Trusted Software Supply Chain | The cluster refusing an unsigned image (cluster-wide `ImagePolicy`) |
+| Securing Apps with Keycloak | The same Keycloak backing the OpenShift console login |
+| Dev Spaces & the Inner Loop | GUI debugging, only on a disconnected cluster |
 
-Nine modules contain one exercise group that's an **instructor demo inside an otherwise hands-on
-module**, not a whole separate demo delivery. All nine follow the same reason: the action is a
-**cluster-wide singleton** — it affects every tenant on the cluster, not just the attendee's own
-namespace — so attendees read the result but the instructor performs the action:
+**Switching modules.** No module depends on another. But starting a module **discards** the state of
+a module that shares its namespaces:
 
-| Module | What's demonstrated | Why it's instructor-only |
-|---|---|---|
-| Deployment Targets & Scheduling | Cluster-wide scheduling levers | Affect every tenant |
-| Networking for Dev & DevOps | The Gateway API — the strategic direction | The GatewayClass is a cluster-wide singleton the platform team owns |
-| Multi-Tenancy & Workload Security | The platform team's cluster-wide levers, and a scoped SCC exception | Cluster singletons, sequenced and reverted so later modules keep working |
-| Registry, Images & Catalog Governance | The governance surface (import blocking, mirroring, sample curation) | Setting these affects every tenant; attendees only read the results |
-| Serverless Zero-to-Hero | Build a Function (`kn func`) | Needs a container build path (local engine+registry, or on-cluster Pipelines) the workshop terminal doesn't have — presented as concept + demo, not a graded exercise |
-| Resilience, Multi-Cluster & DR | Draining a node, watching the PodDisruptionBudget pace it | Node drain is cluster-wide |
-| Trusted Software Supply Chain | The cluster refusing to run an unsigned image (admission) | The `ImagePolicy` is applied cluster-wide by the instructor; the effect lands in the attendee's own namespace |
-| Securing Apps with Keycloak | The same Keycloak instance backs the OpenShift console login | Ties the attendee's realm to a cluster-wide fact only the instructor can show directly |
-| Dev Spaces & the Inner Loop | The GUI debug path, *only* if the registry is unreachable (disconnected cluster) | Situational fallback — the guaranteed `jdb` terminal path is the hands-on default |
+- `{user}-cicd`: Pipelines Fundamentals, Application Security Testing, Trusted Software Supply Chain.
+- Own namespaces, no conflicts: Jobs/Batch & Kueue, Service Mesh, Application Modernization,
+  Agentic AI, Resilience/Multi-Cluster/DR.
+- Every other module shares `{user}-dev` (and `-stage`/`-prod` where used).
 
-### Sequencing constraints between modules
+Tell attendees before they switch within a family: work in progress is lost; `ws prep` brings the
+module back clean.
 
-**No module assumes another one ran.** Any module can be an attendee's first. But most modules
-share a namespace family with several others, and *starting* a module evicts a **conflicting**
-module's materialized state in the same namespace (`gitops/entry-states/<slug>/ws-meta.yaml`,
-`conflictsWith`):
-
-- **`{user}-dev`(/`-stage`/`-prod`/`-cicd` where used)** is the family most modules live in:
-  Platform Orientation, Ways to Build & Deliver Apps, Dev Spaces & the Inner Loop, Config/Secrets &
-  Multi-Environment, Storage & Stateful Apps, GitOps Fundamentals, GitOps at Scale, Developer Hub &
-  Golden Paths, Registry/Images & Catalog Governance, Deployment Targets & Scheduling,
-  Multi-Tenancy & Workload Security, Securing Apps with Keycloak, Serverless Zero-to-Hero,
-  Eventing Deep-Dive, Observability/Health & Scale, Networking for Dev & DevOps, Packaging &
-  Distributing, AI-Assisted Development.
-- **`{user}-cicd`** is its own smaller family: Pipelines Fundamentals, Application Security
-  Testing, and Trusted Software Supply Chain conflict with each other.
-- **Dedicated namespaces that conflict with nothing:** Jobs/Batch & Kueue (`{user}-batch`),
-  Service Mesh (`{user}-mesh`), Application Modernization (`{user}-modernize`), Agentic AI
-  (`{user}-ai`), Resilience/Multi-Cluster/DR (`{user}-client`/`{user}-site-a`/`{user}-site-b`).
-
-**In practice:** if an attendee wants to jump from one same-family module to another mid-day,
-warn them that starting the new one discards the old one's materialized state — the module itself
-isn't damaged (`ws reset`/`ws prep` bring it back cleanly), but any work in progress on top of it
-is gone. When *you* materialize a module for someone stuck, this cuts the other way too: `adm start`
-**does not purge** a module that's already resident for that attendee — it only evicts a different,
-*conflicting* module. If they already have that module materialized and you need them on a
-genuinely clean slate, run `ws reset <module> --user <u>`, not `adm start` again (documented against
-Serverless Zero-to-Hero's `instructor.adoc`, but the underlying behavior is in the shared `ws`
-code, not module-specific).
+`adm start` does not reset a module the attendee already has. For a clean slate, use
+`tools/ws/ws reset <module> --user <u>`.
 
 ---
 
 ## 5. When something breaks
 
-The three failures most likely to actually happen in a live room, in the order you're likely to
-meet them, each drawn straight from [INSTALL.md §5](INSTALL.md#5-troubleshooting):
+| Symptom | Fix |
+|---|---|
+| Terminal says `Unauthorized` on the first command | The attendee's browser sign-in expired. They reload the cockpit page, sign in, and reopen the terminal. |
+| `ws prep` refused: "attendees may only use their own AppProject" | The cockpit runs an old `ws`. Run `tools/ws/adm git-refresh --restart-terminals --all`. |
+| An AI module returns an authentication error | Run `tools/ws/adm maas show`, then fix with `tools/ws/adm maas set`. No reinstall. |
 
-**1. An attendee's terminal says `Unauthorized` on the very first command.**
-Their *browser* sign-in lapsed, not the cluster. They fix it themselves: reload the cockpit page,
-sign in again, reopen the terminal. Nothing to run on your side. Confirm from your machine if you
-want to see it — an attendee who has never signed in has no home directory there at all:
-
-```bash
-oc exec deploy/showroom-shared -n ogsr-showroom -c terminal -- ls -l /homes/<userN>/.kube/config
-```
-([INSTALL.md](INSTALL.md#attendee-gets-unauthorized))
-
-**2. `ws prep` is refused: "attendees may only use their own AppProject."**
-The cockpit is running a stale copy of `ws` — this happens after you push a content update but
-only `git-refresh` the mirror, not the terminals. Confirm which half a cockpit has, then fix with
-the scoped flag (not `--restart-terminals` alone, which "refuses with restart needs a target" and
-restarts nothing):
-
-```bash
-oc exec -n ogsr-showroom deploy/showroom-shared -c terminal -- grep -c ARGO_PROJECT_PIN /showroom/repo/tools/ws/ws
-tools/ws/adm git-refresh --restart-terminals --all
-```
-
-Non-zero means current (a current cockpit prints `3`), `0` means old. There is one cockpit now, and
-`ws` reaches it through a read-only mount of the build's clone at `/showroom/repo`, so there is no
-per-attendee `~/ocp-getting-started` to check.
-([INSTALL.md](INSTALL.md#ws-prep-is-refused-own-appproject-only))
-
-**3. An AI module (jobs-batch-kueue's batch step, agentic-ai, ai-assisted-development,
-app-modernization's Lightspeed step) returns an authentication error.**
-MaaS keys are model-scoped — a key issued for one model fails against another, and the error looks
-generic. Diagnose per attendee, then fix without a reinstall:
-
-```bash
-tools/ws/adm maas show          # per-attendee model/endpoint + working/degraded/unknown verdict
-tools/ws/adm maas set --model <model> --key-file <path>   # re-stage; re-converges every AI module live
-```
-([INSTALL.md](INSTALL.md#ai-modules-fail-with-auth-errors))
-
-**Anything else:** collect the standard bundle before you escalate, then check the specific
-module's own `troubleshooting.adoc` (every module has one) and the rest of
-[INSTALL.md §5](INSTALL.md#5-troubleshooting) — it also covers stuck
-`Terminating` namespaces, an Argo Application that won't sync, and OperatorGroup collisions on an
-adopted cluster:
+Anything else: collect this, then check the module's `troubleshooting.adoc` and
+[INSTALL.md › Troubleshooting](INSTALL.md#5-troubleshooting).
 
 ```bash
 tools/ws/adm doctor
 tools/ws/adm status
-tools/ws/adm diag --user <userN> [<module>]     # read-only bundle for one stuck attendee
+tools/ws/adm diag --user <userN> [<module>]
 oc get applications -n openshift-gitops
 ```
 
@@ -311,31 +132,16 @@ oc get applications -n openshift-gitops
 
 ## 6. After
 
-**Same cluster, next cohort — this is the normal end-of-delivery step.** Deletes all attendee lab
-content and returns the cluster to its immediately-post-install state; the platform, every
-attendee account, Gitea (with its repos), Keycloak (with its logins), and every cockpit stay
-exactly as installed:
+| Next | Run |
+|---|---|
+| New cohort, same cluster (the normal case) | `./bootstrap/ogsr-reset.sh --dry-run`, then `./bootstrap/ogsr-reset.sh --restart-terminals` |
+| Keep one sample attendee | `./bootstrap/ogsr-wipe-users.sh` |
+| Give the cluster back | [INSTALL.md › Remove the workshop](INSTALL.md#remove-the-workshop) |
 
-```bash
-./bootstrap/ogsr-reset.sh --dry-run              # print the plan; change nothing
-./bootstrap/ogsr-reset.sh                        # do it
-./bootstrap/ogsr-reset.sh --restart-terminals    # also cycle the cockpits for the new group
-```
+`ogsr-reset.sh` clears all lab work and keeps the platform and every account. It does **not** clear:
 
-(`adm cohort-reset` is the engine this script calls internally — run the script, not the raw `adm`
-command, so you get the dry-run and the scripted ordering.)
-
-**Handing the cluster back to its owner instead** (delivery is over, not just the cohort) — see
-[INSTALL.md](INSTALL.md#remove-the-workshop) for the full picture, but
-in short:
-
-```bash
-./bootstrap/ogsr-uninstall.sh --dry-run    # prints the WIPE / PRESERVE plan — never skip this on a customer cluster
-./bootstrap/ogsr-uninstall.sh              # performs it
-./bootstrap/ogsr-check-clean.sh            # read-only proof; non-zero while anything remains
-```
-
-**Cutting down to one attendee** (keeping a live sample for stakeholders, not a full teardown) uses
-`ogsr-wipe-users.sh` instead — see [INSTALL.md §4](INSTALL.md#4-after-a-delivery)
-for its two harmless leftovers (a stale SonarQube account if the next cohort's password differs,
-and an unpruned Developer Hub catalog).
+- Data inside shared tools: MTA applications, SonarQube projects, Developer Hub catalog entries.
+  Delete attendees' MTA applications in the MTA console before a new group.
+- Contents of each attendee's Keycloak realm.
+- Attendee home directories in the cockpit.
+- Gitea tokens and SSH keys on the kept accounts.

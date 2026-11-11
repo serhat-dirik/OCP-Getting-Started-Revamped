@@ -177,7 +177,7 @@ Both floors exist for one module, `deployment-targets-scheduling`:
    ```
 
    Healthy looks like:
-   `Summary: 8 user(s) · 8/8 cockpit(s) ready · 0 entry app(s) · platform all-Synced ✅`
+   `Summary: 5 user(s) · shared cockpit showroom-shared ✅ 1/1 · 0 entry app(s) (0 healthy, 0 need attention) · platform all-Synced ✅`
 
    The attendee-facing URLs (`<apps>` is the cluster's `apps.` domain):
 
