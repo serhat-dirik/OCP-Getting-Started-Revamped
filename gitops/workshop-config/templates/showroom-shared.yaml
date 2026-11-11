@@ -804,6 +804,28 @@ spec:
     spec:
       serviceAccountName: {{ $name }}
       initContainers:
+        {{- if include "workshop-config.moduleEnabled" (dict "root" $ "slug" "serverless-zero-to-hero") }}
+        # 0) Red Hat's Serverless `kn` (with `kn func` v1.17+) from the cluster's own CLI download route,
+        #    put first on the terminal's PATH. The terminal image ships kn/func v1.15.2, whose remote-build
+        #    request the Pipelines 1.24 webhook rejects (`impossible ParamValues.Type`). Best effort: no
+        #    Serverless route, no download, and the image's own kn stays.
+        - name: kn-cli
+          image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              if curl -ksfL "https://kn-openshift-serverless.{{ $domain }}/kn-linux-amd64.tar.gz" | tar xz -C /opt/ogsr-bin kn; then
+                echo "✅ Serverless kn: $(/opt/ogsr-bin/kn version | sed -n 's/^Version: *//p') (kn func $(/opt/ogsr-bin/kn func version))"
+              else
+                echo "⚠ Serverless kn download unavailable — the terminal keeps the image's kn"
+              fi
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          volumeMounts:
+            - name: ogsr-bin
+              mountPath: /opt/ogsr-bin
+        {{- end }}
         # 1) Clone the in-cluster monorepo mirror (public repo, valid RHDP wildcard cert → no auth).
         - name: content-clone
           image: {{ $img.gitCloner | quote }}
@@ -1033,31 +1055,23 @@ spec:
                   - name: Terminal 1
                     secondary_name: Terminal 2
                     type: double-terminal
-                  # External launchers, not iframes — see showroom.yaml for the full reasoning: every
-                  # one of these tools sends a frame-blocking header, and embedding them would need a
-                  # cluster-wide IngressController rewrite or per-tool frame-ancestors config, both of
-                  # which change cluster behaviour the workshop must not touch.
+                  # Tool tabs are EMBEDDED panes. The workshop runs on a dedicated cluster and the installer
+                  # rewrites the default router's response headers (bootstrap/install.sh step 2a''''): X-Frame-Options is
+                  # removed and every route answers CSP frame-ancestors 'self' https://*.<apps>, so the console, Gitea,
+                  # Dev Spaces, Argo CD, Developer Hub and SonarQube render inside the cockpit and keep their logins
+                  # (same apps domain, so their cookies are same-site).
                   - name: OCP Console
                     url: https://console-openshift-console.{{ $domain }}
-                    external: true
                   - name: Gitea
                     url: https://{{ $giteaHost }}
-                    external: true
                   - name: Dev Spaces
                     url: https://devspaces.{{ $domain }}
-                    external: true
                   - name: Argo CD
                     url: https://student-gitops-server-student-gitops.{{ $domain }}
-                    external: true
                   - name: Dev Hub
                     url: https://backstage-developer-hub-rhdh.{{ $domain }}
-                    external: true
                   - name: SonarQube
                     url: https://sonarqube-sonarqube.{{ $domain }}
-                    external: true
-                  - name: Migration Toolkit
-                    url: https://mta-openshift-mta.{{ $domain }}
-                    external: true
           volumeMounts:
             - name: userdata
               mountPath: /user_data/
@@ -1241,7 +1255,8 @@ spec:
                 echo '# mounted read-only and shared by every session, so N logins do not mean N'
                 echo '# clones. This is what makes an SA "just another workshop user" — the owner'
                 echo '# ruling is same identity, same tools, and every demo pre-flight is ws prep.'
-                echo 'export PATH="$PATH:/showroom/repo/tools/ws"'
+                echo '# Serverless kn (with kn func) first, when the kn-cli init container fetched it.'
+                echo 'export PATH="/opt/ogsr-bin:$PATH:/showroom/repo/tools/ws"'
                 echo 'oc project "${WS_USER}-dev" >/dev/null 2>&1 || true'
                 echo '# Printed HERE, not seeded into ~/.bashrc.d. The wrapper already runs exactly'
                 echo '# once per websocket, which is the once-per-session semantics the old'
@@ -1286,8 +1301,14 @@ spec:
               mountPath: /showroom/repo
               subPath: repo
               readOnly: true
+            - name: ogsr-bin
+              mountPath: /opt/ogsr-bin
+              readOnly: true
       volumes:
         - name: showroom-files
+          emptyDir: {}
+        # Serverless kn fetched by the kn-cli init container (empty when Serverless is not installed).
+        - name: ogsr-bin
           emptyDir: {}
         - name: userdata
           configMap:

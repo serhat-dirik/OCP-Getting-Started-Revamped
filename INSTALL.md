@@ -457,6 +457,9 @@ operators and the workshop's own namespaces, it changes these cluster-wide setti
 - **Image imports:** `image.config/cluster` `spec.allowedRegistriesForImport` limits ImageStream imports
   to `registry.redhat.io`, `registry.access.redhat.com`, `quay.io` and the internal registry (pod pulls
   are unaffected). The first apply briefly restarts `openshift-apiserver`.
+- **Router headers:** the default IngressController removes `X-Frame-Options` and sets
+  `Content-Security-Policy: frame-ancestors 'self' https://*.<apps>` on every route, so the cockpit embeds
+  the console and every tool. This replaces any CSP a backend sends. The router pods roll once.
 - **Projects:** self-provisioning is off (the `self-provisioners` binding has no subjects), and project
   requests use the `project-request` Template in `openshift-config` (deny-by-default network policies
   and a count-only quota).

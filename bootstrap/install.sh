@@ -1208,6 +1208,14 @@ oc patch clusterrolebinding self-provisioners --type=merge -p '{"subjects":null}
 oc patch project.config.openshift.io/cluster --type=merge -p '{"spec":{"projectRequestTemplate":{"name":"project-request"}}}' >/dev/null
 ok "self-provisioning off; project requests use the project-request template"
 
+# 2a''''. Every cockpit tab embeds (dedicated cluster, INSTALL.md §6): the default router drops X-Frame-Options
+# and answers every route with CSP frame-ancestors 'self' + the apps domain, so the console, Gitea, Argo CD,
+# Dev Spaces, Developer Hub and SonarQube render inside the cockpit (same apps domain). This REPLACES any
+# Content-Security-Policy a backend sends. Rolls the router pods once. Same in helm/bootstrap users job.
+_frame_domain="${DOMAIN:-$(oc get ingresses.config cluster -o jsonpath='{.spec.domain}')}"
+oc patch ingresscontroller/default -n openshift-ingress-operator --type=merge -p "{\"spec\":{\"httpHeaders\":{\"actions\":{\"response\":[{\"name\":\"X-Frame-Options\",\"action\":{\"type\":\"Delete\"}},{\"name\":\"Content-Security-Policy\",\"action\":{\"type\":\"Set\",\"set\":{\"value\":\"frame-ancestors 'self' https://*.${_frame_domain}\"}}}]}}}}" >/dev/null
+ok "router: X-Frame-Options removed, frame-ancestors allow https://*.${_frame_domain} (cockpit tabs embed)"
+
 # 2b. MaaS token for OpenShift Lightspeed (only when WE install it — a pre-installed
 # Lightspeed brings its own provider secret, which we must never overwrite).
 if [[ "$LIGHTSPEED" == "true" && "$LIGHTSPEED_PREINSTALLED" == "false" ]]; then
