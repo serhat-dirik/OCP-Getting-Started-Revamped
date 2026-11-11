@@ -9,7 +9,7 @@ include::partial$version-attributes.adoc[]
 
 This module has two beats that land, and they bracket the hands-on.
 It *opens* on the flat network — a `demo-client` pod that has nothing to do with the app opening a connection straight to the database (exercise 1) — and it *closes* on the reveal that the same pod is now *blocked* while the API still gets through (exercise 4), followed by a partner namespace isolated *natively* by a UserDefinedNetwork with zero policy (exercise 5).
-Exercise 6 then reuses the lockdown: attendees build their own Gateway, and it answers `503` until they open the flows its Envoy pods need.
+Exercise 6 then reuses the lockdown: attendees build their own Gateway, and it answers `503` until they open the flows its Envoy proxy needs.
 Everything between is the mechanics — Services/endpoints, the exposure tree, default-deny-then-allow — that makes those beats legible.
 Optimize the room for exercise 4 (let the "same database, two answers" land) and exercise 5 (let "no policy at all" land).
 
@@ -31,7 +31,7 @@ Total hands-on: *~44 min* (add ~15 min of concept up front, ~5 min buffer).
 | 3 | Lock the namespace down with default-deny | ~5 min | policy apply instant; `parasol-claims` drops to `0/1` within *~30–70 s* (periodSeconds 10 × failureThreshold 3, plus policy-propagation lag); reading the break is the time cost
 | 4 | Re-open only what the app needs | ~10 min | DNS allow → resolves in *~4 s*; db allow pair → `parasol-claims` back to `1/1` in *~10–20 s*; probes instant; the payoff is the point
 | 5 | Native isolation with a UDN | ~6 min | all `oc exec` reads; the isolation probe *times out by design* (~6 s); reading + the "no policy" reveal. Whole group measured at *20 s* of command time
-| 6 | Expose the front end through the Gateway API | ~8 min | Gateway `PROGRAMMED True` in *~3 s*; HTTPRoute `Accepted` in *~2 s*; the deliberate `503` is immediate; after the policy fix the Envoy pods go Ready in *5–60 s* (the kubelet's restart backoff, not the policy). Whole group measured at *~39 s* of command time
+| 6 | Expose the front end through the Gateway API | ~8 min | Gateway `PROGRAMMED True` in *~3 s*; HTTPRoute `Accepted` in *~2 s*; the deliberate `503` is immediate; after the policy fix the Envoy proxy goes Ready in *5–60 s* (the kubelet's restart backoff, not the policy). Whole group measured at *~38 s* of command time
 |===
 
 [NOTE]
@@ -49,7 +49,7 @@ Its budget came from re-measuring the three lightest groups rather than from the
 Exercises 3 and 4 were deliberately left alone: exercise 3 contains a genuine 30–70 s wait you cannot compress, and exercise 4 is the module's payoff.
 The total stayed at *40 min* then.
 
-Exercise 6 became hands-on on 2026-11-12 and was measured as `user8` on OCP 4.22.22: *~39 s* of command time, plus the Envoy pods' recovery after the policy fix — *5 s* when the policies went in at once, *9 s* after a 40 s reading pause, *~60 s* after the pods had spent two minutes in restart backoff.
+Exercise 6 became hands-on on 2026-11-12 and was measured as `user8` on OCP 4.22.22: *~38 s* of command time, plus the Envoy proxy's recovery after the policy fix — *5 s* when the policies went in at once, *6–9 s* after a 40 s reading pause, *~60 s* after it had spent two minutes in restart backoff.
 The group is budgeted at *8 min* for reading the three-object model and the break; the module total rose to *44 min*.
 ====
 
@@ -139,17 +139,18 @@ yes
 +
 The beat annotates a Service, mounts a Secret into a Deployment, and creates a Route — all three are within the attendee's own namespace role. Checked by impersonation, not assumed.
 
-. *Exercise 6 will run: the GatewayClass is Accepted, and an attendee can read it, read the Gateway API CRDs, and create a Gateway.*
+. *Exercise 6 will run: the GatewayClass is Accepted, and an attendee can read it, read the Gateway API CRDs, see the proxy-sizing ConfigMap, and create a Gateway.*
 +
 [source,sh,role=execute]
 ----
 oc get gatewayclass openshift-default --as=user1 --as-group=workshop-attendees --as-group=system:authenticated
 oc get crd httproutes.gateway.networking.k8s.io -o name --as=user1 --as-group=workshop-attendees --as-group=system:authenticated
+oc get configmap ogsr-gateway-proxy -n user1-dev -o name --as=user1 --as-group=workshop-attendees --as-group=system:authenticated
 cat <<'EOF' | oc apply --dry-run=server -n user1-dev --as=user1 --as-group=workshop-attendees --as-group=system:authenticated -f -
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata: {name: preflight-gw, annotations: {networking.istio.io/service-type: ClusterIP}}
-spec: {gatewayClassName: openshift-default, listeners: [{name: http, protocol: HTTP, port: 80}]}
+spec: {gatewayClassName: openshift-default, infrastructure: {parametersRef: {group: "", kind: ConfigMap, name: ogsr-gateway-proxy}}, listeners: [{name: http, protocol: HTTP, port: 80}]}
 EOF
 ----
 +
@@ -159,10 +160,11 @@ EOF
 NAME                CONTROLLER                           ACCEPTED   AGE
 openshift-default   openshift.io/gateway-controller/v1   True       12h
 customresourcedefinition.apiextensions.k8s.io/httproutes.gateway.networking.k8s.io
+configmap/ogsr-gateway-proxy
 gateway.gateway.networking.k8s.io/preflight-gw created (server dry run)
 ----
 +
-Real reads and a server-side dry run, as the attendee, rather than `oc auth can-i`. The GatewayClass and CRD reads come from the `platform-observer` ClusterRole; the Gateway create comes from the per-namespace `ogsr-gateway-editor` grant (Kubernetes' `admin` role covers HTTPRoutes but not Gateways). A `Forbidden` on any line means the workshop-config layer is stale — sync it before the session. The CRD read matters more than it looks: the lab's layer-4 loop prints `ABSENT` for any failed read, so an attendee who cannot read CRDs would see the right answer for the wrong reason.
+Real reads and a server-side dry run, as the attendee, rather than `oc auth can-i`. The GatewayClass and CRD reads come from the `platform-observer` ClusterRole; the Gateway create comes from the per-namespace `ogsr-gateway-editor` grant (Kubernetes' `admin` role covers HTTPRoutes but not Gateways), and `ogsr-gateway-proxy` is the workshop's per-namespace proxy sizing the lab's Gateway opts into. A `Forbidden` on any line means the workshop-config layer is stale — sync it before the session. The CRD read matters more than it looks: the lab's layer-4 loop prints `ABSENT` for any failed read, so an attendee who cannot read CRDs would see the right answer for the wrong reason.
 
 . *A representative attendee command actually works — from the cockpit, as the attendee.*
 +
@@ -175,9 +177,9 @@ This is the only pre-flight instrument that runs *as the attendee*, in the real 
 
 == Exercise 6 — what the room will see
 
-* *`PROGRAMMED True` is not "serving".* The Gateway reports `Programmed` as soon as its Service has an address. Under exercise 3's `default-deny-all` its Envoy pods cannot reach `istiod` (`openshift-ingress`, port 15012), so they never go Ready and the `parasol-gw` Route returns `503`. That is the planned break; let it land before the fix — "the Gateway is pods in *your* namespace, so *your* policy applies to it."
+* *`PROGRAMMED True` is not "serving".* The Gateway reports `Programmed` as soon as its Service has an address. Under exercise 3's `default-deny-all` its Envoy proxy cannot reach `istiod` (`openshift-ingress`, port 15012), so it never goes Ready and the `parasol-gw` Route returns `503`. That is the planned break; let it land before the fix — "the Gateway is pods in *your* namespace, so *your* policy applies to it."
 * *The annotation is the bare-metal answer.* Without `networking.istio.io/service-type: ClusterIP` the implementation asks for a `LoadBalancer` Service, which stays `<pending>` here (`AddressNotAssigned`). It must be a `metadata` annotation — the same key under `spec.infrastructure.annotations` was not honored for the Service type on the build cluster.
-* *Each Gateway is two Envoy pods.* The `openshift-default` class sets a HorizontalPodAutoscaler with `minReplicas: 2`; each proxy requests 100m CPU / 128Mi and is limited to 2 CPU / 1Gi. Per attendee that is 4 CPU of `limits.cpu` against the namespace quota of 8 — enough for the lab, measured with the rest of the module running, but tight during a Gateway rollout.
+* *The lab's Gateway runs one small proxy, by opting in.* The `openshift-default` class default is two Envoy proxies (HorizontalPodAutoscaler `minReplicas: 2`), each limited to 2 CPU / 1Gi — 4 CPU of the namespace's 8 `limits.cpu`. The lab's Gateway sets `spec.infrastructure.parametersRef` to the workshop's `ogsr-gateway-proxy` ConfigMap, which every attendee namespace carries: one proxy at 50m/128Mi requests, 500m/512Mi limits. Measured with the whole lab applied: `limits.cpu` 2.2 of 8. An attendee who drops the `parametersRef` still gets a working Gateway, just two full-size proxies.
 
 == Demo-mode notes
 
@@ -257,7 +259,7 @@ The readiness probe checks the plaintext port, so `parasol-web` goes `1/1` wheth
 * *LoadBalancer `<pending>` and Gateway `Programmed=False` are the same root cause.*
 Bare metal, no LB provider. A Gateway showing `AddressNotAssigned` is missing the `networking.istio.io/service-type: ClusterIP` annotation (or carries it under `spec.infrastructure` instead of `metadata`) — `oc annotate` fixes it in place in about 2 s.
 * *The Gateway `503` is the planned break, not a fault.*
-Under default-deny the Envoy pods restart on a failing startup probe until `allow-gateway` lets them reach `istiod`. If an attendee's pods stay `0/1` *after* the fix, check that policy's `podSelector` label (`gateway.networking.k8s.io/gateway-name`) matches their Gateway's name.
+Under default-deny the Envoy proxy restarts on a failing startup probe until `allow-gateway` lets it reach `istiod`. If an attendee's proxy stays `0/1` *after* the fix, check that policy's `podSelector` label (`gateway.networking.k8s.io/gateway-name`) matches their Gateway's name.
 * *The `EndpointSlice` deprecation warning on `oc get endpoints` is cosmetic.*
 `oc get endpoints` prints `v1 Endpoints is deprecated … use discovery.k8s.io/v1 EndpointSlice`. It is the clearest view for teaching Service→endpoints; the warning is informational and harmless.
 
@@ -272,6 +274,7 @@ The 503 failure mode was reproduced deliberately by pointing a reencrypt Route a
 The beat was also checked *against the rest of the lab*: with exercise 3's `default-deny-all` and exercise 4's `allow-web-from-router` in place, both the edge and the re-encrypt Route still return `HTTP 200` (that policy sets no port restriction, so 8443 is covered — exercise 4 needed no change), and `ws verify networking-dev-devops user7` reports *all 14 checks passed* with the beat applied.
 The claim that the router auto-verifies an infrastructure-generated backend certificate is grounded in the Route API's own field documentation (`oc explain route.spec.tls.destinationCACertificate`), not recalled.
 
-Exercise 6 was rebuilt on 2026-11-12 from a read-only instructor demo into attendee work, and performed end to end as `user8` on OpenShift 4.22.22 before it was written: the GatewayClass and CRD reads, the ClusterIP-backed Gateway (`PROGRAMMED True` in ~3 s), the HTTPRoute (`Accepted`, `ResolvedRefs`), the `503` with the Envoy pods held at `0/1` by `default-deny-all`, the two policies, and the claims JSON plus the Gateway access-log line naming `parasol-web` as the upstream.
-Two behaviours were measured rather than assumed: the same annotation under `spec.infrastructure.annotations` left the Service `LoadBalancer` and the Gateway `AddressNotAssigned`, while the `metadata` annotation switched it to `ClusterIP` in 2 s; and the pods' recovery after the fix ranged from 5 s to ~60 s with the time they had spent in restart backoff.
+Exercise 6 was rebuilt on 2026-11-12 from a read-only instructor demo into attendee work, and performed end to end as `user8` on OpenShift 4.22.22 before it was written: the GatewayClass and CRD reads, the ClusterIP-backed Gateway (`PROGRAMMED True` in ~3 s), the HTTPRoute (`Accepted`, `ResolvedRefs`), the `503` with the Envoy proxy held at `0/1` by `default-deny-all`, the two policies, and the claims JSON plus the Gateway access-log line naming `parasol-web` as the upstream.
+Two behaviours were measured rather than assumed: the same annotation under `spec.infrastructure.annotations` left the Service `LoadBalancer` and the Gateway `AddressNotAssigned`, while the `metadata` annotation switched it to `ClusterIP` in 2 s; and the proxy's recovery after the fix ranged from 5 s to ~60 s with the time it had spent in restart backoff.
+The same day the lab's Gateway was switched to the workshop's `ogsr-gateway-proxy` sizing and the whole exercise re-run as `user8`: one replica at 50m/128Mi requests and 500m/512Mi limits, read back from the Deployment.
 With the whole lab applied, `ws verify networking-dev-devops --user user8` reported *all 19 checks passed*.

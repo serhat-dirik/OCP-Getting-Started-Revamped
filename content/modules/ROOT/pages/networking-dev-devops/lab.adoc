@@ -216,7 +216,7 @@ Same database, same namespace, same port — the only difference is a policy set
 [source,sh,role=execute]
 ----
 echo -n "parasol-claims (the API)   -> claims-db:5432 : "; oc exec deploy/parasol-claims -n $NS -- timeout 5 bash -c '</dev/tcp/claims-db/5432 && echo OPEN'
-echo -n "demo-client (anything else) -> claims-db:5432 : "; oc exec deploy/demo-client -n $NS -- timeout 5 bash -c '</dev/tcp/claims-db/5432 && echo OPEN'; rc=$?
+echo -n "demo-client (anything else) -> claims-db:5432 : "; oc exec deploy/demo-client -n $NS -- timeout 5 bash -c '</dev/tcp/claims-db/5432 && echo OPEN' 2>/dev/null; rc=$?
 [ $rc -eq 124 ] && echo "BLOCKED (connect timed out — the policy dropped it)" || { [ $rc -ne 0 ] && echo "step failed (exit $rc) — check the demo-client pod exists (oc get pods -n $NS -l app=demo-client)"; }
 ----
 
@@ -504,11 +504,11 @@ oc delete svc parasol-web-np -n $NS
 ----
 
 .Expected output (the exact port is assigned from the 30000–32767 range)
-[source,texinfo]
+[source,texinfo,subs="attributes"]
 ----
 service/parasol-web-np created
 type=NodePort  nodePort=32408
-service "parasol-web-np" deleted
+service "parasol-web-np" deleted from {user}-dev namespace
 ----
 
 And a *LoadBalancer* asks the platform for an external IP — which only appears if a *provider* answers.
@@ -523,12 +523,12 @@ oc delete svc parasol-web-lb -n $NS
 ----
 
 .Expected output (sample — if your cluster has no LoadBalancer provider, EXTERNAL-IP stays `<pending>`; if it has one, you will see a real IP instead)
-[source,texinfo]
+[source,texinfo,subs="attributes"]
 ----
 service/parasol-web-lb created
 NAME             TYPE           CLUSTER-IP     EXTERNAL-IP   PORT(S)          AGE
 parasol-web-lb   LoadBalancer   172.231.9.80   <pending>     8080:32207/TCP   5s
-service "parasol-web-lb" deleted
+service "parasol-web-lb" deleted from {user}-dev namespace
 ----
 
 `EXTERNAL-IP <pending>` (if that's what you see) means "unprovided," not broken — it stays that way forever without a provider.
@@ -809,9 +809,9 @@ And it is not only the app: default-deny on *egress* also killed *DNS*, so nothi
 
 [source,sh,role=execute]
 ----
-echo -n "demo-client DNS lookup of claims-db: "; oc exec deploy/demo-client -n $NS -- timeout 6 bash -c 'getent hosts claims-db >/dev/null && echo RESOLVED'; rc=$?
+echo -n "demo-client DNS lookup of claims-db: "; oc exec deploy/demo-client -n $NS -- timeout 6 bash -c 'getent hosts claims-db >/dev/null && echo RESOLVED' 2>/dev/null; rc=$?
 [ $rc -eq 124 ] && echo "DNS BLOCKED (timed out)" || { [ $rc -ne 0 ] && echo "step failed (exit $rc) — check the demo-client pod exists"; }
-echo -n "demo-client -> claims-db:5432      : "; oc exec deploy/demo-client -n $NS -- timeout 6 bash -c '</dev/tcp/claims-db/5432 && echo OPEN'; rc=$?
+echo -n "demo-client -> claims-db:5432      : "; oc exec deploy/demo-client -n $NS -- timeout 6 bash -c '</dev/tcp/claims-db/5432 && echo OPEN' 2>/dev/null; rc=$?
 [ $rc -eq 124 ] && echo "BLOCKED (timed out)" || { [ $rc -ne 0 ] && echo "step failed (exit $rc) — check the demo-client pod exists"; }
 ----
 
@@ -863,7 +863,7 @@ spec:
           port: dns-tcp
 EOF
 sleep 4
-echo -n "demo-client DNS lookup of claims-db: "; oc exec deploy/demo-client -n $NS -- timeout 6 bash -c 'getent hosts claims-db >/dev/null && echo RESOLVED'; rc=$?
+echo -n "demo-client DNS lookup of claims-db: "; oc exec deploy/demo-client -n $NS -- timeout 6 bash -c 'getent hosts claims-db >/dev/null && echo RESOLVED' 2>/dev/null; rc=$?
 [ $rc -eq 124 ] && echo "still blocked (lookup timed out — re-check the policy's named ports)" || { [ $rc -ne 0 ] && echo "step failed (exit $rc) — check the demo-client pod exists"; }
 ----
 
@@ -998,7 +998,7 @@ CLI::
 [source,sh,role=execute]
 ----
 echo -n "parasol-claims (API, ALLOWED)     -> claims-db:5432 : "; oc exec deploy/parasol-claims -n $NS -- timeout 5 bash -c '</dev/tcp/claims-db/5432 && echo OPEN'
-echo -n "demo-client (unauthorized)        -> claims-db:5432 : "; oc exec deploy/demo-client -n $NS -- timeout 5 bash -c '</dev/tcp/claims-db/5432 && echo OPEN'; rc=$?
+echo -n "demo-client (unauthorized)        -> claims-db:5432 : "; oc exec deploy/demo-client -n $NS -- timeout 5 bash -c '</dev/tcp/claims-db/5432 && echo OPEN' 2>/dev/null; rc=$?
 [ $rc -eq 124 ] && echo "BLOCKED (timed out — no allow rule admits this pod)" || { [ $rc -ne 0 ] && echo "step failed (exit $rc) — check the demo-client pod exists (oc get pods -n $NS -l app=demo-client)"; }
 ----
 --
@@ -1188,8 +1188,11 @@ The catch that makes UDN a platform-team decision: a Primary UDN must exist *bef
 // Performed 2026-11-12 on OCP 4.22.22 as user8 (impersonated with the attendee groups), after
 // exercises 1-5, every block verbatim — including the Gateway create, which needs the workshop layer's
 // per-namespace ogsr-gateway-editor grant (Kubernetes' admin role does not cover Gateways). Measured
-// ~39 s of command time; after the policy fix the Envoy pods went Ready in 5-60 s (longer the longer
-// they had sat in restart backoff; 9 s after a 40 s pause). Cluster domain scrubbed to apps.example.com.
+// ~38 s of command time; after the policy fix the Envoy proxy went Ready in 5-60 s (longer the longer
+// it had sat in restart backoff; 6 s after a 40 s pause). Re-run 2026-11-12 with the Gateway opted into
+// the workshop's ogsr-gateway-proxy ConfigMap: 1 replica, 50m/128Mi requests, 500m/512Mi limits
+// (measured on the Deployment), limits.cpu 2.2 of 8 with the whole lab applied. Cluster domain
+// scrubbed to apps.example.com.
 
 The Route you built in exercise 2 is the workhorse today.
 The *Gateway API* is where portable, multi-tenant ingress is heading, and it is GA on OpenShift.
@@ -1240,7 +1243,8 @@ Raw TCP, UDP and TLS passthrough for arbitrary protocols belong to the service m
 *Now build your own Gateway — the listener.*
 One annotation decides how it is reached.
 By default this implementation fronts every Gateway with a `type=LoadBalancer` Service, which waits for a provider exactly like the one you created in exercise 2.
-Asking for a `ClusterIP` Service instead keeps the Gateway in-cluster, and you publish it with a Route in a moment:
+Asking for a `ClusterIP` Service instead keeps the Gateway in-cluster, and you publish it with a Route in a moment.
+The `parametersRef` points at a ConfigMap the workshop placed in your namespace, sizing the Gateway's proxy for a lab — one replica, small limits — instead of the platform default of two:
 
 [tabs]
 ====
@@ -1248,7 +1252,7 @@ Console::
 +
 --
 Use the masthead *+* (*Import YAML*) in project `{user}-dev`, paste the YAML between the two `EOF` lines of the *CLI* tab, and *Create*.
-`PROGRAMMED` turns `True` within a few seconds — the `oc get gateway` line of the *CLI* tab shows it.
+Then open *Home* → *Search*, choose the *Gateway* resource type, and open `parasol-gateway`: within a few seconds its *Conditions* list `Programmed` as `True`.
 --
 CLI::
 +
@@ -1264,6 +1268,8 @@ metadata:
     networking.istio.io/service-type: ClusterIP   # an in-cluster Service, no load balancer
 spec:
   gatewayClassName: openshift-default
+  infrastructure:
+    parametersRef: {group: "", kind: ConfigMap, name: ogsr-gateway-proxy}   # one small proxy, not two
   listeners:
     - name: http
       protocol: HTTP
@@ -1285,7 +1291,7 @@ parasol-gateway   openshift-default   parasol-gateway-openshift-default.{user}-d
 ----
 
 `PROGRAMMED True`, with an in-cluster address.
-To get there the implementation created a Deployment of Envoy proxies and a Service, both named `parasol-gateway-openshift-default` — in *your* namespace.
+To get there the implementation created a Deployment running one Envoy proxy and a Service, both named `parasol-gateway-openshift-default` — in *your* namespace.
 Keep that in mind.
 
 *Then attach a route — the app team's half.*
@@ -1297,7 +1303,7 @@ Console::
 +
 --
 Use *Import YAML* again in project `{user}-dev`, paste the YAML between the two `EOF` lines of the *CLI* tab, and *Create*.
-The last line of the *CLI* tab reads its status: `Accepted` and `ResolvedRefs`, both `True`.
+Find it the same way (*Home* → *Search*, resource type *HTTPRoute*) and open its *YAML* tab: under `status.parents`, `Accepted` and `ResolvedRefs` are both `True`.
 --
 CLI::
 +
@@ -1337,6 +1343,10 @@ This rule has one backend — add a second `backendRefs` entry with a `weight` a
 *Publish the Gateway.*
 Expose the Gateway's Service with an edge Route — the exercise-2 command, pointed at the Gateway instead of at the app:
 
+// Console Gateway/HTTPRoute status paths: no dedicated Gateway API pages exist on this cluster (the
+// networking-console-plugin manifest carries none, read 2026-11-12), so status is read through Home →
+// Search on the generic resource pages; "Search" and "Conditions" grounded as console i18n strings,
+// not clicked as an attendee. HTTPRoute conditions live under status.parents, hence its YAML tab.
 // Same Create Route form grounded for exercise 2 (Name · Hostname · Path · Service · Target port ·
 // Secure Route → TLS termination / Insecure traffic). The Gateway's Service publishes two ports,
 // 15021 (status) and 80 (http); the listener is the 80 one.
@@ -1353,6 +1363,7 @@ CLI::
 --
 [source,sh,role=execute]
 ----
+oc delete route parasol-gw -n $NS --ignore-not-found=true
 oc create route edge parasol-gw --service=parasol-gateway-openshift-default --port=http --insecure-policy=Allow -n $NS
 ----
 --
@@ -1368,19 +1379,18 @@ curl -sk --max-time 10 -o /dev/null -w "through the Gateway -> HTTP %{http_code}
 oc get pods -n $NS -l gateway.networking.k8s.io/gateway-name=parasol-gateway
 ----
 
-.Expected output (pod names differ; `RESTARTS` climbs the longer you wait)
+.Expected output (the pod name differs; `RESTARTS` climbs the longer you wait)
 [source,texinfo]
 ----
 through the Gateway -> HTTP 503
 NAME                                                 READY   STATUS    RESTARTS   AGE
-parasol-gateway-openshift-default-6f4bbf7588-5wvjl   0/1     Running   0          17s
-parasol-gateway-openshift-default-6f4bbf7588-bp6dc   0/1     Running   0          2s
+parasol-gateway-openshift-default-6b6f6b4f8d-kfh92   0/1     Running   0          19s
 ----
 
-`503`, and the Gateway's pods are not Ready.
+`503`, and the Gateway's pod is not Ready.
 Nothing is wrong with the Gateway or the route — this is your exercise 3 at work.
-The Envoy pods run in `{user}-dev`, so `default-deny-all` applies to them too: they cannot reach their control plane, `istiod` in `openshift-ingress` on port `15012`, to fetch their configuration, so they never become Ready.
-Even once Ready, nothing would let the router in or let them out to `parasol-web`.
+The Envoy pod runs in `{user}-dev`, so `default-deny-all` applies to it too: it cannot reach its control plane, `istiod` in `openshift-ingress` on port `15012`, to fetch its configuration, so it never becomes Ready.
+Even once Ready, nothing would let the router in or let it out to `parasol-web`.
 
 (An `HTTP 200` here means `{user}-dev` has no `default-deny-all` — exercises 3 and 4 were skipped. Apply the fix below anyway; it changes nothing until a default-deny exists.)
 
@@ -1393,7 +1403,7 @@ Console::
 +
 --
 Use *Import YAML* in project `{user}-dev`, paste *both* policies from the *CLI* tab, and *Create*.
-Then watch *Workloads* → *Pods*: the two `parasol-gateway-openshift-default-…` pods turn `1/1` within a minute.
+Then watch *Workloads* → *Pods*: the `parasol-gateway-openshift-default-…` pod turns `1/1` within a minute.
 --
 CLI::
 +
@@ -1452,12 +1462,12 @@ oc rollout status deploy/parasol-gateway-openshift-default -n $NS --timeout=150s
 --
 ====
 
-.Expected output (the wait is 5 s to about a minute — longer the longer the pods sat restarting)
+.Expected output (the wait is 5 s to about a minute — longer the longer the pod sat restarting)
 [source,texinfo]
 ----
 networkpolicy.networking.k8s.io/allow-gateway created
 networkpolicy.networking.k8s.io/allow-web-from-gateway created
-Waiting for deployment "parasol-gateway-openshift-default" rollout to finish: 1 of 2 updated replicas are available...
+Waiting for deployment "parasol-gateway-openshift-default" rollout to finish: 0 of 1 updated replicas are available...
 deployment "parasol-gateway-openshift-default" successfully rolled out
 ----
 
@@ -1495,7 +1505,7 @@ On a cluster with a load-balancer provider you would drop the annotation and the
 
 [.checkpoint]
 ****
-✔ *Verify:* You read the platform's `openshift-default` GatewayClass (`Accepted`) and confirmed the layer-4 route types are absent; created a ClusterIP-backed `Gateway` (`PROGRAMMED True`) and an `HTTPRoute` to `parasol-web` (`Accepted`, `ResolvedRefs`); saw the Gateway answer `503` because your default-deny starved its Envoy pods; opened exactly the three flows it needs; and reached the claims JSON through `parasol-gw`, with the Gateway's access log naming `parasol-web` as the backend.
+✔ *Verify:* You read the platform's `openshift-default` GatewayClass (`Accepted`) and confirmed the layer-4 route types are absent; created a ClusterIP-backed `Gateway` (`PROGRAMMED True`) and an `HTTPRoute` to `parasol-web` (`Accepted`, `ResolvedRefs`); saw the Gateway answer `503` because your default-deny starved its Envoy pod; opened exactly the three flows it needs; and reached the claims JSON through `parasol-gw`, with the Gateway's access log naming `parasol-web` as the backend.
 ****
 
 == Challenge (optional)

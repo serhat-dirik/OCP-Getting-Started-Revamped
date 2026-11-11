@@ -84,7 +84,7 @@ httproute_attached() {
     -o jsonpath='{range .items[*].status.parents[*]}{.conditions[?(@.type=="Accepted")].status}{.conditions[?(@.type=="ResolvedRefs")].status}{"\n"}{end}' || return 1
   grep -qx TrueTrue <<<"$OC_OUT"
 }
-# The Envoy pods are Ready — under default-deny that needs the egress allow to istiod, so this is the
+# The Envoy proxy is Ready — under default-deny that needs the egress allow to istiod, so this is the
 # behavioural half of the exercise-6 fix, not just an object count.
 gateway_dataplane_ready() {
   oc_read get deploy -n "$NS" -l "$GW_CLASS_LABEL" -o jsonpath='{range .items[*]}{.status.readyReplicas}{"\n"}{end}' || return 1
@@ -175,7 +175,7 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: clean slate — the attendee has built NO exposure and NO policy yet -------------
   check "no default-deny NetworkPolicy yet (attendee writes it)"  no_default_deny || hint "entry ships no NetworkPolicies; if present the lab already started — ws reset networking-dev-devops --user ${USER_NAME}"
   check "no parasol-web Route yet (attendee exposes it)"          no_web_route    || hint "entry ships ClusterIP-only; if a Route exists the lab already started — ws reset networking-dev-devops --user ${USER_NAME}"
-  check "no Gateway yet (attendee builds it in exercise 6)"        no_gateway      || hint "entry ships no Gateway; one left from an earlier run survives the namespace purge — delete it, then reset: oc delete gateways.gateway.networking.k8s.io,httproutes.gateway.networking.k8s.io --all -n ${NS} && ws reset networking-dev-devops --user ${USER_NAME}"
+  check "no Gateway yet (attendee builds it in exercise 6)"        no_gateway      || hint "entry ships no Gateway; if one exists the lab already started — ws reset networking-dev-devops --user ${USER_NAME}"
 else
   # --- end state: the lab's OUTCOME — micro-segmentation + exposure in place -----------------------
   # Assert OUTCOMES (a policy exists and blocks; a Route exists), never the exact rule wording, so any
@@ -191,7 +191,7 @@ else
   check "a re-encrypt Route exists (last hop encrypted)"  reencrypt_route                         || hint "not done yet — the edge Route leaves router→pod in plaintext and re-encrypting is a later beat: oc create route reencrypt parasol-web-secure --service=parasol-web --port=https -n ${NS}"
   check "a Gateway on openshift-default is Programmed"    gateway_programmed                      || hint "not done yet — exercise 6 creates it. If one exists but says AddressNotAssigned, it lacks the metadata annotation networking.istio.io/service-type: ClusterIP: oc get gateway -n ${NS}"
   check "an HTTPRoute is attached to it (backend resolved)" httproute_attached                    || hint "not done yet — exercise 6 attaches one; if it exists, read its status: oc get httproute -n ${NS} -o yaml"
-  check "the Gateway's Envoy pods are Ready"               gateway_dataplane_ready                 || hint "not done yet, or default-deny is starving them: they need egress to istiod (openshift-ingress, 15012) — the exercise-6 allow-gateway policy: oc get pods -n ${NS} -l ${GW_CLASS_LABEL}"
+  check "the Gateway's Envoy proxy is Ready"               gateway_dataplane_ready                 || hint "not done yet, or default-deny is starving it: it needs egress to istiod (openshift-ingress, 15012) — the exercise-6 allow-gateway policy: oc get pods -n ${NS} -l ${GW_CLASS_LABEL}"
   check "a Route publishes the Gateway"                    gateway_published                       || hint "not done yet — oc create route edge parasol-gw --service=parasol-gateway-openshift-default --port=http --insecure-policy=Allow -n ${NS}"
   # Behavioural proof, gated behind its controls (see the helpers above). demo-client is NOT
   # app=parasol-claims, so default-deny + the 'db only from api' allow must BLOCK it — but a probe
