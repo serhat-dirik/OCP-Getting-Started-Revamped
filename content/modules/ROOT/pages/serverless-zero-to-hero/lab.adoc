@@ -864,15 +864,19 @@ This is the same outcome as an Argo Rollouts canary (GitOps at Scale) or a servi
 // cockpit needs the 1.37 kn before this section runs (see instructor pre-flight). The cockpit could not
 // be driven as user10 (no session), so `kn` ran in a pod in user10-dev as the `pipeline` ServiceAccount
 // (edit) from a token kubeconfig — the same auth shape as the cockpit's — and every other step ran as
-// user10. Measured end to end: 2 min 06 s and, on the final walk of these exact blocks after a ws reset,
-// 1 min 59 s (warm Maven mirror), Maven itself 38.6 s; 3 min 01 s of build
+// user10. Measured end to end (warm Maven mirror): 2 min 06 s, 1 min 59 s on the walk of these exact
+// blocks after a ws reset, 2 min 30 s and 1 min 57 s after the mirror's func warm-up; Maven 39-72 s; 3 min 01 s of build
 // task straight from Maven Central; 6 min 14 s on the first build through a COLD mirror. Function cold
 // start 2.48 s, warm 0.022 s.
 //
-// ORDER IS LOAD-BEARING: this section runs BEFORE the eventing taste on purpose. With section-6's
-// every-minute PingSource waking parasol-claims (2 CPU of limits per pod), the build (3 CPU), the Tekton
-// affinity assistant (1.5) and the new function pod (3) overrun {user}-dev's limits.cpu=8 quota: measured
-// FailedCreate on the function revision and a failed `kn func deploy`. Do not move it after section 6.
+// ORDER: this section runs BEFORE the eventing taste on purpose. Before the platform capped queue-proxy
+// at 300m (548e188), section-6's every-minute PingSource waking parasol-claims plus the build (3 CPU of
+// limits) and the new function pod overran {user}-dev's limits.cpu=8: measured FailedCreate and a failed
+// deploy. Re-measured after the cap (2026-11-12): peak 3.75 CPU in this order, 6.35 CPU with the ticker
+// live — it fits either way, but keep the order as the margin if the cap is ever lost.
+// Mirror: `.s2i/environment` is read by the S2I generate step — build log showed ENV MAVEN_MIRROR_URL and
+// every artifact `from mirror.default`, none from central. `kn func config envs add` would NOT do this:
+// it sets the function's RUN-time env (and prompts interactively).
 
 Everything so far started from an image somebody else built. `kn func` starts one step earlier, from source: a language template gives you a project with a single handler in it, and `kn func deploy` turns that into a running Knative Service — no Dockerfile, no registry to set up, no `ksvc` YAML.
 This terminal has no container engine, so you build *on the cluster*: `--remote` uploads your source into `{user}-dev` and runs the build there as an OpenShift Pipelines pipeline, pushes the image to the internal registry, and deploys it.
@@ -933,7 +937,7 @@ MAVEN_MIRROR_URL=http://maven-mirror.ogsr-maven-mirror.svc:8080
 
 Measured on this cluster: Maven took about 40 seconds through the mirror, against about two and a quarter minutes straight from Maven Central. Your own organization's Nexus or Artifactory mirror plugs in the same way.
 
-Now build and deploy. The command waits until the function is running — about *two minutes* (the first build on a fresh cluster can take up to six, while the mirror fills its cache):
+Now build and deploy. The command waits until the function is running — about *two minutes*:
 
 [source,sh,role=execute]
 ----
