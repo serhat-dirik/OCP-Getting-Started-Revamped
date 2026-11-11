@@ -32,7 +32,7 @@ echo "dev namespace: $NS"
 You are the platform engineer for Parasol's *claims-processor*.
 It is already deployed in `{user}-dev` — but *not* as an ordinary Deployment. It's a *Knative Service* (`ksvc`): a scale-to-zero, request-driven service that Knative fronts with an auto-created edge Route.
 Right now it is holding *zero pods*.
-In this lab you *observe* the deployed service, *wake it from zero* and feel the cold start, *autoscale* it under load and watch it melt back to zero, *tune* its concurrency, *split traffic* between two revisions, and wire a first *taste of eventing* — a source → broker → trigger that wakes the service on an event.
+In this lab you *observe* the deployed service, *wake it from zero* and feel the cold start, *autoscale* it under load and watch it melt back to zero, *tune* its concurrency, *split traffic* between two revisions, *build a function* from source on the cluster and run it as a second service, and wire a first *taste of eventing* — a source → broker → trigger that wakes the service on an event.
 
 [TIP]
 .Two ways for the config steps; driving traffic is terminal-only
@@ -854,7 +854,186 @@ This is the same outcome as an Argo Rollouts canary (GitOps at Scale) or a servi
 ✔ *Verify:* You split traffic *80/20* across two revisions with tags (`stable`/`candidate`), read the weights *and* the per-tag sub-routes from Knative, hit each revision directly (both `200`), confirmed the main URL woke *both* revision Deployments, and *rolled back* to 100% stable in one line — then re-applied the split.
 ****
 
-== 5. A taste of eventing — source, broker, trigger
+== 5. Build and deploy a Function
+⏱ *~8 min* · from a language template to a running `ksvc`, built on the cluster
+
+// PERFORMED 2026-11-12 on cluster-5vqxc (OCP + OpenShift Serverless 1.37.3 + OpenShift Pipelines 1.24.3)
+// in user10-dev, with kn func v1.17.0 — the func that ships with Serverless 1.37 (kn-client-kn-rhel9).
+// The cockpit image of that date carried kn v1.15.0 / func v1.15.2, whose `deploy --remote` is REJECTED
+// by the Pipelines 1.24 webhook (it posts a v1beta1 PipelineRun: "impossible ParamValues.Type") — the
+// cockpit needs the 1.37 kn before this section runs (see instructor pre-flight). The cockpit could not
+// be driven as user10 (no session), so `kn` ran in a pod in user10-dev as the `pipeline` ServiceAccount
+// (edit) from a token kubeconfig — the same auth shape as the cockpit's — and every other step ran as
+// user10. Measured end to end: 2 min 06 s and, on the final walk of these exact blocks after a ws reset,
+// 1 min 59 s (warm Maven mirror), Maven itself 38.6 s; 3 min 01 s of build
+// task straight from Maven Central; 6 min 14 s on the first build through a COLD mirror. Function cold
+// start 2.48 s, warm 0.022 s.
+//
+// ORDER IS LOAD-BEARING: this section runs BEFORE the eventing taste on purpose. With section-6's
+// every-minute PingSource waking parasol-claims (2 CPU of limits per pod), the build (3 CPU), the Tekton
+// affinity assistant (1.5) and the new function pod (3) overrun {user}-dev's limits.cpu=8 quota: measured
+// FailedCreate on the function revision and a failed `kn func deploy`. Do not move it after section 6.
+
+Everything so far started from an image somebody else built. `kn func` starts one step earlier, from source: a language template gives you a project with a single handler in it, and `kn func deploy` turns that into a running Knative Service — no Dockerfile, no registry to set up, no `ksvc` YAML.
+This terminal has no container engine, so you build *on the cluster*: `--remote` uploads your source into `{user}-dev` and runs the build there as an OpenShift Pipelines pipeline, pushes the image to the internal registry, and deploys it.
+What comes out is a `ksvc` like `parasol-claims`, so everything from exercises 1–4 applies to it unchanged.
+
+Create the project from the Quarkus HTTP template. The first line clears a project an earlier pass may have left, because `kn func create` refuses an existing one:
+
+[source,sh,role=execute]
+----
+cd ~ && rm -rf premium-calculator
+kn func version
+kn func create -l quarkus -t http premium-calculator
+----
+
+.Expected output (func v1.17.0 or newer; the path is your terminal's home)
+[source,texinfo]
+----
+v1.17.0
+Created quarkus function in .../premium-calculator
+----
+
+Read the handler — one method annotated `@Funq`, next to two small classes for its input and output. Quarkus Funqy maps the HTTP request body onto `Input` and the return value onto the response:
+
+[source,sh,role=execute]
+----
+cd ~/premium-calculator
+sed -n '/@Funq/,/^    }/p' src/main/java/functions/Function.java
+----
+
+.Expected output
+[source,texinfo]
+----
+    @Funq
+    public Output function(Input input) {
+
+        // Add business logic here
+
+        return new Output(input.getMessage());
+    }
+----
+
+This is where Parasol's premium formula would go. The template's echo is enough here — the subject is the path from source to a running service, not the formula.
+
+The build is a Source-to-Image Maven build. This cluster runs a Maven mirror inside it; point the build at it the standard S2I way, with an `.s2i/environment` file that the Java builder reads:
+
+[source,sh,role=execute]
+----
+cd ~/premium-calculator
+mkdir -p .s2i && echo "MAVEN_MIRROR_URL=http://maven-mirror.ogsr-maven-mirror.svc:8080" > .s2i/environment
+cat .s2i/environment
+----
+
+.Expected output
+[source,texinfo]
+----
+MAVEN_MIRROR_URL=http://maven-mirror.ogsr-maven-mirror.svc:8080
+----
+
+Measured on this cluster: Maven took about 40 seconds through the mirror, against about two and a quarter minutes straight from Maven Central. Your own organization's Nexus or Artifactory mirror plugs in the same way.
+
+Now build and deploy. The command waits until the function is running — about *two minutes* (the first build on a fresh cluster can take up to six, while the mirror fills its cache):
+
+[source,sh,role=execute]
+----
+cd ~/premium-calculator
+kn func deploy --remote -n $NS
+----
+
+.Expected output (about two minutes; the cluster domain is a placeholder)
+[source,texinfo,subs="attributes"]
+----
+Running Pipeline Task: scaffold
+Running Pipeline Task: Building function image on the cluster
+Running Pipeline Task: Deploying function to the cluster
+✅ Function deployed in namespace "{user}-dev" and exposed at URL:
+   https://premium-calculator-{user}-dev.<cluster-domain>
+Function Deployed at https://premium-calculator-{user}-dev.<cluster-domain>
+----
+
+While it runs, watch the build — or read it back afterwards:
+
+[tabs]
+====
+Console::
++
+--
+// Console path grounded on the nav verified in trusted-supply-chain/lab.adoc (2026-07-31): the
+// Pipelines page carries a Pipelines | PipelineRuns | Repositories tab row; a task node opens Logs.
+In the {ocp_console_url}[OpenShift web console^] (project `{user}-dev`), open *Pipelines* in the navigation, switch to the *PipelineRuns* tab, and select the `premium-calculator-s2i-upload-pipeline-run-…` run. Its three tasks run in order: *scaffold*, *build* (the S2I build and the push to the internal registry), and *deploy* (which creates the `ksvc`). Click the *build* node in the graph to follow its log.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc get pipeline,pipelinerun,pvc -n $NS -l function.knative.dev/name=premium-calculator
+----
+--
+====
+
+.Expected output of the CLI tab (one pipeline, one run, the PVC holding your uploaded source)
+[source,texinfo]
+----
+NAME                                                         AGE
+pipeline.tekton.dev/premium-calculator-s2i-upload-pipeline   2m
+
+NAME                                                                      SUCCEEDED   REASON      STARTTIME   COMPLETIONTIME
+pipelinerun.tekton.dev/premium-calculator-s2i-upload-pipeline-run-xxxxx   True        Succeeded   2m          5s
+
+NAME                                                               STATUS   VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE
+persistentvolumeclaim/premium-calculator-s2i-upload-pipeline-pvc   Bound    pvc-...  256Mi      RWO            ...            <unset>                 2m
+----
+
+[NOTE]
+.What `--remote` put in your namespace
+====
+`kn func deploy --remote` created everything it needed in `{user}-dev`, as you: the *Pipeline* (scaffold → build → deploy), a *PipelineRun* of it, a 256 MiB *PVC* holding your uploaded source and the build's Maven cache, and a *Secret* with push credentials for the internal registry, derived from your own session. The run itself executes as the `pipeline` ServiceAccount, which OpenShift Pipelines provisions in every namespace. Nothing came from Git: without `--git-url` the source is uploaded from your terminal, which is why no repository was needed.
+====
+
+The function is a Knative Service now. Wait for it to scale to zero — about a minute and a half after the deploy — then call it from the in-cluster client, once cold and once warm:
+
+[source,sh,role=execute]
+----
+kn service list -n $NS
+FURL=$(oc get ksvc premium-calculator -n $NS -o jsonpath='{.status.url}')
+until [ "$(oc get pods -n $NS -l serving.knative.dev/service=premium-calculator --no-headers 2>/dev/null | wc -l | tr -d ' ')" = 0 ]; do sleep 10; done
+echo "scaled to zero — the next call is a cold start"
+----
+
+.Expected output (two Ready services; the function is the second)
+[source,texinfo,subs="attributes"]
+----
+NAME                 URL                                                         LATEST                     AGE   CONDITIONS   READY   REASON
+parasol-claims       https://parasol-claims-{user}-dev.<cluster-domain>          parasol-claims-v2          40m   3 OK / 3     True
+premium-calculator   https://premium-calculator-{user}-dev.<cluster-domain>      premium-calculator-00001   39s   3 OK / 3     True
+scaled to zero — the next call is a cold start
+----
+
+[source,sh,role=execute]
+----
+oc exec deploy/demo-client -n $NS -- curl -s -k -m 60 -w "\ncold start: HTTP %{http_code} in %{time_total}s\n" -H "Content-Type: application/json" -d '{"message":"premium quote for CLM-1001"}' "$FURL"
+oc exec deploy/demo-client -n $NS -- curl -s -k -m 60 -w "\nwarm:       HTTP %{http_code} in %{time_total}s\n" -H "Content-Type: application/json" -d '{"message":"premium quote for CLM-1001"}' "$FURL"
+----
+
+.Expected output (the handler echoes its input; a cold start of a few seconds, not tens)
+[source,texinfo]
+----
+{"message":"premium quote for CLM-1001"}
+cold start: HTTP 200 in 2.481537s
+{"message":"premium quote for CLM-1001"}
+warm:       HTTP 200 in 0.022012s
+----
+
+Compare that with exercise 2. The same scale-to-zero, but the function woke in about *2.5 seconds* where `parasol-claims` took 15–30. A cold start is a property of what you deploy: one handler with a handful of extensions boots far faster than a service with a database pool behind it.
+
+[.checkpoint]
+****
+✔ *Verify:* You created `premium-calculator` from a template, built it *on the cluster* with `kn func deploy --remote` (a PipelineRun in `{user}-dev`: scaffold → build → deploy), and called the resulting *Ready* `ksvc` from zero — `HTTP 200` with your message echoed back, in a few seconds cold and a few hundredths warm.
+****
+
+== 6. A taste of eventing — source, broker, trigger
 ⏱ *~8 min* · wake the service on an event, and meet the honest boundary
 
 So far everything has been *request-driven*. Knative *Eventing* adds *event-driven* delivery: a *source* emits events into a *broker*, and a *trigger* routes them to a *sink* — your `ksvc`, which *wakes from zero* to receive them. Wire all three.
@@ -975,28 +1154,6 @@ That `405` is *expected*, and it's the honest boundary of this taste. The event 
 ✔ *Verify:* You wired *source → broker → trigger* — a `PingSource` into an in-memory `Broker`, a `Trigger` delivering to the `parasol-claims` `ksvc` — confirmed all three *Ready*, and saw a real event delivery *wake the service from zero* and return an honest `HTTP 405` (the app serves `/` but has no *POST* event handler yet — that's Eventing).
 ****
 
-== 6. Build a Function (concept + instructor demo)
-⏱ *~5 min* · where `kn func` fits — and why it's a demo here, not a graded step
-
-`kn func` deploys a *single function* — a small handler from a language template — without you writing a Dockerfile or a `ksvc` by hand. It builds a container image and deploys it *as* a Knative Service, so the function inherits scale-to-zero and revisions automatically. A premium-calculator function would look like:
-
-[source,sh,subs="attributes"]
-----
-# create from a template (Quarkus, HTTP), then deploy:
-kn func create -l quarkus -t http premium-calculator
-cd premium-calculator
-# ... edit the handler ...
-kn func deploy --registry image-registry.openshift-image-registry.svc:5000/{user}-dev
-----
-
-[NOTE]
-.Why this is an instructor demo, not a hands-on step here
-====
-`kn func deploy` needs to *build a container image*. That build runs either *locally* (needs a container engine like Podman *and* push access to a registry) or *on-cluster* (needs OpenShift Pipelines). The workshop terminal has *no local container engine or registry*, so the local path can't run here, and the on-cluster path depends on a Pipelines install outside this module's scope. So Functions are presented as a *concept and an instructor demo* — the pattern is what matters: `kn func` gives you a `ksvc` from a code template, with the *same* scale-to-zero, revision, and traffic-split behavior you exercised above. When you *do* have a build path, everything you learned in exercises 1–5 applies to the function unchanged.
-====
-
-This section is reading only — there is no checkpoint to verify.
-
 == Challenge (optional)
 ⏱ *no hand-holding*
 
@@ -1004,8 +1161,9 @@ You have the mechanics. Try these on your own:
 
 * *Prove scale-to-zero timing.* Drive one request, then run `oc get pods -n $NS -l serving.knative.dev/service=parasol-claims -w` and *time* how long after the last request the pod is removed. Reason about the two Knative defaults that add up to it (the stable window and the scale-to-zero grace period).
 * *Tune the soft target instead of the hard limit.* Re-tune the service with `--concurrency-target 5` (a soft goal) instead of `--concurrency-limit 2` (a hard cap), drive the same burst, and reason about why the scale-up curve differs — and which knob you'd reach for in production.
+* *Make the function do the math.* Replace the echo in `~/premium-calculator/src/main/java/functions/Function.java` with a real premium (say, a base rate times a risk factor carried in the message), run `kn func deploy --remote -n $NS` again, and confirm with `kn revision list -n $NS` that the redeploy minted `premium-calculator-00002` while `00001` stayed.
 * *Mirror the traffic decision.* You split 80/20 with revision tags here, an Argo Rollouts canary in GitOps at Scale, and a mesh weighted route in Service Mesh. Write two sentences on which you'd choose for (a) a request-driven `ksvc` and (b) a service that's one of many in an mTLS mesh — and why.
 
-When you are done, run `ws verify {module-id}` in the Terminal — or run `ws prep {module-id} --yes` to return your world to the entry state (one scale-to-zero revision, no split, no eventing).
+When you are done, run `ws verify {module-id}` in the Terminal — or run `ws prep {module-id} --yes` to return your world to the entry state (one scale-to-zero revision, no split, no function, no eventing).
 
 endif::demo[]

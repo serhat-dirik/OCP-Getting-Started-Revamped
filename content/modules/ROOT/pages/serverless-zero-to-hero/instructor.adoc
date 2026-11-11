@@ -23,9 +23,9 @@ include::partial$version-attributes.adoc[]
 // in lab.adoc above its cold-start capture, 2026-07-31: "do not re-narrow either to a single
 // observed number"). Promise the range; read out whatever the screen actually shows.
 
-This module has one spine and it builds: *a service that holds zero pods → wake it and feel the cold start → autoscale it on concurrency → split traffic across revisions → wake it on an event*.
+This module has one spine and it builds: *a service that holds zero pods → wake it and feel the cold start → autoscale it on concurrency → split traffic across revisions → build a function from source on the cluster → wake it on an event*.
 The beat that lands hardest is the *cold start* (exercise 2): a real first request of *15–30 seconds*, then a tenth of a second warm. It makes the whole scale-to-zero tradeoff concrete, and the deliberate `-m5` break-and-fix turns it into a lesson instead of a surprise.
-The beat to frame most carefully is the *eventing taste* (exercise 5): the delivery is *real* and the service *wakes from zero*, but it returns an honest `405` — the app serves `/` (a `GET` is `200`) but has no *POST* CloudEvents handler, and *processing* is the next module. Do not let it read as a failure.
+The beat to frame most carefully is the *eventing taste* (exercise 6): the delivery is *real* and the service *wakes from zero*, but it returns an honest `405` — the app serves `/` (a `GET` is `200`) but has no *POST* CloudEvents handler, and *processing* is the next module. Do not let it read as a failure.
 
 The single most useful thing to internalize before delivering: *the entry state ships the `ksvc` already deployed and scaled to zero.* Exercise 1 is *observe*, not *deploy from scratch* — the teaching starts from a running (idle) service, which is the honest serverless picture.
 
@@ -33,7 +33,7 @@ include::partial$prep-before-you-teach.adoc[]
 
 == Timing
 
-Total core (exercises 1–6): *~40 min*, plus ~15 min of concept up front. The command latencies are small; the real clock is the *waits* — the ~15–30 s cold start, the ~60–90 s scale-to-zero settle, and the ~20–40 s revision rollouts.
+Total core (exercises 1–6): *~43 min*, plus ~15 min of concept up front. The command latencies are small; the real clock is the *waits* — the ~15–30 s cold start, the ~60–90 s scale-to-zero settle, the ~20–40 s revision rollouts, and the ~2 min on-cluster function build.
 
 [cols="1,4,1,2",options="header"]
 |===
@@ -43,8 +43,8 @@ Total core (exercises 1–6): *~40 min*, plus ~15 min of concept up front. The c
 | 2 | Scale to zero and back (cold start) | ~6 min | cold start *15.27 s*; warm *0.106 s*; the scale-to-zero wait *~60–90 s*; the `-m5` trap is instant
 | 3 | Autoscale + tune concurrency | ~8 min | revision rollout *~20–40 s*; a scale-to-zero settle *~60–90 s*; the burst climbs *0→3 in ~10 s*
 | 4 | Split traffic between revisions | ~8 min | split + rollback instant; the two direct curls + the 50-request batch instant
-| 5 | Eventing taste (source→broker→trigger) | ~8 min | broker/trigger/pingsource Ready in *seconds*; the delivery `405` instant
-| 6 | Build a Function `[INSTRUCTOR-DEMO]` | ~5 min | reading only — no cluster step (build path infeasible in the cockpit)
+| 5 | Build and deploy a Function (`kn func deploy --remote`) | ~8 min | measured 2026-11-12: build+deploy *2 min 06 s* end to end (Maven *38.6 s* via the warm in-cluster mirror); the scale-to-zero wait *~100 s*; function cold start *2.48 s*, warm *0.022 s*
+| 6 | Eventing taste (source→broker→trigger) | ~8 min | broker/trigger/pingsource Ready in *seconds*; the delivery `405` instant
 |===
 
 [NOTE]
@@ -94,6 +94,16 @@ oc exec deploy/showroom-user4 -n ogsr-showroom -c terminal -- sh -lc 'command -v
 ----
 +
 If `kn` is absent, the CLI tabs won't run; the Console tabs (Serverless / Import YAML) are the fallback, and you should flag the cockpit image to the platform team.
+
+. *The cockpit's `kn func` can drive an on-cluster build (exercise 5).*
++
+[source,sh,role=execute]
+----
+oc exec deploy/showroom-shared -n ogsr-showroom -c terminal -- sh -c 'kn func version'
+oc get svc maven-mirror -n ogsr-maven-mirror -o name
+----
++
+Expect *v1.17.0 or newer* — the func that ships with OpenShift Serverless 1.37 — and `service/maven-mirror`. An older func fails exercise 5 for every attendee: func v1.15.2 (the cockpit image of 2026-04) posts a `v1beta1` PipelineRun that the OpenShift Pipelines 1.24 webhook rejects with `impossible ParamValues.Type`. If the mirror is missing, the lab's `.s2i/environment` line points the build at a host that does not exist; tell attendees to skip that block (the build then pulls from Maven Central, about 100 s slower).
 
 . *[FRAGILITY] The entry ksvc re-syncs cleanly.*
 +
@@ -153,6 +163,9 @@ No — for a `ksvc` that's wrong, and it will fight the operator. The Serverless
 *5. "Why does it scale on concurrency and not CPU? What's KPA vs HPA?"*::
 Knative's default is the *Knative Pod Autoscaler* (KPA), which scales on *concurrency* (in-flight requests) and — uniquely — can scale *to zero*. The *Horizontal Pod Autoscaler* (HPA) scales a normal Deployment on *CPU or memory* and has a floor of at least one pod. You *can* attach an HPA to a Knative revision (for CPU-based scaling), but the KPA is the default and the only path to scale-to-zero, which is the whole reason to use Serverless. Concurrency is usually the better signal for a request-driven service anyway — it tracks *offered load* directly, not its CPU side effect.
 
+*6. "The function build takes minutes — why not build it in my terminal?"*::
+The terminal has no container engine, and on most enterprise desktops building and pushing images locally is exactly what is locked down. `kn func deploy --remote` uploads the source into the attendee's own namespace and runs the build there as an OpenShift Pipelines pipeline (scaffold → S2I build and push → deploy), as the `pipeline` ServiceAccount. Measured here: about *2 minutes* end to end, of which Maven is about 40 s through the in-cluster mirror. The build runs once; every call after it is an ordinary `ksvc`, and the function's cold start (*~2.5 s*) is a fraction of the claims service's because it is one small handler.
+
 == Watchouts
 
 * *[FRAGILITY] Entry ksvc re-sync + the immutable-revision webhook.*
@@ -166,6 +179,10 @@ The lab's `PingSource` fires *every minute* (`* * * * +++*+++`) so the delivery 
 The `demo-client` is CPU-capped (200 m), so it can only offer modest concurrency. The lab uses a *hard* `containerConcurrency: 2` so the scale-up to `max-scale` is *deterministic*; a *soft* target may plateau at 1–2 pods from this client. If you demo a soft target, say so — the mechanism is the same, the visible curve is gentler.
 * *max-scale ceiling times the cohort.*
 Each attendee's `ksvc` can burst to its `max-scale` (3–5). Across many users bursting at once that's real scheduler and quota pressure; the per-user quota is sized for it, but watch a busy cluster during the autoscale beat.
+* *[QUOTA] Exercise 5 runs before the eventing taste on purpose — keep it there.*
+Every container without its own limits gets the namespace LimitRange default of *1500m* CPU, so a Knative pod (app + `queue-proxy`) holds 2–3 CPU of limits, the build pod 3, and the Tekton affinity assistant 1.5, against a `limits.cpu` quota of *8* in `{user}-dev`. Measured with exercise 6's every-minute `PingSource` already waking `parasol-claims`: the function revision hit `exceeded quota: workshop-quota` (`FailedCreate`) and `kn func deploy` failed, although Knative started the pod a minute later on its own. In the shipped order `parasol-claims` is idle during the build and it fits. If an attendee re-runs exercise 5 after exercise 6, have them delete the `PingSource` first and recreate it afterwards.
+* *[FIRST BUILD] The first function build in a cohort can take ~6 minutes.*
+The install warms the Maven mirror with the dependencies of `parasol-claims`, not those of the function template (Quarkus Funqy). Measured: *6 min 14 s* through a cold mirror, against *2 min 06 s* once it is warm; straight from Maven Central the build task alone ran *3 min 01 s* (Maven 2 min 17 s). Until the install warms the mirror for it, run exercise 5 once as a sample user before the session and every attendee gets the warm number.
 * *Don't tune the shared autoscaler ConfigMap.*
 `config-autoscaler` in `knative-serving` is cluster-wide. All attendee tuning is *per-`ksvc`* (annotations + `containerConcurrency`); never point an attendee at the shared ConfigMap.
 
@@ -173,4 +190,4 @@ Each attendee's `ksvc` can burst to its `max-scale` (3–5). Across many users b
 
 Serverless is a net-new module built against this repo's live cluster.
 Everything it teaches for the attendee was *performed* on OpenShift 4.21.22 (Kubernetes 1.34) against a live OpenShift Serverless 1.37.1 control plane (Knative Serving + Eventing) in namespace `user6-dev` on 2026-07-13: the deployed scale-to-zero `ksvc` and its auto-created edge Route read via `status.url`; the scale-from-zero *cold start* (`HTTP 200 in 15.27 s`) against the warm request (`0.106 s`); the concurrency-driven autoscale (`0 → 2 → 3`, held at the `max-scale` ceiling, then back to zero); the 80/20 tag-based revision split (both sub-routes `200`, both revision Deployments woken by the main route) and the one-line rollback; and the eventing taste — a `PingSource` → in-memory `Broker` → `Trigger` all *Ready*, a real delivery *waking the `ksvc` from zero* and returning an honest `HTTP 405` because the app serves `/` but has no *POST* CloudEvents handler.
-Two honesty notes are carried into the content as explicit limitations, not open items: the JVM cold start is ~15 s (measured, and taught via a break-and-fix, not hidden), and the eventing delivery returns `405` (the wiring and scale-up are real; event *processing* is Eventing). `kn func` is presented as concept + instructor demo because the cockpit has no local container engine/registry and the on-cluster build needs OpenShift Pipelines. The known entry-state re-sync fragility (`readinessProbe.successThreshold`) is flagged in pre-flight and watchouts for a platform fix.
+Two honesty notes are carried into the content as explicit limitations, not open items: the JVM cold start is ~15 s (measured, and taught via a break-and-fix, not hidden), and the eventing delivery returns `405` (the wiring and scale-up are real; event *processing* is Eventing). `kn func` was concept-only until 2026-11-12; it is now attendee exercise 5, performed on OpenShift Serverless 1.37.3 and OpenShift Pipelines 1.24.3 in `user10-dev` with func v1.17.0: an on-cluster build in *2 min 06 s* (warm mirror), a Ready `ksvc` labelled `function.knative.dev=true`, a *2.48 s* cold start. The `kn` step ran from a pod in `user10-dev` (the cockpit carried func v1.15.2, which the Pipelines webhook rejects, and user10 had no cockpit session); every other step ran as `user10`. The known entry-state re-sync fragility (`readinessProbe.successThreshold`) is flagged in pre-flight and watchouts for a platform fix.

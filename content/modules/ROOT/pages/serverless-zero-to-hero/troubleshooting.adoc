@@ -136,6 +136,62 @@ command -v kn && kn version | head -1
 oc get revision.serving.knative.dev -n $NS
 ----
 
+
+// The five entries below were all hit while performing exercise 5 on 2026-11-12 (cluster-5vqxc,
+// OpenShift Serverless 1.37.3, OpenShift Pipelines 1.24.3, user10-dev).
+== `kn func deploy --remote` fails: `admission webhook "webhook.pipeline.tekton.dev" denied the request`
+
+Symptom:: The deploy stops within seconds with `problem in creating pipeline run: admission webhook "webhook.pipeline.tekton.dev" denied the request: … impossible ParamValues.Type: ""`.
+Cause:: The `kn func` in the terminal is too old for this cluster's OpenShift Pipelines. func v1.15.2 and earlier create a `v1beta1` PipelineRun that the Pipelines 1.24 webhook cannot convert. func v1.17.0, which ships with OpenShift Serverless 1.37, creates it correctly.
+Fix:: Check the version, and if it is older than v1.17.0 tell your instructor — the terminal image needs the newer `kn`; nothing in your namespace is wrong:
++
+[source,sh,role=execute]
+----
+kn func version
+----
+
+== The build fails at the push: `x509: certificate signed by unknown authority`
+
+Symptom:: The `build` task log ends with `Successfully tagged image-registry.openshift-image-registry.svc:5000/…`, then `Get "https://image-registry.openshift-image-registry.svc:5000/v2/": x509: certificate signed by unknown authority`.
+Cause:: The image was built; the push could not verify the internal registry's certificate. Pipeline steps trust it through the `config-service-cabundle` ConfigMap in your namespace, and that ConfigMap is missing.
+Fix:: Re-create it — the cluster fills in the certificate — then deploy again:
++
+[source,sh,role=execute]
+----
+oc create configmap config-service-cabundle -n $NS
+oc annotate configmap config-service-cabundle -n $NS service.beta.openshift.io/inject-cabundle=true
+cd ~/premium-calculator && kn func deploy --remote -n $NS
+----
++
+`ws prep serverless-zero-to-hero` also restores it, but it resets the whole module.
+
+== `kn func deploy` fails with `RevisionFailed … exceeded quota`
+
+Symptom:: The build succeeds, then the deploy step fails with `knative deployer failed to wait for the Knative Service to become ready: RevisionFailed: … exceeded quota: workshop-quota`.
+Cause:: Your namespace ran out of CPU *limits* quota while the function's first pod was starting — usually because the eventing exercise's every-minute `PingSource` keeps waking `parasol-claims` pods at the same time. Knative keeps retrying, so the function often becomes Ready on its own a minute later.
+Fix:: Check the function before redeploying; if it is still not Ready, stop the ticker and deploy again:
++
+[source,sh,role=execute]
+----
+oc get ksvc premium-calculator -n $NS
+oc get events -n $NS --field-selector reason=FailedCreate | tail -3
+oc delete pingsource claim-ticker -n $NS --ignore-not-found=true
+----
++
+Then re-run `kn func deploy --remote -n $NS` from `~/premium-calculator`. Re-create the `PingSource` from exercise 6 afterwards — `ws verify` checks it.
+
+== `kn func deploy` asks `Please provide credentials for image registry`
+
+Symptom:: The deploy stops at `Please provide credentials for image registry (image-registry.openshift-image-registry.svc:5000). Username:`.
+Cause:: `kn func` derives push credentials for the internal registry from the token in your kubeconfig. This terminal's kubeconfig carries one; a kubeconfig without a token (a client certificate, or in-cluster ServiceAccount auth) does not.
+Fix:: Run the lab from the workshop terminal, where the token is present. Press kbd:[Ctrl+C] at the prompt; do not type a password into it.
+
+== The function build takes about six minutes, not two
+
+Symptom:: `kn func deploy --remote` runs for 5–7 minutes; the `build` task log shows `Downloading from mirror.default` line after line.
+Cause:: The in-cluster Maven mirror had not cached the function template's dependencies yet, so it fetched each one from Maven Central first. Measured: *6 min 14 s* cold, *2 min 06 s* once the mirror is warm.
+Fix:: Nothing to fix — let it finish. Every later build in the cohort, yours included, uses the warm cache.
+
 '''
 
 _Last verified on OpenShift 4.21.22 (Kubernetes 1.34, 2026-07-13) against OpenShift Serverless 1.37.1 (Knative Serving + Eventing)._
