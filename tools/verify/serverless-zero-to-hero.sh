@@ -8,6 +8,8 @@
 #   End:   the attendee tuned + split + wired — the ksvc carries a tag-based (blue/green) traffic split
 #          across two revisions, and an in-memory Broker + a Trigger + a PingSource wire the eventing taste
 #          (source->broker->trigger->ksvc).
+#          Plus a Knative Function built on-cluster with `kn func deploy --remote` (any ksvc labelled
+#          function.knative.dev=true) is Ready.
 # Runnable as the ATTENDEE: reads only {user}-dev objects the attendee sees via namespace admin (the
 # Knative serving/eventing CRDs aggregate to the admin role). The G1 cockpit smoke runs `--entry-only`.
 #
@@ -51,6 +53,18 @@ ksvc_has_url() {
 ksvc_traffic_split() {
   oc_read get ksvc parasol-claims -n "$NS" -o jsonpath='{.status.traffic[*].tag}' || return 1
   [[ -n "$OC_OUT" ]]
+}
+
+# The service CA bundle the on-cluster function build trusts the internal registry with (lab section 5).
+# Shipped by the entry state because a ws purge deletes it and OpenShift Pipelines does not recreate it.
+service_cabundle_present() { oc_present get configmap config-service-cabundle -n "$NS" -o name; }
+
+# A Knative Function deployed with `kn func deploy` is Ready. kn func labels its ksvc
+# function.knative.dev=true, so ANY function name passes (rule 14), not only premium-calculator.
+function_ready() {
+  oc_read get ksvc -n "$NS" -l function.knative.dev=true \
+    -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' || return 1
+  grep -qx True <<<"$OC_OUT"
 }
 
 # Eventing objects (namespaced; attendee admin reads them via the aggregated admin role).
@@ -103,6 +117,7 @@ check "demo-client deployment has >=1 ready replica" deploy_ready demo-client   
 check "parasol-claims Knative Service present"       ksvc_present                    || hint "entry app not synced (is the serverless stack installed?) — ws reset serverless-zero-to-hero --user ${USER_NAME}"
 check "parasol-claims ksvc is Ready"                 ksvc_ready                      || hint "revision not Ready — check image pull + claims-db: oc get ksvc,revision -n ${NS}; oc get pods -n ${NS}"
 check "parasol-claims ksvc has an auto-created URL (edge Route)" ksvc_has_url        || hint "Knative auto-publishes the edge Route — a blank status.url means the Route/Kourier isn't ready: oc get ksvc parasol-claims -n ${NS} -o yaml"
+check "service CA bundle present (the function build pushes to the internal registry over it)" service_cabundle_present || hint "entry state not fully synced — ws reset serverless-zero-to-hero --user ${USER_NAME}; without it the section-5 function build fails x509 on push"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: clean slate — one revision, no split, no eventing --------------------------------
@@ -118,6 +133,7 @@ else
   check "eventing Broker present (in-memory)"                       broker_present     || hint "not done yet — the entry state ships no eventing objects; creating the Broker is the eventing-taste hub: kn broker create default -n ${NS}"
   check "Trigger present (Broker -> parasol-claims ksvc)"           trigger_present    || hint "not done yet — you create this during the lab (a Trigger routing the Broker to the parasol-claims ksvc); expected red until you do"
   check "PingSource present (source -> Broker)"                     pingsource_present || hint "not done yet — you create this during the lab (a PingSource emitting events into the Broker); expected red until you do"
+  check "a Knative Function (kn func) is deployed and Ready"        function_ready     || hint "not done yet — lab section 5 builds one on the cluster (kn func create, then kn func deploy --remote); expected red until it finishes. adm solve does NOT build it. If the deploy ran and failed: oc get pipelinerun -n ${NS} and see the Troubleshooting page"
 fi
 
 verify_summary
