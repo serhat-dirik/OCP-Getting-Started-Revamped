@@ -61,7 +61,7 @@ No login refresh is needed. Each attendee's terminal logs in from their own brow
 - A module that runs long is almost always waiting on a cold image, build or workspace. That is
   what [module preparation](#appendix-module-preparation) prevents.
 
-**Instructor-only exercises.** Nine modules have one exercise you perform yourself, because it
+**Instructor-only exercises.** Eight modules have one exercise you perform yourself, because it
 changes something cluster-wide. Attendees see the result.
 
 | Module | You demonstrate |
@@ -74,7 +74,6 @@ changes something cluster-wide. Attendees see the result.
 | Resilience, Multi-Cluster & DR | Draining a node while a PodDisruptionBudget paces it |
 | Trusted Software Supply Chain | The cluster refusing an unsigned image (cluster-wide `ImagePolicy`) |
 | Securing Apps with Keycloak | The same Keycloak backing the OpenShift console login |
-| Dev Spaces & the Inner Loop | GUI debugging, only on a disconnected cluster |
 
 **Switching modules.** No module depends on another. But starting a module **discards** the state of
 a module that shares its namespaces:
