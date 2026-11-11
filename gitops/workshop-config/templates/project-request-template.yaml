@@ -1,0 +1,146 @@
+{{- /*
+  project-request — the dedicated cluster's project-request Template (multi-tenancy-workload-security).
+  bootstrap/install.sh points projects.config.openshift.io/cluster at it and turns self-provisioning off
+  (singletons, so imperative there, not owned by Argo). Every project made through a project request
+  gets: the requester as admin, deny-by-default ingress plus same-namespace / router (host-network
+  ingress) / monitoring / Dev Spaces allows, and a count-only starter quota. Workshop namespaces are
+  plain Namespaces made by Argo, so they never pass through it. Spec from the M16 builder, every object
+  server-side dry-run on cluster-5vqxc 2026-11-12.
+*/ -}}
+# The template every new project request is built from.
+apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  name: project-request
+  namespace: openshift-config
+objects:
+- apiVersion: project.openshift.io/v1
+  kind: Project
+  metadata:
+    annotations:
+      openshift.io/description: ${PROJECT_DESCRIPTION}
+      openshift.io/display-name: ${PROJECT_DISPLAYNAME}
+      openshift.io/requester: ${PROJECT_REQUESTING_USER}
+    name: ${PROJECT_NAME}
+  spec: {}
+  status: {}
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: RoleBinding
+  metadata:
+    name: admin
+    namespace: ${PROJECT_NAME}
+  roleRef:
+    apiGroup: rbac.authorization.k8s.io
+    kind: ClusterRole
+    name: admin
+  subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: ${PROJECT_ADMIN_USER}
+- apiVersion: networking.k8s.io/v1
+  kind: NetworkPolicy
+  metadata:
+    name: deny-by-default
+    namespace: ${PROJECT_NAME}
+  spec:
+    podSelector: {}
+    policyTypes: [Ingress]
+- apiVersion: networking.k8s.io/v1
+  kind: NetworkPolicy
+  metadata:
+    name: allow-from-same-namespace
+    namespace: ${PROJECT_NAME}
+  spec:
+    podSelector: {}
+    ingress:
+    - from:
+      - podSelector: {}
+- apiVersion: networking.k8s.io/v1
+  kind: NetworkPolicy
+  metadata:
+    name: allow-from-openshift-ingress
+    namespace: ${PROJECT_NAME}
+  spec:
+    podSelector: {}
+    ingress:
+    - from:
+      - namespaceSelector:
+          matchLabels:
+            policy-group.network.openshift.io/ingress: ""
+- apiVersion: networking.k8s.io/v1
+  kind: NetworkPolicy
+  metadata:
+    name: allow-from-openshift-monitoring
+    namespace: ${PROJECT_NAME}
+  spec:
+    podSelector: {}
+    ingress:
+    - from:
+      - namespaceSelector:
+          matchLabels:
+            network.openshift.io/policy-group: monitoring
+- apiVersion: networking.k8s.io/v1
+  kind: NetworkPolicy
+  metadata:
+    name: allow-from-openshift-devspaces
+    namespace: ${PROJECT_NAME}
+  spec:
+    podSelector: {}
+    ingress:
+    - from:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: openshift-devspaces
+- apiVersion: v1
+  kind: ResourceQuota
+  metadata:
+    name: starter-quota
+    namespace: ${PROJECT_NAME}
+  spec:
+    hard:
+      pods: "20"
+      persistentvolumeclaims: "5"
+      services.loadbalancers: "0"
+      services.nodeports: "0"
+parameters:
+- name: PROJECT_NAME
+- name: PROJECT_DISPLAYNAME
+- name: PROJECT_DESCRIPTION
+- name: PROJECT_ADMIN_USER
+- name: PROJECT_REQUESTING_USER
+---
+# Attendees read the one template (the M16 lab inspects it); nothing else in openshift-config.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  name: ogsr-read-project-request-template
+  namespace: openshift-config
+rules:
+- apiGroups: ["template.openshift.io"]
+  resources: ["templates"]
+  resourceNames: ["project-request"]
+  verbs: ["get"]
+---
+# Binds the read to the workshop-attendees group.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  name: ogsr-read-project-request-template
+  namespace: openshift-config
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ogsr-read-project-request-template
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: Group
+  name: workshop-attendees

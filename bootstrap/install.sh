@@ -1199,6 +1199,15 @@ oc patch image.config.openshift.io/cluster --type=merge \
   -p '{"spec":{"allowedRegistriesForImport":[{"domainName":"registry.redhat.io"},{"domainName":"registry.access.redhat.com"},{"domainName":"quay.io"},{"domainName":"image-registry.openshift-image-registry.svc:5000"}]}}' >/dev/null
 ok "image import allowlist: registry.redhat.io, registry.access.redhat.com, quay.io, internal registry"
 
+# 2a'''. Projects are the platform's to create (dedicated cluster, INSTALL.md §6): self-provisioning off,
+# and project requests built from the project-request Template workshop-config ships in openshift-config.
+# autoupdate=false FIRST, or the cluster-policy controller restores the default subject. The Project
+# config change rolls openshift-apiserver once. Same steps in helm/bootstrap/templates/job-workshop-users.yaml.
+oc annotate clusterrolebinding self-provisioners rbac.authorization.kubernetes.io/autoupdate=false --overwrite >/dev/null
+oc patch clusterrolebinding self-provisioners --type=merge -p '{"subjects":null}' >/dev/null
+oc patch project.config.openshift.io/cluster --type=merge -p '{"spec":{"projectRequestTemplate":{"name":"project-request"}}}' >/dev/null
+ok "self-provisioning off; project requests use the project-request template"
+
 # 2b. MaaS token for OpenShift Lightspeed (only when WE install it — a pre-installed
 # Lightspeed brings its own provider secret, which we must never overwrite).
 if [[ "$LIGHTSPEED" == "true" && "$LIGHTSPEED_PREINSTALLED" == "false" ]]; then

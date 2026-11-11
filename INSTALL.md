@@ -463,6 +463,9 @@ operators and the workshop's own namespaces, it changes these cluster-wide setti
 - **Image imports:** `image.config/cluster` `spec.allowedRegistriesForImport` limits ImageStream imports
   to `registry.redhat.io`, `registry.access.redhat.com`, `quay.io` and the internal registry (pod pulls
   are unaffected). The first apply briefly restarts `openshift-apiserver`.
+- **Projects:** self-provisioning is off (the `self-provisioners` binding has no subjects), and project
+  requests use the `project-request` Template in `openshift-config` (deny-by-default network policies
+  and a count-only quota).
 
 `ogsr-uninstall.sh` removes the workshop's own objects but does not restore every setting above.
 Dispose of the cluster after the delivery rather than hand it back.
