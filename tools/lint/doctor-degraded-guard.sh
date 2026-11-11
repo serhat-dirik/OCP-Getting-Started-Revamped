@@ -388,6 +388,14 @@ self_test() {
     '  printf "  %-28s" "idp"' \
     "a row is renamed and every report that looked for it now finds nothing" || failures=1
 
+  # [1] The 2026-11-11 false red: User objects graded for MISSING members. OpenShift creates one at
+  # first login, so a fresh cohort lists only who has signed in, and the row told the operator to
+  # wipe a healthy cohort.
+  expect_caught user-objects-missing-graded admin-readable check_row_marks \
+    '"$expected_str" "$userobj_str" extra-only)"' \
+    '"$expected_str" "$userobj_str")"' \
+    "attendees who have not logged in yet read as a half-finished wipe" || failures=1
+
   # [3] The exit-code contract, stated as a canary: an attendee's healthy-but-partly-unreadable run
   # must not become non-zero. Same rows, same verdict — only the status moves.
   expect_caught partial-run-exits-nonzero attendee-forbidden check_exit_code \
@@ -425,11 +433,11 @@ self_test() {
   fi
 
   if [[ "$failures" -ne 0 ]]; then return 2; fi
-  ok "self-test ok — the real tree reproduces all ${#CASES[@]} recordings, and all eight reintroduced"
+  ok "self-test ok — the real tree reproduces all ${#CASES[@]} recordings, and all nine reintroduced"
   echo "   defects are caught by the one detector each is meant to prove: summary-verdict-silenced,"
   echo "   clean-run-gains-a-caveat, failure-verdict-drops-not-graded, ungraded-row-turned-red,"
-  echo "   row-label-renamed, partial-run-exits-nonzero, failure-run-exits-zero,"
-  echo "   unmodelled-read-introduced (plus the missing-recording canary)."
+  echo "   row-label-renamed, user-objects-missing-graded, partial-run-exits-nonzero,"
+  echo "   failure-run-exits-zero, unmodelled-read-introduced (plus the missing-recording canary)."
   return 1
 }
 
