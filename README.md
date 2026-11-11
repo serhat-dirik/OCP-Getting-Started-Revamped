@@ -1,12 +1,12 @@
 # OpenShift Application Platform — Getting Started
 
-A modern, modular **OpenShift enablement workshop**: 28 self-contained modules that take developers, DevOps engineers, and architects from "I have credentials to a cluster" to "I can develop, deliver, and operate applications on OpenShift — and I know why the platform works this way."
+A modern, modular **OpenShift enablement workshop**: 25 self-contained modules that take developers, DevOps engineers, and architects from "I have credentials to a cluster" to "I can develop, deliver, and operate applications on OpenShift — and I know why the platform works this way."
 
 ## Workshop Content
 
-You join **Parasol Insurance** as an engineer on its claims platform, and the workshop is your first weeks on the job: you deploy the claims service for the first time, wire it to configuration and storage, put pipelines and security gates in front of every change, hand operations to GitOps, learn to observe and scale it, and finish with an AI-assisted platform that helps you modernize legacy code and build agents on top of the same services. Every module advances the same story on the same application — nothing is a toy example.
+You join **Parasol Insurance** as an engineer on its claims platform, and the workshop is your first weeks on the job: you deploy the claims service for the first time, wire it to configuration and storage, put pipelines and security gates in front of every change, hand operations to GitOps, learn to observe and scale it, and finish by keeping it running through the loss of a whole site and packaging it for other teams to install. Every module advances the same story on the same application — nothing is a toy example.
 
-The 28 modules are grouped into four blocks:
+The 25 modules are grouped into four blocks:
 **A · Foundations, B · Delivery & Trust, C · Platform & Tenancy, D · Advanced Electives**.
 
 
@@ -36,21 +36,18 @@ The 28 modules are grouped into four blocks:
 | D | M22 | Serverless Zero-to-Hero | Wake a Knative Service that's scaled to zero and feel the real cold start, then watch it autoscale on concurrency and melt back to zero when traffic stops. Split traffic between two revisions by tag, and wire a first taste of eventing that wakes the service on an event. | ~3-5 min | 40 min |
 | D | M23 | Eventing Deep-Dive & Serverless Workflows | Route a real CloudEvent through a broker to wake a consumer from zero, then filter delivery by attribute across several independent triggers. Break a consumer on purpose and watch Knative retry it and then dead-letter the event, reading exactly why it failed. | ~4-6 min | 40 min |
 | D | M24 | Resilience, Multi-Cluster & DR | Prove a service survives a pod loss with replicas, a PodDisruptionBudget, and an HPA, then scale an entire site to zero and watch the service mesh fail traffic over to a second site with zero dropped requests. As an add-on, connect two sites into one network with Red Hat Service Interconnect. | ~4-6 min | 30 min |
-| D | M25 | Application Modernization (MTA + Developer Lightspeed) | Run the Migration Toolkit for Applications over a legacy Java WAR to see exactly what blocks containerizing it, then fix a flagged issue with Developer Lightspeed for MTA and watch the effort score drop on re-analysis. Containerize and deploy the modernized service, then break and fix its startup probe. | ~3-5 min | 40 min |
-| D | M26 | Agentic AI on OpenShift | Rewrite the weak system prompt a running AI agent shipped with and watch it stop describing a tool call and start making one. Inspect its MCP tools, ground an answer in policy documents with RAG, then build and register a tool server of your own. Make the agent state a claim status no tool ever returned, then catch it with a control that never asks the model. | ~4-6 min | 100 min |
-| D | M27 | AI-Assisted Development on OpenShift (Vibe Coding, Safely) | Connect an AI coding assistant to the cluster through an MCP server and have it diagnose a broken deployment read-only, then grant it a scoped write so it can fix the problem itself. Watch RBAC flatly refuse the same agent when it reaches for a namespace it was never granted. | ~3-5 min | 30 min |
-| D | M28 | Packaging & Distributing Your App (Helm & OLM) | Package the notifications service as a Helm chart, install it, upgrade it, break it on purpose, and roll back to the version that worked. Push the chart to the registry as an OCI artifact, then take apart a real operator's bundle to see what happens when someone clicks Install. | ~4-6 min | 40 min |
+| D | M25 | Packaging & Distributing Your App (Helm & OLM) | Package the notifications service as a Helm chart, install it, upgrade it, break it on purpose, and roll back to the version that worked. Push the chart to the registry as an OCI artifact, then take apart a real operator's bundle to see what happens when someone clicks Install. | ~4-6 min | 40 min |
 
 **Modules are flexible.** Every module is self-contained: automation materializes its starting environment per attendee, so no module assumes another one ran first. Attendees can start with any module, follow one of the recommended paths, or jump straight to the topic their team needs today.
 
-**Plan a delivery.** The whole catalog is about **18 hours**, so the designated full workshop is **3-4 days covering all 28 modules** — not a selection from them. Shorter formats drop modules rather than rush them. These are **starting points, not prescriptions** — the delivering SA chooses the set with `modules_enabled` in `bootstrap/vars.yaml` (see INSTALL.md):
+**Plan a delivery.** The whole catalog is about **17 hours**, so the designated full workshop is **3-4 days covering all 25 modules** — not a selection from them. Shorter formats drop modules rather than rush them. These are **starting points, not prescriptions** — the delivering SA chooses the set with `modules_enabled` in `bootstrap/vars.yaml` (see INSTALL.md):
 
 | Delivery | Modules | Total |
 |---|---|---|
-| Half-day taster | M01 → M02 → M09 → M12 → M26 | ~3 h |
-| Full-day essentials | M01 → M02 → M03 → M04 → M07 → M09 → M12 → M25 | ~6 h |
-| 2-day core | everything except M15, M17, M18, M19, M21, M22, M23, M24, M26, M27 | ~12 h |
-| **3-day full workshop** | **all 28** — Day 1 M01–M08 (block A) · Day 2 M09–M20 (B+C) · Day 3 M21–M28 (D) | ~18 h |
+| Half-day taster | M01 → M02 → M09 → M12 | ~2.5 h |
+| Full-day essentials | M01 → M02 → M03 → M04 → M07 → M09 → M12 | ~4.5 h |
+| 2-day core | everything except M15, M17, M18, M19, M21, M22, M23, M24 | ~12 h |
+| **3-day full workshop** | **all 25** — Day 1 M01–M08 (block A) · Day 2 M09–M20 (B+C) · Day 3 M21–M25 (D) | ~17 h |
 
 ## Project Content
 
@@ -77,7 +74,7 @@ Sizing, every option and troubleshooting: **[INSTALL.md](INSTALL.md)**.
   Red Hat SAs: order [**Field Sourced Content - OpenShift Base**](https://catalog.demo.redhat.com/catalog/babylon-catalog-prod?item=babylon-catalog-prod/published.ocp-field-asset.prod)
   with **3 workers or more** ([how many](INSTALL.md#sizing)).
 * On your machine: `oc`, `git`, `yq`, `htpasswd`, `openssl`.
-* Optional, for the AI modules: an OpenAI-compatible model endpoint and key.
+* Optional, for OpenShift Lightspeed and M06's AI batch-inference step: an OpenAI-compatible model endpoint and key.
 
 **1. Clone**
 

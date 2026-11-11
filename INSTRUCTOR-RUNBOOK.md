@@ -17,8 +17,8 @@ has its own timing table, pre-flight checklist and watchouts.
 
 1. **Pick the agenda** from the [README delivery table](README.md#workshop-content) (half-day,
    full day, 2-day, 3-day) or choose your own modules. Put the list in `modules_enabled`.
-2. **AI modules need a model endpoint and key at install time.** That covers jobs-batch-kueue's
-   batch inference, agentic-ai, ai-assisted-development and app-modernization's Lightspeed step.
+2. **AI steps need a model endpoint and key at install time.** That covers jobs-batch-kueue's
+   batch inference and the OpenShift Lightspeed console assistant.
 3. **Order and size the cluster** with [INSTALL.md › Before you order](INSTALL.md#1-before-you-order).
 
 ---
@@ -77,8 +77,7 @@ changes something cluster-wide. Attendees see the result.
 a module that shares its namespaces:
 
 - `{user}-cicd`: Pipelines Fundamentals, Application Security Testing, Trusted Software Supply Chain.
-- Own namespaces, no conflicts: Jobs/Batch & Kueue, Service Mesh, Application Modernization,
-  Agentic AI, Resilience/Multi-Cluster/DR.
+- Own namespaces, no conflicts: Jobs/Batch & Kueue, Service Mesh, Resilience/Multi-Cluster/DR.
 - Every other module shares `{user}-dev` (and `-stage`/`-prod` where used).
 
 Tell attendees before they switch within a family: work in progress is lost; `ws prep` brings the
@@ -95,7 +94,7 @@ module back clean.
 |---|---|
 | Terminal says `Unauthorized` on the first command | The attendee's browser sign-in expired. They reload the cockpit page, sign in, and reopen the terminal. |
 | `ws prep` refused: "attendees may only use their own AppProject" | The cockpit runs an old `ws`. Run `tools/ws/adm git-refresh --restart-terminals --all`. |
-| An AI module returns an authentication error | Run `tools/ws/adm maas show`, then fix with `tools/ws/adm maas set`. No reinstall. |
+| An AI step returns an authentication error | Run `tools/ws/adm maas show`, then fix with `tools/ws/adm maas set`. No reinstall. |
 
 Anything else: collect this, then check the module's `troubleshooting.adoc` and
 [INSTALL.md › Troubleshooting](INSTALL.md#5-troubleshooting).
@@ -119,8 +118,7 @@ oc get applications -n openshift-gitops
 
 `ogsr-reset.sh` clears all lab work and keeps the platform and every account. It does **not** clear:
 
-- Data inside shared tools: MTA applications, SonarQube projects, Developer Hub catalog entries.
-  Delete attendees' MTA applications in the MTA console before a new group.
+- Data inside shared tools: SonarQube projects, Developer Hub catalog entries.
 - Contents of each attendee's Keycloak realm.
 - Attendee home directories in the cockpit.
 - Gitea tokens and SSH keys on the kept accounts.
@@ -133,5 +131,4 @@ Only these modules need anything from you before the session.
 
 | Module | When | Do this |
 |---|---|---|
-| AI-Assisted Development | You changed the AI model | Run exercise 3 once on the new model. Models differ in whether they carry out writes. |
 | Ways to Build, Pipelines Fundamentals, Application Security Testing, Trusted Software Supply Chain, Dev Spaces | Until the install pre-warms them (in progress) | Run each once as a sample user the day before (`tools/ws/adm solve <slug> --user <u>`). The first build or workspace start is several minutes slower. |

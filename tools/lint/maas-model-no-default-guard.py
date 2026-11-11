@@ -168,7 +168,8 @@ SITES = [
         (REPO / f"gitops/entry-states/{slug}/values.yaml",
          _compile(f"SITES[entry:{slug}]", r'^\s*maasModel\s*:\s*"?([^"\n#]+?)"?\s*$', re.M),
          f"entry-states/{slug} maasModel")
-        for slug in ("agentic-ai", "ai-assisted-development", "app-modernization", "jobs-batch-kueue")
+        # Three sites left with app-modernization, agentic-ai and ai-assisted-development (2026-11-12).
+        for slug in ("jobs-batch-kueue",)
     ],
 ]
 
@@ -176,7 +177,7 @@ SITES = [
 # shrink its own floor. Truncating the list the driver iterates (`SITES[:1]`) collapses the count
 # below this; editing SITES itself trips the self-test, which asserts the two agree. Adding a site
 # means bumping this number in the same change.
-MIN_SITES = 8
+MIN_SITES = 5
 
 # A value is acceptable ONLY if it is visibly not a real setting. The trailing "@" is Antora's
 # soft-set marker and is stripped before judging.

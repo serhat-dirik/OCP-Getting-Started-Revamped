@@ -310,31 +310,6 @@ PAIRS: list[dict] = [
                "tools/gen-entry-namespaces.sh so all 26 charts pick up the fix, and bump each "
                "touched chart's version so Argo's manifest cache picks it up.",
     },
-    {
-        "id": "agentic-ai-grounding-prompt",
-        "mode": "text",
-        # agentic-ai's write-beat is the GROUNDING PROMPT: the entry state ships a weak draft, the
-        # attendee strengthens it, and `ws solve` ships the strengthened one. The strengthened text
-        # is byte-identical to the image's own built-in fallback ON PURPOSE — that identity is what
-        # makes a hand-completed attendee world and a machine-solved `ws solve` world converge on
-        # the same good prompt, so a screenshot, a demo and a lab all show the same behaviour.
-        #
-        # NOTHING ELSE CAN CATCH THIS. tools/verify/agentic-ai.sh grades a PROPERTY of the live
-        # prompt (does it direct the model at its tools) and never the exact wording — deliberately,
-        # so any correct attendee edit stays green (rule 14). That is the right predicate for an
-        # attendee's text and the wrong one for this pair: a reworded solve prompt, or a reworded
-        # image default, keeps every ✅ while quietly ending the convergence. Hence a copy pair.
-        "source": {"file": "apps/parasol-agent/src/main/java/com/parasol/agent/GroundingPrompt.java",
-                   "java_text_block": "DEFAULT_PROMPT"},
-        "copy": {"file": "gitops/entry-states/agentic-ai/templates/_helpers.tpl",
-                 "helm_define": "agentic-ai.groundingPromptStrong"},
-        "why": "the agent image's built-in default grounding and the `ws solve` grounding must be "
-               "the SAME prompt, or a solved world behaves differently from a correctly-completed "
-               "one and the module's own screenshots stop matching either. Decide which text is "
-               "right, copy it into the other side verbatim (Java text block ↔ define body), and "
-               "bump the agentic-ai chart version so Argo's manifest cache picks the new prompt up "
-               "— then re-run `ws solve` for one user and re-read GET /agent/info.",
-    },
 ]
 
 # Pair (c) — expanded rather than special-cased, so each Task fails on its own name.
@@ -359,14 +334,16 @@ for _task in PARASOL_TASKS:
 # shrink its own floor. Truncating the list the driver iterates (`PAIRS[:1]`) collapses the "pairs
 # compared" count below this; editing PAIRS itself trips the self-test, which asserts the two agree.
 # Adding a pair means bumping this number in the same change.
-MIN_PAIRS = 14
+MIN_PAIRS = 13
 
 # Structural comparison nodes across all pairs, measured 2026-08-01: 995. The floor is well under
 # that (Task bodies and pipelines grow and shrink) and far over what a fragment comparison yields.
 MIN_STRUCTURAL_NODES = 600
 
 # Normalized prompt lines actually compared, summed over both sides of every mode="text" pair.
-# Measured 2026-08-06: 30 (15 lines each side). The floor is a truncation detector, not an
+# Measured 2026-08-06: 30 (15 lines each side). NO real text pair since 2026-11-12: the only one
+# (agentic-ai's grounding prompt) retired with its module, so scope_for_tree() requires this floor
+# only while PAIRS declares a text pair; the canary-text-* self-test cases keep the mode proven. The floor is a truncation detector, not an
 # assertion of the prompt's length — an extractor that returned only its first line, or only its
 # first paragraph, would land under it, and prompts are edited far more often than they are halved.
 MIN_TEXT_LINES = 20
@@ -1294,11 +1271,12 @@ def scope_for_tree() -> Scope:
     scope.require("byte-identical pairs compared", 1,
                   "the claims-seed pair is the one non-YAML duplicate; its mode has its own reader "
                   "and would otherwise be provable only by the canary.")
-    scope.require("prompt text lines compared", MIN_TEXT_LINES,
-                  "normalized lines returned by check_text_pair(), summed over both sides. This is "
-                  "the count that collapses if a host-language extractor starts returning a "
-                  "fragment — two one-line strings compare equal just as happily as two correct "
-                  "prompts do.")
+    if any(p["mode"] == "text" for p in PAIRS):
+        scope.require("prompt text lines compared", MIN_TEXT_LINES,
+                      "normalized lines returned by check_text_pair(), summed over both sides. This "
+                      "is the count that collapses if a host-language extractor starts returning a "
+                      "fragment — two one-line strings compare equal just as happily as two correct "
+                      "prompts do.")
     return scope
 
 

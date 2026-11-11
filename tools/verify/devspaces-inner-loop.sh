@@ -121,10 +121,9 @@ ping_endpoint_pushed() {
 # AND "SOMETHING IS IN THAT NAMESPACE" IS NOT THE END STATE EITHER — this is the false ✅ this block
 # was rewritten for (audit F-06, 2026-08-05). {user}-devspaces is DEV SPACES' PER-USER WORKSPACE
 # NAMESPACE, not this module's: every workspace this attendee ever runs lands in it, from any module
-# or from the dashboard's own sample catalogue. app-modernization's lab sends them into Dev Spaces on
-# a different fork (parasol-legacy-claims) and says so in as many words — "Dev Spaces provisions your
-# workspace in its own {user}-devspaces namespace" (app-modernization/lab.adoc §"AI path") — while its
-# ws-meta declares NO conflictsWith and purges only {user}-modernize. So that workspace's Deployment
+# or from the dashboard's own sample catalogue. The measured case was the since-retired
+# app-modernization lab: it sent attendees into Dev Spaces on a different fork while its ws-meta
+# declared NO conflictsWith and purged only its own namespace. So such a workspace's Deployment
 # and Pod, and the shared per-user PVC (claim-devworkspace, pvcStrategy per-user) that outlives it,
 # sit in this namespace with devspaces-inner-loop's entry app still materialized and untouched. A
 # namespace-wide "is anything here" read then prints "✅ the parasol-claims workspace has been

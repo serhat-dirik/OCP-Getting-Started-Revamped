@@ -24,7 +24,7 @@ repo. `tools/ws/adm` is the operator CLI; attendees only get `ws` inside their c
 | Storage | A default StorageClass. Some labs need RWX. |
 | Nodes | `linux/amd64`. See [Node count](#node-count). |
 | Network | Outbound access to the Red Hat and Quay registries |
-| AI modules (optional) | An OpenAI-compatible chat-completions endpoint and key: Red Hat MaaS, vLLM, or a public provider. No GPU on your cluster. Without it, the AI modules are unavailable. |
+| Model endpoint (optional) | An OpenAI-compatible chat-completions endpoint and key: Red Hat MaaS, vLLM, or a public provider. No GPU on your cluster. Without it, OpenShift Lightspeed and M06's AI batch-inference step are unavailable. |
 | Not supported | OpenShift Local, single-node clusters |
 
 - **Red Hat SAs:** order [Field Sourced Content - OpenShift Base](https://catalog.demo.redhat.com/catalog/babylon-catalog-prod?item=babylon-catalog-prod/published.ocp-field-asset.prod)
@@ -213,7 +213,7 @@ Attendees self-serve with `ws prep`, `ws verify` and `ws reset`. Your commands:
 | Change the shared password | `tools/ws/adm passwd [NEWPASS]` |
 | Grow or shrink the cohort | `tools/ws/adm scale-users N` |
 | Push content changes to the cockpits | `tools/ws/adm git-refresh --restart-terminals --all` |
-| See what the AI modules run on | `tools/ws/adm maas show` |
+| See what the AI steps run on | `tools/ws/adm maas show` |
 | Change the AI model or key | `tools/ws/adm maas set` |
 | Find pods on an old image | `tools/ws/adm rebuild-images --check` |
 | Rebuild an app image everywhere | `tools/ws/adm rebuild-images --image <name> --all` |
@@ -236,7 +236,7 @@ tools/ws/adm maas show                            # every attendee should read "
 
 - Nothing changes until the key, endpoint and model pass a live test together; a 401/403 is refused.
 - There is no `--key <value>` flag on purpose: `ps` would show it to every user on the machine.
-- Attendees' AI modules pick up the change without losing their lab work.
+- Attendees' AI steps pick up the change without losing their lab work.
 
 **Rebuild an app image**
 
@@ -391,13 +391,12 @@ oc get ns <name> -o jsonpath='{range .status.conditions[*]}{.type}={.status}: {.
 |---|---|
 | OpenShift console | `userN` + workshop password, **workshop-users** provider |
 | Gitea, SonarQube | Same pair (SonarQube is readable without login) |
-| MTA | None — the Hub is open |
 | Argo CD (attendee) | Through the cockpit link |
 
 SonarQube rejects the login → its seed job did not run: `oc logs job/sonarqube-user-seed -n sonarqube --tail=20`.
 Re-syncing `workshop-config` re-runs it.
 
-### AI modules fail with auth errors
+### AI steps fail with auth errors
 
 - **Cause:** usually a key for a different model — keys are model-scoped.
 - Run `tools/ws/adm maas show`:
@@ -408,7 +407,7 @@ Re-syncing `workshop-config` re-runs it.
 ### Lightspeed shows "Waiting for OpenShift Lightspeed service"
 
 - **Cause:** RHDP clusters ship Lightspeed pointed at Azure OpenAI, and its service principal was
-  deleted. Not caused by the workshop. **AI modules are unaffected**; only the console assistant is.
+  deleted. Not caused by the workshop. **M06's batch inference is unaffected**; only the console assistant is.
 - Confirm: the `lightspeed-app-server` pod is `1/2`, and its log shows `AADSTS700016`:
   `oc -n openshift-lightspeed logs deploy/lightspeed-app-server -c lightspeed-service-api --tail=50 | grep -iE "AADSTS|LLM connection"`
 - **Fix:** point it at the workshop's MaaS (`adm maas show` prints your endpoint and model):
@@ -426,11 +425,6 @@ Re-syncing `workshop-config` re-runs it.
 - Done when the pod is `2/2`. Reload the console tab.
 - The key now lives in two places. `adm maas set` updates only `ogsr-system`; update
   `openshift-lightspeed/ogsr-maas-apitoken` yourself after a rotation.
-
-### MTA: attendees see each other's applications
-
-Expected — one shared Hub. Attendees name theirs `parasol-legacy-claims-<user>`. `ws reset` does not
-remove them; delete stale ones in the MTA console between cohorts.
 
 ### A hook Job fails immediately
 

@@ -79,9 +79,6 @@ MIRROR_ORG="${WS_MIRROR_ORG:-parasol}"
 MIRROR_REPO="${WS_MIRROR_REPO:-ocp-getting-started}"
 SOURCE_REVISION="${WS_REVISION:-main}"
 SHOWROOM_NS="${WS_SHOWROOM_NS:-ogsr-showroom}"
-# Shared MTA Hub (platform stack). Its portfolio lives in the Hub's own DB rather than in an
-# attendee namespace, which is why prep has to reach it explicitly — see purge_mta_apps (U8-F-01b).
-MTA_NS="${WS_MTA_NS:-openshift-mta}"
 PARASOL_IMAGES_NS="${WS_PARASOL_IMAGES_NS:-ogsr-parasol-images}"
 
 # `ws smoke` targets the LIVE cockpit pod — the shared `showroom-shared` where one exists, else the
@@ -696,18 +693,6 @@ meta_rbac() {  # module user → ws-meta purgeRbac entries (ns/kind/name) with $
   meta_list "$meta" purgeRbac | while read -r item; do echo "${item//\$\{USER\}/${2}}"; done
 }
 
-meta_mta_apps() {  # module user → ws-meta purgeMtaApps entries with ${USER} resolved
-  # U8-F-01b. MTA's portfolio lives in the Hub's OWN database, not in the attendee's namespace, so
-  # purge_ns cannot see it and a reset leaves the previous run's application behind. The lab papered
-  # over this by telling the attendee to go delete it by hand in a web UI before re-running
-  # (app-modernization lab.adoc: "delete the parasol-legacy-claims-{user} Application to re-run the
-  # 'add app' beat cleanly"). Self-service prep is supposed to mean the attendee never has to do
-  # that, so ws does it.
-  local meta="${ENTRY_DIR}/${1}/ws-meta.yaml" item
-  [[ -f "$meta" ]] || return 0
-  meta_list "$meta" purgeMtaApps | while read -r item; do echo "${item//\$\{USER\}/${2}}"; done
-}
-
 meta_wait() {  # module → per-module sync-wait seconds (ws-meta waitSeconds); empty = engine default.
   # Modules whose hooks do real work (m07 solve runs a ~9-min pipeline) declare a longer window.
   local meta="${ENTRY_DIR}/${1}/ws-meta.yaml"
@@ -816,13 +801,6 @@ purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve s
   # red-fails the next entry verify — the sibling of the istio/knative purge gaps above. No-op on
   # clusters without RHSI (the skupper.io CRDs absent).
   oc delete sites.skupper.io,links.skupper.io,listeners.skupper.io,connectors.skupper.io,accessgrants.skupper.io,accesstokens.skupper.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
-  # MTA/Tackle namespaced CRs the app-modernization attendee could drop in {user}-modernize aren't in
-  # `oc delete all`. MTA's portfolio state (Applications, assessments, analyses) lives in the shared
-  # Tackle Hub DB — NOT as per-user k8s CRs — so today this is defensive: it purges any namespaced
-  # tackle.konveyor.io Task/Addon/Extension a future lab beat might create in the user namespace,
-  # matching the istio/knative idiom above. No-op on clusters without MTA installed (the tackle CRDs
-  # are absent) or on non-app-modernization namespaces (nothing of these kinds is present).
-  oc delete tasks.tackle.konveyor.io,addons.tackle.konveyor.io,extensions.tackle.konveyor.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
   # And STRIP the sidecar-injection labels the service-mesh-advanced-gateways attendee added when
   # enrolling. The {user}-mesh namespace is workshop-layer (survives reset) and keeps its STABLE
   # istio-discovery label, but a leftover istio-injection / istio.io/rev would inject sidecars into the
@@ -858,9 +836,9 @@ purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve s
     done
   done
   # Roles/RoleBindings the attendee CREATED during a lab aren't in `oc delete all` and survive reset —
-  # e.g. ai-assisted-development Ex3's mcp-agent-deployer Role+RoleBinding granting the agent SA write.
-  # An RBAC-teaching module that leaves RBAC behind red-fails the next entry verify (scoped_write_absent)
-  # AND leaves a stale write grant live. Delete every Role/RoleBinding that is NOT platform-owned; PRESERVE:
+  # e.g. multi-tenancy-workload-security's least-privilege custom Role (and, before it retired,
+  # ai-assisted-development's agent write grant). An RBAC-teaching module that leaves RBAC behind
+  # red-fails the next entry verify AND can leave a stale write grant live. Delete every Role/RoleBinding that is NOT platform-owned; PRESERVE:
   #   • workshop.redhat.com/owner=ogsr → workshop-config per-user grants ({user}-admin/-monitoring-edit)
   #                                       + entry-state grants (maas-copy-*); re-created on materialize.
   #   • app.kubernetes.io/managed-by   → operator/controller-managed (student-gitops argocd-* Role+RB).
@@ -1047,49 +1025,6 @@ purge_apps() {  # module user [keep-module] — delete the user's Application/Ap
 # side of the namespace purge, and cmd_reset can only collapse its double-purge if it can place
 # them itself. cmd_start/cmd_solve, entered directly, still call the combined gc_conflicts below
 # and behave exactly as before.
-purge_mta_apps() {  # module user — delete the attendee's OWN applications from the shared MTA Hub
-  # U8-F-01b. Only ever deletes names the module DECLARES (ws-meta purgeMtaApps, ${USER}-resolved),
-  # never a wildcard sweep: the Hub is shared with the whole cohort and is unauthenticated, so a
-  # loose match here would delete a colleague's work — the exact failure mode user8 flagged as HIGH.
-  # No-op for every module that declares nothing, which is all of them but one.
-  local module="$1" user="$2" wanted host id name
-  wanted="$(meta_mta_apps "$module" "$user")"
-  [[ -n "${wanted// }" ]] || return 0
-  host="$(oc get route -n "$MTA_NS" -o jsonpath='{.items[0].spec.host}' 2>/dev/null || true)"
-  if [[ -z "$host" ]]; then
-    info "MTA Hub route not found in ${MTA_NS} — skipping portfolio cleanup (nothing else is affected)"
-    return 0
-  fi
-  # The Hub answers anonymously (verified live 2026-08-05: GET /hub/applications → 200). If that ever
-  # changes, this degrades to a message rather than failing the reset — prep must stay usable.
-  local list
-  list="$(curl -ksf --max-time 20 "https://${host}/hub/applications" 2>/dev/null || true)"
-  if [[ -z "$list" ]]; then
-    info "MTA Hub did not answer — skipping portfolio cleanup (re-run prep, or delete the app in the MTA console)"
-    return 0
-  fi
-  while read -r name; do
-    [[ -n "$name" ]] || continue
-    # Exact-name match, resolved to an id by the Hub's own listing — never a substring.
-    id="$(printf '%s' "$list" | python3 -c "
-import json,sys
-want=sys.argv[1]
-try:
-    for a in json.load(sys.stdin):
-        if a.get('name')==want:
-            print(a.get('id')); break
-except Exception:
-    pass
-" "$name" 2>/dev/null || true)"
-    [[ -n "$id" ]] || continue
-    if curl -ksf --max-time 20 -X DELETE "https://${host}/hub/applications/${id}" >/dev/null 2>&1; then
-      ok "removed MTA application ${name} (id ${id}) — the 'add app' beat starts clean"
-    else
-      info "could not remove MTA application ${name} — delete it in the MTA console if the lab asks you to re-add it"
-    fi
-  done <<< "$wanted"
-}
-
 gc_conflicts_apps() {  # user module — purge CONFLICTING modules' attendee-created Argo apps
   # Runs BEFORE any namespace purge. The conflicting module's attendee-created Argo apps
   # (ws-meta purgeApps*) live in a control-plane ns and would keep selfHeal-ing its world back
@@ -1845,9 +1780,6 @@ cmd_reset() {
   #     namespace still populated.
   purge_apps "$module" "$user"
   gc_conflicts_apps "$user" "$module"
-  # Off-cluster state the namespace purge below cannot see (U8-F-01b). No-op unless the module
-  # declares purgeMtaApps.
-  purge_mta_apps "$module" "$user"
   local ns
   for ns in $(meta_namespaces "$module" "$user"); do purge_ns "$ns" "$module"; done
   purge_meta_rbac "$module" "$user"
@@ -3017,8 +2949,11 @@ DOCTOR_ATTR_SENTINELS='set-from-cluster|set-from-ogsr-maas-credentials'
 # same discipline the "parasol images" row states for its image set, and for the same reason: this
 # list is what stops the check red-flagging a cockpit whose AI modules are switched off, where an
 # absent maas_model is correct and nobody can see a placeholder. Derived by grep over
-# content/modules/ROOT/pages, 2026-08-07.
-DOCTOR_MAAS_MODULES="agentic-ai ai-assisted-development app-modernization"
+# content/modules/ROOT/pages, 2026-08-07. EMPTY since 2026-11-12: the three modules that rendered
+# those attributes (app-modernization, agentic-ai, ai-assisted-development) left the catalog, and
+# jobs-batch-kueue reads its model at runtime from maas-config, never from a page. Empty means an
+# absent maas_model is not graded; a passed-through sentinel VALUE is still caught above.
+DOCTOR_MAAS_MODULES=""
 
 doctor_cockpit_attr_findings() {  # <cockpit label> <user_data.yml body> → one finding per line; rc 0
   # PURE: no cluster reads, no globals written. The caller does the reading and owns the ⚠/➖/❌
@@ -3114,7 +3049,7 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
   fi
   printf "  %-28s" "argo applications"
   # An entry-*-<user> app for a module whose ws-meta.yaml declares expectDegraded (an intentional-fault
-  # seed, e.g. ai-assisted-development's broken 0/1 Deployment) is Degraded/OutOfSync BY DESIGN — ws
+  # seed; the retired ai-assisted-development's broken 0/1 Deployment was one) is Degraded/OutOfSync BY DESIGN — ws
   # start/solve already know this (meta_expect_degraded, wait_materialized) and never fail on it. This
   # row used to red-flag the same app as unhealthy: a false ❌ on a module that is working exactly as
   # designed destroys attendee/SA trust in every OTHER ✅ (the repo's own rule). Split those out here
@@ -4699,8 +4634,8 @@ diag_entry_app() {  # app user — print one entry app's sync/health/op-phase + 
   # Annotates "(Degraded by design)" using the SAME live-label-first/ws-meta-fallback pattern as
   # cmd_doctor/entry_app_ok: prefer the live workshop.redhat.com/degraded-by-design label (render_app,
   # from ws-meta expectDegraded) and fall back to a local meta_expect_degraded read for an app
-  # materialized before the label existed. Without this an SA running `ws diag` against
-  # ai-assisted-development sees a bare "Degraded" with no way to tell "unhealthy on purpose" from
+  # materialized before the label existed. Without this an SA running `ws diag` against a
+  # module that declares expectDegraded sees a bare "Degraded" with no way to tell "unhealthy on purpose" from
   # "actually broken" — exactly the ambiguity the label exists to remove. The entry-* guard is kept:
   # only an app named entry-* may be excused this way, matching cmd_doctor/entry_app_ok (module is
   # derived from the entry-<module>-<user> name shape callers already use — app_name's own format).
@@ -4886,9 +4821,10 @@ MAAS_NS="${WS_MAAS_NS:-ogsr-system}"
 MAAS_SECRET="${WS_MAAS_SECRET:-ogsr-maas-credentials}"
 MAAS_LIGHTSPEED_NS="${WS_MAAS_LIGHTSPEED_NS:-openshift-lightspeed}"
 MAAS_LIGHTSPEED_SECRET="${WS_MAAS_LIGHTSPEED_SECRET:-credentials}"
-# The four modules whose entry states carry a MaaS converge hook (each chart's maas-credentials.yaml).
+# The modules whose entry states carry a MaaS converge hook (each chart's maas-credentials.yaml) —
+# one since 2026-11-12, when app-modernization, agentic-ai and ai-assisted-development retired.
 # Keep in lockstep with `grep -l maasWorkshopSecret gitops/entry-states/*/values.yaml`.
-MAAS_MODULES="agentic-ai ai-assisted-development app-modernization jobs-batch-kueue"
+MAAS_MODULES="jobs-batch-kueue"
 MAAS_VARS_DEFAULT="${REPO_ROOT}/bootstrap/vars.yaml"
 
 maas_api_base() {  # endpoint → the OpenAI-compatible base ending in /v1 (same normalization as
@@ -4913,10 +4849,11 @@ maas_is_placeholder() {  # value → 0 when it is an unfilled vars.example.yaml 
 # ── ws by-design ─────────────────────────────────────────────────────────────────────────────────
 # The operator's answer to "this app is Degraded / OutOfSync — is that expected?", in one command.
 #
-# WHY IT EXISTS. Two entry states are red at rest and both are correct: ai-assisted-development seeds a
-# 0/1 Deployment (diagnosing it IS the module) and agentic-ai's grounding ConfigMap goes OutOfSync the
-# moment the attendee does the lab (entry apps run selfHeal=false precisely so their edit survives).
-# Nothing on the Argo dashboard distinguished either from a real outage: on 2026-08-13 the project lead
+# WHY IT EXISTS. Some entry states are red at rest and correct: the first two were the since-retired
+# ai-assisted-development (a seeded 0/1 Deployment — diagnosing it WAS the module) and agentic-ai (a
+# grounding ConfigMap that went OutOfSync the moment the attendee did the lab; entry apps run
+# selfHeal=false precisely so their edit survives). Nothing on the Argo dashboard distinguished either
+# from a real outage: on 2026-08-13 the project lead
 # started debugging the seeded fault before catching it. The charts now stamp the objects themselves
 # (entry-states/README.md rule 7); this reads those stamps back.
 #
@@ -5167,7 +5104,7 @@ cmd_maas_show() {  # READ-ONLY. [user] scopes the verdict block to one attendee.
   if [[ -z "${rows//[[:space:]]/}" ]]; then
     echo "  (none — no AI module entry state is materialized on this cluster yet)"
     echo
-    echo "Summary: nothing to report — materialize one with: ${WS_CMD} ${WS_VERB} agentic-ai --user user1"
+    echo "Summary: nothing to report — materialize one with: ${WS_CMD} ${WS_VERB} jobs-batch-kueue --user user1"
     return 0
   fi
   printf "  %-18s %-26s %-18s %-9s %s\n" "NAMESPACE" "MODULE" "MODEL" "AI PATH" "SOURCE"
@@ -5216,7 +5153,7 @@ cmd_maas_show() {  # READ-ONLY. [user] scopes the verdict block to one attendee.
   if [[ -n "$scope_user" ]]; then users="$scope_user"; fi
   local n_work=0 n_deg=0 n_unk=0 n_na=0
   # Degraded and unknown are tracked SEPARATELY, each carrying its own module's reason. Folding them
-  # into one reason list reads as "app-modernization is broken because no-verdict-recorded", which
+  # into one reason list reads as "jobs-batch-kueue is broken because no-verdict-recorded", which
   # names the wrong module for the wrong cause — the kind of near-miss that sends an SA down a blind
   # alley. Each module is named next to the reason that is actually its own.
   for u2 in $users; do

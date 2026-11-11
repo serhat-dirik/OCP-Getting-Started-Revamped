@@ -11,7 +11,7 @@ them. Three real defects came out of that in two days, all found by hand:
     have silently lost Application Logging from the catalogue table. Nothing rendered differently
     for anyone who had both enabled, which is why it survived review.
   * 2026-08-22 — the same insertion left the README saying "26 modules" in four places and giving
-    Day 3 as `M18–M26` over a 27-module catalogue.
+    Day 3 a module range that stopped one short of the 27-module catalogue.
   * 2026-08-23 — a reordering script dropped three section headers (`.B`, `.C`, `.D`) out of
     nav-workshop.adoc. `check-module-order.sh` passed: it asserts module ORDER, and a missing
     section header is not a module. A green tick over a real regression.

@@ -60,10 +60,11 @@ CANARY_DIR = pathlib.Path(__file__).resolve().parent / "devworkspace-editor-guar
 
 # The floor a DEFAULT (whole-tree) run may not fall below. If CHART_GLOB ever stops matching, the
 # scan loop runs zero times and the guard prints "0 DevWorkspace(s) ... ✅" — a guard that
-# inspected nothing is indistinguishable from one that inspected everything. Two charts have
-# shipped a DevWorkspace since 2026-07-18, and both must RENDER one, not merely be visited: a
-# template gated behind a value we do not set would otherwise pass as "scanned, nothing found".
-MIN_WORKSPACES = 2
+# inspected nothing is indistinguishable from one that inspected everything. Two charts shipped a
+# DevWorkspace from 2026-07-18; one since 2026-11-12, when ai-assisted-development retired. It must
+# RENDER one, not merely be visited: a template gated behind a value we do not set would otherwise
+# pass as "scanned, nothing found".
+MIN_WORKSPACES = 1
 GITOPS = ROOT / "gitops"
 
 # Rendering is deliberate rather than pattern-matching the template text: `uri:` can arrive through

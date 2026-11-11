@@ -295,7 +295,7 @@ FLAVORS = {"demo": frozenset({"demo"}), "nondemo": frozenset({"workshop"})}
 MODELLED = frozenset({"demo", "workshop", "instructor"})
 
 MIN_PAGES = 100          # 141 tracked .adoc pages today
-MIN_DEMO_REGIONS = 30    # 56 ifdef::demo[] openers today
+MIN_DEMO_REGIONS = 25    # 29 regions measured 2026-11-12, after three retired modules took their 4 demo openers with them
 MIN_SHELL_BLOCKS = 800   # 1162 measured on this tree; a smaller number is a broken block parser,
                          # and 968 was the number BEFORE `[tabs]` blocks became visible — a floor
                          # set from a broken measurement would have blessed that blindness
@@ -544,7 +544,7 @@ KINDS = {
         "move the DEFINITION out of `ifndef::demo[]` into a shared region OUTSIDE every guard, and "
         "put the demo arc's heading above it — one definition, rendered by all three flavors. See "
         "the SHARED SETUP A/B banners in "
-        "content/modules/ROOT/pages/ai-assisted-development/lab.adoc for the shape that works. Do "
+        "content/modules/ROOT/pages/securing-apps-keycloak/lab.adoc for the shape that works. Do "
         "NOT fix it by telling the presenter to read the other rendering, and do NOT copy the "
         "block into the demo region: a second copy is the same bug with a delay.",
     "use-before-definition":
