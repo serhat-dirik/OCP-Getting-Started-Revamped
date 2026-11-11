@@ -31,8 +31,8 @@ the cockpit.
 
 Before you order anything, settle three things — they drive the sizing math below:
 
-1. **How many attendees?** Sets `users` in `bootstrap/vars.yaml` and the sizing table's row
-   (Small/Normal/Large — [INSTALL.md §2](INSTALL.md#2-sizing-the-cluster)).
+1. **How many attendees?** Sets `users` in `bootstrap/vars.yaml` and the sizing table's column
+   ([INSTALL.md › Sizing](INSTALL.md#sizing)).
 2. **How long is the session?** [README's delivery table](README.md#workshop-content) gives four
    proven shapes — half-day taster, full-day essentials, 2-day core, and the 3-day full workshop —
    or assemble your own subset, since every module is self-contained. Read the module lists and the
@@ -48,30 +48,30 @@ Before you order anything, settle three things — they drive the sizing math be
    order:
    - Dropping the RHACS-dependent modules (app-security-testing, trusted-supply-chain) is "the
      single biggest lever" for a lean install — RHACS alone is ~26 Gi, 46% of the platform's
-     memory ([INSTALL.md §2](INSTALL.md#2-sizing-the-cluster)).
-   - Dropping `deployment-targets-scheduling` is the only way to run fewer than **five** workers —
-     that module alone is what forces the fifth (batch-pool) worker at every cohort size, because
-     it needs four *schedulable, non-batch* nodes plus one tainted batch node, not just aggregate
-     capacity. If it stays in scope, order five workers regardless of headcount.
+     memory ([INSTALL.md › Sizing](INSTALL.md#sizing)).
+   - `deployment-targets-scheduling` needs **5 schedulable worker-role nodes** and **3 dedicated
+     workers**. On RHDP OpenShift Base the control planes count, so 3 workers is enough; on a
+     cluster with tainted control planes, order 5 or drop the module
+     ([INSTALL.md › Node count](INSTALL.md#node-count)).
    - If any AI module is in scope (jobs-batch-kueue's batch inference, agentic-ai,
      ai-assisted-development, app-modernization's MTA Lightspeed step), you need an OpenAI-compatible
      model endpoint decided *now* — MaaS, an on-cluster vLLM runtime, or a public provider — since
      it's a `vars.yaml` input at install time, not something you bolt on live. Note MaaS keys are
      **model-scoped**: the key you get has to match the model you configure, or every AI-module call
-     fails with a generic auth error ([INSTALL.md §1](INSTALL.md#1-what-you-need)).
+     fails with a generic auth error ([INSTALL.md › Install, step 5](INSTALL.md#2-install)).
 
 ### Order the cluster
 
-Use the sizing table in [INSTALL.md §2](INSTALL.md#2-sizing-the-cluster) — worker count follows
-from cohort size *and* whether `deployment-targets-scheduling` is in scope, not from headcount
-alone. At Red Hat, order the OpenShift Field Asset item from the Red Hat Demo Platform (see
+Use [INSTALL.md › Sizing](INSTALL.md#sizing) and [Node count](INSTALL.md#node-count) — worker count
+follows from cohort size *and* whether `deployment-targets-scheduling` is in scope, not from headcount
+alone. At Red Hat, order the Field Sourced Content - OpenShift Base item from the Red Hat Demo Platform (see
 INSTALL.md for the catalog link); node count and shape are chosen at order time.
 
 **Lead time:** the repo does not prescribe a fixed number of days — the one hard rule is *get the
 cluster with enough lead time to install and smoke-test before the session, and never plan to
-install in front of the room* ([INSTALL.md §2](INSTALL.md#2-sizing-the-cluster)). Budget for the
+install in front of the room* ([INSTALL.md §1](INSTALL.md#1-before-you-order)). Budget for the
 install itself (15–20 minutes to the completion banner, more for operators to finish reconciling
-behind it — INSTALL.md §3.3), a full pre-flight pass, and time to fix whatever pre-flight finds —
+behind it — INSTALL.md §2, step 6), a full pre-flight pass, and time to fix whatever pre-flight finds —
 none of that should be happening the morning of the session.
 
 ---
@@ -80,7 +80,7 @@ none of that should be happening the morning of the session.
 
 ### Install and verify
 
-Follow [INSTALL.md §3–§4](INSTALL.md#3-installing) start to finish:
+Follow [INSTALL.md §2](INSTALL.md#2-install) start to finish:
 
 ```bash
 tools/ws/adm preflight                        # read-only: tooling, cluster access, adoption forecast
@@ -143,7 +143,7 @@ belongs to the retired per-user cockpit; against the shared one it reports `noth
 
 **If you pushed content or updated the workshop since installing**, do this — it re-clones each
 cockpit, fixing the "`ws prep` refused with an AppProject error" failure
-([README.md](README.md#starting-the-workshop), [INSTALL.md §7.2](INSTALL.md#72-ws-prep-fails-with-attendees-may-only-use-their-own-appproject)):
+([README.md](README.md#starting-the-workshop), [INSTALL.md](INSTALL.md#ws-prep-is-refused-own-appproject-only)):
 
 ```bash
 tools/ws/adm git-refresh --restart-terminals --all
@@ -257,7 +257,7 @@ code, not module-specific).
 ## 5. When something breaks
 
 The three failures most likely to actually happen in a live room, in the order you're likely to
-meet them, each drawn straight from [INSTALL.md §7](INSTALL.md#7-troubleshooting):
+meet them, each drawn straight from [INSTALL.md §5](INSTALL.md#5-troubleshooting):
 
 **1. An attendee's terminal says `Unauthorized` on the very first command.**
 Their *browser* sign-in lapsed, not the cluster. They fix it themselves: reload the cockpit page,
@@ -267,7 +267,7 @@ want to see it — an attendee who has never signed in has no home directory the
 ```bash
 oc exec deploy/showroom-shared -n ogsr-showroom -c terminal -- ls -l /homes/<userN>/.kube/config
 ```
-([INSTALL.md §7.1](INSTALL.md#71-attendees-get-unauthorized-on-their-first-command))
+([INSTALL.md](INSTALL.md#attendee-gets-unauthorized))
 
 **2. `ws prep` is refused: "attendees may only use their own AppProject."**
 The cockpit is running a stale copy of `ws` — this happens after you push a content update but
@@ -283,7 +283,7 @@ tools/ws/adm git-refresh --restart-terminals --all
 Non-zero means current (a current cockpit prints `3`), `0` means old. There is one cockpit now, and
 `ws` reaches it through a read-only mount of the build's clone at `/showroom/repo`, so there is no
 per-attendee `~/ocp-getting-started` to check.
-([INSTALL.md §7.2](INSTALL.md#72-ws-prep-fails-with-attendees-may-only-use-their-own-appproject))
+([INSTALL.md](INSTALL.md#ws-prep-is-refused-own-appproject-only))
 
 **3. An AI module (jobs-batch-kueue's batch step, agentic-ai, ai-assisted-development,
 app-modernization's Lightspeed step) returns an authentication error.**
@@ -294,11 +294,11 @@ generic. Diagnose per attendee, then fix without a reinstall:
 tools/ws/adm maas show          # per-attendee model/endpoint + working/degraded/unknown verdict
 tools/ws/adm maas set --model <model> --key-file <path>   # re-stage; re-converges every AI module live
 ```
-([INSTALL.md §7.9](INSTALL.md#79-ai-modules-return-authentication-errors))
+([INSTALL.md](INSTALL.md#ai-modules-fail-with-auth-errors))
 
 **Anything else:** collect the standard bundle before you escalate, then check the specific
 module's own `troubleshooting.adoc` (every module has one) and the rest of
-[INSTALL.md §7](INSTALL.md#7-troubleshooting) — it covers 13 total scenarios, including stuck
+[INSTALL.md §5](INSTALL.md#5-troubleshooting) — it also covers stuck
 `Terminating` namespaces, an Argo Application that won't sync, and OperatorGroup collisions on an
 adopted cluster:
 
@@ -328,7 +328,7 @@ exactly as installed:
 command, so you get the dry-run and the scripted ordering.)
 
 **Handing the cluster back to its owner instead** (delivery is over, not just the cohort) — see
-[INSTALL.md §6.3](INSTALL.md#63-removing-the-workshop-ogsr-uninstallsh) for the full picture, but
+[INSTALL.md](INSTALL.md#remove-the-workshop) for the full picture, but
 in short:
 
 ```bash
@@ -338,6 +338,6 @@ in short:
 ```
 
 **Cutting down to one attendee** (keeping a live sample for stakeholders, not a full teardown) uses
-`ogsr-wipe-users.sh` instead — see [INSTALL.md §6.2](INSTALL.md#62-cutting-down-to-one-attendee-ogsr-wipe-userssh)
+`ogsr-wipe-users.sh` instead — see [INSTALL.md §4](INSTALL.md#4-after-a-delivery)
 for its two harmless leftovers (a stale SonarQube account if the next cohort's password differs,
 and an unpruned Developer Hub catalog).

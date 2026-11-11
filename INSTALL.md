@@ -1,993 +1,462 @@
 # Installing the Workshop
 
-How to stand this workshop up on an OpenShift cluster, run a delivery, and clean up afterwards.
+Install, run and remove the workshop on an OpenShift cluster. Every command runs from a clone of this
+repo. `tools/ws/adm` is the operator CLI; attendees only get `ws` inside their cockpit.
 
-Most commands below are `adm`, the operator surface of the workshop CLI, run from a clone of this repo
-as `tools/ws/adm`. Attendees get `ws`, its four-verb attendee surface (`list`/`prep`/`verify`/`reset`),
-on their `PATH` inside their cockpit; you call `adm` by path.
-
-**Contents**
-
-1. [What you need](#1-what-you-need)
-2. [Sizing the cluster](#2-sizing-the-cluster)
-3. [Installing](#3-installing)
-4. [Verifying the install](#4-verifying-the-install)
-5. [Running the workshop](#5-running-the-workshop)
-6. [Ending a delivery](#6-ending-a-delivery)
-7. [Troubleshooting](#7-troubleshooting)
+1. [Before you order](#1-before-you-order)
+2. [Install](#2-install)
+3. [During a delivery](#3-during-a-delivery)
+4. [After a delivery](#4-after-a-delivery)
+5. [Troubleshooting](#5-troubleshooting)
+6. [What the install never changes](#6-what-the-install-never-changes)
 
 ---
 
-## 1. What you need
+## 1. Before you order
 
-### The cluster
+### Requirements
 
-| Requirement | Notes |
+| Need | Value |
 |---|---|
-| OpenShift **4.20+** | Verified on 4.22. The preflight check fails below 4.20. |
-| **cluster-admin** | The install creates operators, CRDs and cluster-scoped RBAC. |
-| A **default StorageClass** | The workshop provisions PVCs dynamically; several labs need RWX. |
-| **`linux/amd64` worker nodes** | **At least 3 dedicated workers** (worker role, not also control-plane) if you want the scheduling module taught in full — see [§2](#the-three-worker-taint-floor). |
-| Outbound registry access | Operators pull from Red Hat and Quay registries. |
-| Enough capacity | See [§2](#2-sizing-the-cluster). Get this right before you order — it is not adjustable later without disruption. |
+| OpenShift | 4.20 or newer (verified on 4.22) |
+| Access | `cluster-admin` |
+| Storage | A default StorageClass. Some labs need RWX. |
+| Nodes | `linux/amd64`. See [Node count](#node-count). |
+| Network | Outbound access to the Red Hat and Quay registries |
+| AI modules (optional) | An OpenAI-compatible chat-completions endpoint and key: Red Hat MaaS, vLLM, or a public provider. No GPU on your cluster. Without it, the AI modules are unavailable. |
+| Not supported | OpenShift Local, single-node clusters |
 
-An OpenShift Local / single-node cluster is not a supported target: see the sizing table for why.
+- **Red Hat SAs:** order [Field Sourced Content - OpenShift Base](https://catalog.demo.redhat.com/catalog/babylon-catalog-prod?item=babylon-catalog-prod/published.ocp-field-asset.prod)
+  from the Red Hat Demo Platform (internal). Set the worker count yourself — it does not default to 3.
+- The same catalog item can deploy the workshop for you through the `helm/bootstrap/` chart instead
+  of `bootstrap/install.sh`.
+- Install and smoke-test **the day before**. Never install in front of the room.
 
-### On the machine you install from
-
-| Tool | Why |
-|---|---|
-| `oc` | Logged in to the cluster as cluster-admin. |
-| `git` | Clone this repo; the installer seeds Git content from it. |
-| `yq` (mikefarah v4) | The installer reads all of its input from `vars.yaml`. |
-| `htpasswd` | Creates the attendee identity provider. Ships in `httpd-tools` / `brew install httpd`. |
-| `openssl` | Generates the attendee passwords and secrets. |
-
-The installer exits immediately with a clear message if any of these is missing.
-
-### A model endpoint (AI modules only)
-
-The AI modules call an **OpenAI-compatible chat-completions endpoint** — Red Hat Models-as-a-Service,
-an on-cluster vLLM runtime, or a public provider. You configure it in `vars.yaml`; no GPU is
-provisioned on your cluster. Skip it and the AI modules are simply unavailable.
-
-**MaaS keys are model-scoped.** A key issued for one model returns 401 against another, and the error
-does not say so. This is the most common cause of AI-module failures — see [§7.9](#79-ai-modules-return-authentication-errors).
-
----
-
-## 2. Sizing the cluster
-
-All figures measured on a live 8-attendee cluster.
-
-**The platform costs about 32 CPU / 56 Gi in requests** across ~170 pods, before a single attendee does
-anything. This is the number people underestimate.
-
-| Layer | Pods | CPU requests | Memory requests |
-|---|---|---|---|
-| Operators (RHACS, Keycloak, GitOps, mesh, MTA, Dev Spaces, …) | 132 | 27.3 | 47.6 Gi |
-| Workshop shared services (Gitea, cockpits, seeded apps) | 38 | 4.4 | 8.5 Gi |
-| 8 attendees, 1–2 modules each | ~27 | — | 6.5 Gi |
-
-**RHACS alone is 26 Gi — 46% of the platform's memory.** If you need to order lean, dropping the
-RHACS-dependent modules via `modules_disabled` is the single biggest lever you have.
-
-### What one attendee costs
-
-Plan for the **peak concurrent module**, not the sum of anyone's quota. Measured per attendee:
-
-| Module class | Per attendee at peak | Examples |
-|---|---|---|
-| Light | ~1 CPU / 1 Gi | networking, config, GitOps, observability |
-| Medium | ~2 CPU / 4 Gi | pipelines, the security-scanning runs |
-| **Heavy** | **~2.5 CPU / 0.5 Gi requested** (~4.25 Gi limit) | Dev Spaces workspace, MTA analysis, the AI modules |
-
-Working through one or two modules, attendees measured **2–6 pods, 0.3–1.1 Gi of requests, and
-28–514 Mi actually in use**. The per-user quota ceiling of 41 CPU / 82 Gi is a guard rail, not a
-forecast — nobody is ever in all thirteen of their namespaces at once.
-
-So the planning allowance is **2.5 CPU and 1.5 Gi of requests per attendee**: the heaviest module's
-CPU, plus enough memory for its workspace and the one or two other modules they have materialized.
-
-### What to order
+### Sizing
 
 ```
-total = 32 CPU / 56 Gi                (the platform, measured above)
-      + attendees × 2.5 CPU / 1.5 Gi  (assume everyone is on a heavy module at once)
-      + 20% headroom
+CPU    = 32  + attendees × 2.5    + 20%
+Memory = 56 Gi + attendees × 1.5 Gi + 20%
 ```
 
-Sized against a **32 vCPU / 64 GiB** worker — figure on roughly 30 CPU and 58 Gi of that being
-*allocatable* once kubelet and system reservations come out.
+- 32 CPU / 56 Gi is the platform before any attendee does anything (measured requests).
+- **CPU decides the worker count, not memory.** Each Dev Spaces workspace requests 2.5 CPU on one node.
+- Prefer fewer, larger workers. Below 16 vCPU per worker, capacity is stranded.
+- Size on requests, never on a `top` reading — a cluster that looks idle can still refuse a pod.
+- RHACS alone is 26 Gi. To order lean, disable the modules that use it (`modules_disabled`).
 
-| Workshop size | Attendees | Minimum allocatable | Workers by capacity | **Order** |
+Workers needed **by capacity** (allocatable ≈ vCPU − 2):
+
+| Worker size | 12 attendees | 20 | 25 | 30 |
 |---|---|---|---|---|
-| Small | 12 | ~74 CPU / ~89 Gi | 3 | **5** |
-| **Normal** | **20** | **~98 CPU / ~103 Gi** | **4** | **5** |
-| Large | 30 | ~128 CPU / ~121 Gi | 5 | **5** |
+| 16 vCPU / 64 GiB | 6 | 8 | 9 | 10 |
+| 24 vCPU / 96 GiB | 4 | 5 | 6 | 6 |
+| **32 vCPU / 64 GiB** | **3** | **4** | **4** | **5** |
+| 48 vCPU / 192 GiB | 2 | 3 | 3 | 3 |
 
-**Five 32 vCPU / 64 GiB workers runs any workshop up to 30 people.** Capacity is not what sets the
-floor below 30 — module topology is, and the next section explains why. If you order for capacity
-alone you will land on 3 or 4 workers and one module will not run.
+Then apply the node count below. **Five 32 vCPU / 64 GiB workers run any workshop up to 30 people.**
 
-**The `Order` column and the topology floor are two different numbers, and conflating them is the
-mistake this table invites.** `Order` is *capacity* — buy it for the cohort. The topology floor is a
-**count of schedulable `worker`-role nodes**, and **schedulable control planes count toward it**. So
-an RHDP *OpenShift Base* cluster ordered with **3 workers** presents 3 control planes + 3 workers =
-**6 schedulable nodes**, which clears the floor with five eligible after the batch taint — even
-though you bought three workers. Settle it with one command rather than arithmetic:
+### Node count
 
-```
-oc get nodes -l node-role.kubernetes.io/worker
-```
+Two floors, both on top of capacity:
 
-**Five or more rows and the floor is met** — the tainted batch node is one of them (it keeps the
-`worker` role), leaving the four non-batch nodes the module needs.
+1. **At least 3 dedicated workers** (worker role, not also control plane).
+   Below 3, the installer labels the batch node but does not taint it.
+2. **At least 5 schedulable `worker`-role nodes.** Control planes that also carry the worker role
+   count. Check:
 
-**CPU decides the capacity column, not memory.** Every row needs one to two more nodes for CPU than
-for memory, and the gap widens with the cohort. That is the Dev Spaces workspace: 2.5 CPU requested
-against 0.5 Gi. It is a large CPU reservation for something that mostly waits for a human to type,
-but requests are what the scheduler enforces, so requests are what you buy.
+   ```bash
+   oc get nodes -l node-role.kubernetes.io/worker   # 5 or more rows = OK
+   ```
 
-**Order fewer, larger nodes.** A workspace needs its 2.5 CPU on *one* node, so a 4 CPU worker can
-host exactly one and nothing else. Small nodes strand capacity you have paid for.
-
-**Do not size on a `top` reading.** Actual CPU ran 4–61 m per attendee against requests an order of
-magnitude higher. A cluster that looks 90% idle will still refuse to place a pod.
-
-> **The footprint grows with modules *materialized*, not modules *in progress*.** Starting a module
-> only evicts one that declares a conflict in the same namespace, so an attendee working through
-> several non-conflicting modules accumulates all of them until a reset. The figures above are for
-> one or two modules each; a cohort deep into the catalog sits higher. If a long delivery starts
-> crowding the cluster, resetting finished modules reclaims it.
-
-### Why five *schedulable* nodes, when capacity says three
-
-**One module needs free *nodes*, not just free totals — and that is what sets the floor.**
-
-*Deployment Targets & Scheduling* spreads three claims replicas across three distinct nodes with
-anti-affinity, then performs a rolling update whose `maxSurge` pod needs a fourth. So it wants **four
-nodes that can each still admit a 200m / 256Mi pod**, judged on requests rather than usage.
-
-Those four must be nodes the workload is allowed to use. The installer dedicates one worker to a
-**batch pool** — labelled `workshop.redhat.com/pool=batch` and tainted `NoSchedule` — so that the same
-module can teach node pinning against a node that genuinely repels pods. That worker does not count
-toward the four.
-
-**Four non-batch plus one batch is five**, at every cohort size. Aggregate headroom does not help
-here: a workload that must spread cannot borrow capacity from a node it is forbidden to use.
-
-What the module actually counts is **schedulable nodes that carry the `worker` role**, which is not
-always the same as nodes you bought as workers. On a compact cluster whose control planes also carry
-the worker role and are not tainted, they count — so five *schedulable* nodes can satisfy this with
-fewer dedicated workers. On a production-shaped cluster with tainted control planes, they do not
-count, and five workers is the number. Plan for five unless you know your control planes are
-schedulable; check with:
-
-```
-oc get nodes -l node-role.kubernetes.io/worker
-```
-
-**If you want to run leaner than five workers**, disable that module rather than hoping it fits:
-
-```yaml
-modules_disabled: [deployment-targets-scheduling]
-
-# …or, for a short workshop, say what you ARE teaching and let everything else drop:
-#   modules_enabled: [m1, m2, m3, m4, m5]
-# Empty or absent means the whole catalog. The two keys cannot both be set.
-```
-
-Then the capacity column governs — 3 workers for a small cohort, 4 for normal. `modules_disabled`
-works the same way for any heavy module: the operators still install, but no attendee can start it.
-
-**Two different floors, same module.** Five schedulable nodes is what the *anti-affinity spread*
-above wants; three dedicated workers is what the *batch-pool taint* wants, and that one
-`bootstrap/install.sh` enforces on your behalf — read the next section before you settle the node
-count.
-
-### The three-worker taint floor
-
-**Decide this before you order, not after you install.** The batch pool above is only half a lesson
-without its `NoSchedule` taint, and **`bootstrap/install.sh` withholds that taint on any cluster with
-fewer than three dedicated workers.**
-
-The rule, in `bootstrap/install.sh` (`MIN_BATCH_POOL_FOR_TAINT=3`): it counts nodes carrying the
-`worker` role that are **not** also control-plane, picks the first by name as the batch node, and
-labels it either way. It applies the taint only when that count is **3 or more**. Three is the
-smallest pool that can give up a worker and still leave two general-purpose workers standing. The
-floor exists because of a live failure on a two-worker cluster: one of the two was tainted, the
-survivor sat at 99% of memory requests, RHACS `central-db` stayed `Pending` for over three hours,
-Central crashlooped on a database that never came up, and the supply-chain module's scan gate was
-dead — while every Argo application reported `Healthy` throughout. Below the floor the installer
-therefore prints a `warn`, leaves the node labelled and fully schedulable, and (on a re-install of a
-cluster that has since shrunk) removes a taint an earlier run applied.
-
-**What you lose below three dedicated workers.** In *Deployment Targets & Scheduling*, the pinning
-exercise has two halves:
-
-| Half | Below the floor |
+| Cluster shape | Order |
 |---|---|
-| **`nodeSelector` attracts** — a pod asking for the pool label lands on the pool node | Works. A label never removes scheduling capacity. |
-| **A taint repels, and a toleration only permits** — patch the `nodeSelector` alone and the pod goes `Pending` with a `FailedScheduling` "untolerated taint", then *snaps* onto the pool node the moment the toleration is added | **Not demonstrable.** With no taint to refuse it, the selector-only patch schedules immediately. There is no `Pending` pod and no refusal event to read. |
+| RHDP OpenShift Base (3 control planes, also workers) | 3 workers, or more for capacity |
+| Control planes tainted (production-shaped) | 5 workers, or more for capacity |
 
-That break-and-fix moment — *refused, then admitted* — is the module's signature beat, and it is the
-only thing on the whole cluster the taint exists to make possible.
+Both floors exist for one module, `deployment-targets-scheduling`:
 
-**The workshop still runs.** This costs one beat in one module — nothing else on the cluster reads
-the taint, and no other module references the pool at all. The lab detects the situation itself: it
-has attendees check the node for the taint first, prints the "no `Pending` pod, and here is why"
-branch when there is none, and reframes the narration instead of pretending. Its expected-output
-blocks show both the tainted and the untainted cluster.
-
-**Never hand-taint a node to force the beat back.** That is exactly the two-worker configuration the
-floor was added to prevent, and it recreates the outage above. If you need the full lesson, order the
-third worker.
-
-> **The floor is enforced by `bootstrap/install.sh` only.** The `helm/bootstrap/` node-shaping Job —
-> the chart route described under [Where to get a cluster](#where-to-get-a-cluster) — currently taints
-> the batch node **unconditionally**, with no worker count check. On a cluster with fewer than three
-> dedicated workers, drive the install from `bootstrap/install.sh`, or check the node afterwards
-> (`oc get nodes -l workshop.redhat.com/pool=batch`) and remove the taint if it landed on a two-worker
-> cluster. Tracked as a divergence between the script and its declarative twin.
-
-If you are on a **compact** cluster — every node carrying both the control-plane and worker roles —
-the "dedicated worker" count comes back empty and the installer falls back to counting *all* nodes,
-so a standard three-node compact cluster is at the floor and does get the taint, on a node that is
-also a control plane. That is supported, but it is a tighter cluster than the sizing table above
-assumes; read [what one attendee costs](#what-one-attendee-costs) before committing to it.
-
-### Where to get a cluster
-
-**At Red Hat:** order the **OpenShift Field Asset** item from the Red Hat Demo Platform (internal):
-
-> https://catalog.demo.redhat.com/catalog/babylon-catalog-prod?item=babylon-catalog-prod/published.ocp-field-asset.prod
-
-Node count and shape are chosen at order time. This is also the target this repo's `helm/bootstrap/`
-chart is built for, so a delivery can be driven either by running `bootstrap/install.sh` yourself or by
-pointing the catalog item at the chart.
-
-Whichever route: get the cluster with enough lead time to **install and smoke-test before the session**.
-Never plan to install in front of the room.
+- **Fewer than 5 worker-role nodes:** disable it — `modules_disabled: [deployment-targets-scheduling]`.
+- **Fewer than 3 dedicated workers:** the install succeeds. The module's `nodeSelector` half runs; its
+  taint/toleration half cannot be shown, and `adm verify` reports it not-applicable.
+- **Never hand-taint a node to get the beat back.** On two workers that starved RHACS for hours.
+- **Compact 3-node cluster** (every node is control plane + worker): it gets the taint. Supported, but tight.
+- **The `helm/bootstrap/` chart taints unconditionally.** On fewer than 3 workers, use
+  `bootstrap/install.sh`, or remove the taint from `oc get nodes -l workshop.redhat.com/pool=batch`.
 
 ---
 
-## 3. Installing
+## 2. Install
 
-### 3.1 Preflight (read-only)
+1. **Clone the repo.**
 
-```bash
-tools/ws/adm preflight
-```
+   ```bash
+   git clone https://github.com/serhat-dirik/OCP-Getting-Started-Revamped.git
+   cd OCP-Getting-Started-Revamped
+   ```
 
-Checks local tooling, cluster access, version, StorageClass and the worker count, then prints an
-**adoption forecast** for the *cluster-scoped* things an install would otherwise change — the GitOps
-operator, Lightspeed, user-workload monitoring, the default GatewayClass and the OAuth identity
-provider:
+2. **Check your tools:** `oc`, `git`, `yq` (mikefarah v4), `htpasswd` (`httpd-tools`, or
+   `brew install httpd`), `openssl`. The installer stops with a clear message if one is missing.
 
-```
-▶ Adoption forecast (preview only — nothing is changed)
-  • OpenShift GitOps                 ADOPT — operator present; install reuses it, uninstall preserves it
-  • OpenShift Lightspeed             ADOPT — OLSConfig present; ai-assist skipped, existing provider reused
-  • user-workload monitoring         ADOPT — enableUserWorkload already true; left as-is
-```
+3. **Log in as cluster-admin.** Use a kubeconfig file of its own, so other terminals and tools keep
+   pointing where they were:
 
-**On a customer cluster, show this to the customer before installing.** It is the moment to catch a
-component you did not expect them to have.
+   ```bash
+   export KUBECONFIG=~/.kube/workshop.config
+   oc login --web https://api.<cluster-domain>:6443
+   ```
 
-**Those rows are not the whole picture.** Every *operator* is decided separately, per portfolio
-component, by a rule `adm preflight` does not run — cert-manager, Pipelines, RHACS and the rest never
-appear in the forecast above. Preview that decision with the command in the next section before you
-install on a cluster you do not own.
+4. **Run the preflight.** Read-only; it changes nothing.
 
-A `⚠ prior install detected` row means the cluster already ran the installer. Re-running is idempotent;
-for a fresh cohort run `bootstrap/ogsr-reset.sh` ([§6](#6-ending-a-delivery)) rather than a full
-uninstall — reinstalling the platform costs far more time than resetting it.
+   ```bash
+   tools/ws/adm preflight
+   ```
 
-#### What the install does with an operator the cluster already has
+   It must end with `✅ ready to install`. On a customer cluster, **show them this output first.**
 
-The per-component plan comes from the portfolio installer itself. `--adoption-plan` prints the verdict
-and exits, applying nothing:
+   | Row | Meaning |
+   |---|---|
+   | `ADOPT` | They already have it. The workshop reuses theirs; uninstall leaves it. |
+   | `CREATE` | The workshop adds it; uninstall removes it. |
+   | `⚠ Argo CD controller memory` | Their Argo CD runs at 2Gi; the workshop needs 6Gi. The install asks before raising it (restarts their controller; uninstall restores it). |
+   | `⚠ prior install detected` | The installer ran here before. Re-running is safe. For a new cohort, use `ogsr-reset.sh` ([§4](#4-after-a-delivery)). |
 
-```bash
-platform-portfolio/argocd-bootstrap/install.sh \
-  --stacks "$(ls platform-portfolio/stacks | tr '\n' ',' | sed 's/,$//')" \
-  --adoption-plan
-```
+   The preflight does not cover each operator. To preview those too (also read-only):
 
-One tab-separated line per component that is *not* simply installed — verdict, stack, component, child
-Application, namespaces, the org's Subscriptions, and the evidence. Components with nothing to adopt
-print nothing at all, so silence is the good answer.
+   ```bash
+   platform-portfolio/argocd-bootstrap/install.sh \
+     --stacks "$(ls platform-portfolio/stacks | tr '\n' ',' | sed 's/,$//')" --adoption-plan
+   ```
 
-That `--stacks` list is every stack in the repo, which is the widest form of the question. Your install
-requests only the stacks your `modules_disabled` leaves enabled, and prints them at phase 1 — so a
-verdict for a stack yours will not request is informational. `ai-assist` is the one to know about: on a
-cluster that already runs Lightspeed the workshop drops that stack before the preflight ever sees it.
+   No output means nothing to adopt. Otherwise, one line per operator:
 
-| Verdict | What the install does |
-|---|---|
-| `skip` | The org's operator is used and **ours is never installed** — the component's Argo Application is dropped from the rendered stack. Recorded as adopted, so the uninstall preserves their namespace, Subscription, CSV and OperatorGroup. |
-| `warn` | **Ours is installed alongside theirs**, in the same namespace, exactly as on a cluster with nothing to adopt. Nothing of theirs is deleted, and the install prints a ⚠ naming the namespace to check. |
-| `refuse` | Nothing is applied and the cluster is untouched. |
+   | Verdict | What the install does |
+   |---|---|
+   | `skip` | Uses theirs, never installs ours. Uninstall preserves it. Example: cert-manager on every RHDP cluster. |
+   | `warn` | Installs ours alongside theirs in the same namespace. Nothing of theirs is deleted. |
+   | `refuse` | Stops before changing anything: that namespace already has someone else's OperatorGroup. Drop the stack, or have the owner remove theirs. |
 
-A component is skipped only when **both** halves hold: it installs nothing but the operator (namespace
-+ OperatorGroup + Subscription, no other manifest), **and** dropping it would strand no sibling
-component that has no other source for that namespace or that operator's coverage. Either half failing
-means `warn`, not a refusal — a component wrongly kept costs an operator install nobody needed, while
-one wrongly skipped ships a workshop that is green and broken.
+   Also good to know: OpenShift GitOps and Lightspeed are reused if present. A Keycloak (RHBK)
+   elsewhere on the cluster is not touched — the workshop runs its own in `sso-workshop`.
 
-**A refusal is reserved for exactly one case:** a namespace we ship an OperatorGroup into already
-carries one that is not ours. Two OperatorGroups in a namespace make OLM fail *every* CSV there while
-the pods keep running — a silent break of an operator the cluster's owner installed
-([§7.5](#75-an-operator-the-cluster-owner-cares-about-stops-upgrading)). The install stops before
-applying anything and names the two ways forward: drop the stack that ships that component, or have the
-owner remove theirs first. **A blocked component no longer aborts the install** — it warns and installs
-alongside.
+5. **Configure.** All input is in one gitignored file; the installer takes no flags.
 
-What this means on the clusters you will actually meet:
+   ```bash
+   cp bootstrap/vars.example.yaml bootstrap/vars.yaml
+   ```
 
-| The cluster already runs | What happens |
-|---|---|
-| **cert-manager** (every RHDP cluster) | `skip`. Operator-only, and nothing depends on it for a namespace, so the workshop uses theirs and installs no cert-manager of its own. |
-| **OpenShift GitOps** | Reused — the existing Subscription is detected and no OperatorGroup of ours is applied. But see the prompt below: an adopted Argo CD is also the one place the install can stop and ask you a question. |
-| **OpenShift Lightspeed** | Reused. An `OLSConfig` on the cluster means the `ai-assist` stack is never requested at all and their provider stays. (Run the portfolio directly and *ask* for `ai-assist` on such a cluster and you get a `refuse` — the workshop installer never does.) |
-| **Red Hat build of Keycloak / RHBK** | **Both run.** The workshop's Keycloak lives in `sso-workshop`, a namespace only it creates, and RHBK can watch exactly one namespace — so an RHBK elsewhere is not an adoption signal, and there is no warning either. Theirs is untouched; ours is extra. This is also why teardown will not offer to delete the Keycloak CRDs ([§6.3](#63-removing-the-workshop-ogsr-uninstallsh)). |
+   | Key | Set it to |
+   |---|---|
+   | `users` | Attendee count (`user1`…`userN`). Change later with `adm scale-users N`. |
+   | `cluster_domain` | `""` to auto-detect |
+   | `workshop_user_password` | Shared attendee password. Memorable on purpose; not a secret. |
+   | `maas.endpoint` / `.model` / `.api_key` | The AI endpoint. **Keys are model-scoped**: a key for one model returns 401 on another. |
+   | `lightspeed` | `true` installs OpenShift Lightspeed on your model. Skipped automatically without a MaaS key, or when the cluster already has Lightspeed. |
+   | `modules_disabled` | Modules to leave out, e.g. `[m13, m22]`. Hidden from the cockpit, and their components are not installed. |
+   | `modules_enabled` | The opposite, e.g. `[m1, m2, m3, m4, m5]`. Empty means the whole catalog. Use one key or the other, not both. |
+   | `repo_url` / `repo_revision` | Where the content is mirrored from |
 
-> **An adopted Argo CD makes the install interactive.** The workshop needs the application-controller
-> at 6Gi — the operator default of 2Gi is OOMKilled part-way through materializing entry states, and
-> nothing ever syncs. On an Argo CD *we* install that is applied unconditionally; on an **adopted** one
-> it is a change to a resource the org owns that restarts their controller, so the installer prints the
-> prior value, asks `[y/N]`, and records what to restore before patching. **Answering no — or running
-> with no TTY — stops the install in preflight, before it has changed anything.** `tools/ws/adm preflight`
-> warns about it in advance. For an unattended run consent up front:
-> `OGSR_ADOPTED_ARGOCD_MEMORY=apply ./bootstrap/install.sh`.
+6. **Install.** About 15–20 minutes. Idempotent: re-run it freely.
 
-### 3.2 Configure
+   ```bash
+   ./bootstrap/install.sh
+   ```
 
-All input lives in one gitignored file. The installer takes no flags.
+   - Unattended run (no terminal to answer the Argo CD memory question):
+     `OGSR_ADOPTED_ARGOCD_MEMORY=apply ./bootstrap/install.sh`
+   - `⚠ <component>: …` means ours was installed alongside theirs. Note the namespace; you will
+     check it before uninstalling.
+   - A refusal stops the run with nothing changed.
+   - The final banner is not proof. Do step 7.
 
-```bash
-cp bootstrap/vars.example.yaml bootstrap/vars.yaml
-# edit bootstrap/vars.yaml
-```
+7. **Verify.**
 
-| Key | Meaning |
-|---|---|
-| `users` | Cohort size. Grow or shrink later with `adm scale-users N`. |
-| `cluster_domain` | The `apps.` ingress domain. Leave `""` to auto-detect. |
-| `modules_disabled` | Modules to hide from this delivery — `mNN` or slugs. A disabled module is hidden from the cockpit and its components are not installed. |
-| `workshop_user_password` | Shared attendee password. Deliberately memorable, not a secret. |
-| `maas.endpoint` / `.model` / `.api_key` | AI modules only. |
-| `repo_url` / `repo_revision` | Where content is mirrored from. |
+   ```bash
+   tools/ws/adm doctor        # login, Argo CD, Gitea, operators
+   tools/ws/adm status        # every platform app and every attendee
+   ```
 
-### 3.3 Install
+   Healthy looks like:
+   `Summary: 8 user(s) · 8/8 cockpit(s) ready · 0 entry app(s) · platform all-Synced ✅`
 
-```bash
-./bootstrap/install.sh
-```
+   The attendee-facing URLs (`<apps>` is the cluster's `apps.` domain):
 
-Six phases, idempotent — re-run it freely. Budget **15–20 minutes** to the completion banner, plus more
-for operators to finish reconciling behind it.
+   | | URL |
+   |---|---|
+   | Showroom (attendees) | `https://ogsr-showroom.<apps>` |
+   | SA Demos | `https://ogsr-demos.<apps>` |
+   | Etherpad (shared notes) | `https://ogsr-pad.<apps>/p/workshop` |
 
-Phase 0 runs the component adoption plan from [§3.1](#what-the-install-does-with-an-operator-the-cluster-already-has)
-against the live cluster, before anything is applied. **Read its output rather than scrolling past it:**
+   Then spot-check one module:
 
-- `✅ adopting this cluster's <component>` — theirs is used, ours is never installed.
-- `⚠ <component>: …` — **ours is being installed alongside theirs.** The line names the namespace and
-  the `oc get subscriptions.operators.coreos.com -n <ns>` to run. Worth a look now, and worth noting
-  before you tear the cluster down: the uninstall snapshot keys on *our* Subscription name, so an
-  operator the org named something else is not recorded as adopted.
-- A refusal stops the run there, with nothing applied.
+   ```bash
+   tools/ws/adm start m01 --user user1
+   tools/ws/ws verify m01 --user user1
+   tools/ws/ws reset  m01 --user user1
+   ```
 
-It ends with a summary of what it adopted, and of which adopted resources are annotated
-`Prune=false,Delete=false` so a cascade uninstall cannot reach them.
-
-**Do not judge success by the banner.** Confirm with §4.
+   `verify` checks the state you are in: before the lab it expects the lab undone, after the lab it
+   expects it done. Run it at the wrong point and the result means nothing.
 
 ---
 
-## 4. Verifying the install
+## 3. During a delivery
 
-```bash
-tools/ws/adm doctor                 # is the environment sane? (login, Argo, Gitea, operators)
-tools/ws/adm status                 # cohort dashboard: every platform app + every attendee
-tools/ws/adm status --user user1    # one attendee: namespaces + quota headroom
-```
-
-A healthy cluster looks like:
-
-```
-Summary: 8 user(s) · 8/8 cockpit(s) ready · 0 entry app(s) · platform all-Synced ✅
-```
-
-Then spot-check one module end to end:
-
-```bash
-tools/ws/adm start m01 --user user1
-tools/ws/ws verify m01 --user user1
-tools/ws/ws reset  m01 --user user1
-```
-
-**Verify is mode-split.** At entry state it asserts the attendee has *not* done the lab yet; after the
-lab it asserts the outcomes. A ✅ at the wrong point means nothing, so do not "confirm" a module by
-running verify at the wrong time.
-
----
-
-## 5. Running the workshop
-
-Attendees self-serve from their cockpit (`ws prep`, `ws verify`, `ws reset`). These are the admin-side
-commands.
+Attendees self-serve with `ws prep`, `ws verify` and `ws reset`. Your commands:
 
 | Task | Command |
 |---|---|
-| Materialize a module for someone stuck | `tools/ws/adm start <module> --user userN` |
-| Show the finished state — **instructor only** | `tools/ws/adm solve <module> --user userN` |
+| Set up a module for someone stuck | `tools/ws/adm start <module> --user userN` |
+| Show the finished state (instructor only) | `tools/ws/adm solve <module> --user userN` |
 | Put someone back to the start | `tools/ws/ws reset <module> --user userN` |
-| Rotate the shared password | `tools/ws/adm passwd [NEWPASS]` |
+| Change the shared password | `tools/ws/adm passwd [NEWPASS]` |
 | Grow or shrink the cohort | `tools/ws/adm scale-users N` |
-| Push new content to cockpits | `tools/ws/adm git-refresh --restart-terminals --all` |
-| Change the AI model or rotate the key | `tools/ws/adm maas set` |
-| Check what the AI modules run on | `tools/ws/adm maas show` |
-| Are any pods running an old image? | `tools/ws/adm rebuild-images --check` |
+| Push content changes to the cockpits | `tools/ws/adm git-refresh --restart-terminals --all` |
+| See what the AI modules run on | `tools/ws/adm maas show` |
+| Change the AI model or key | `tools/ws/adm maas set` |
+| Find pods on an old image | `tools/ws/adm rebuild-images --check` |
 | Rebuild an app image everywhere | `tools/ws/adm rebuild-images --image <name> --all` |
 
-### 5.1 Publishing content updates mid-session
+**Push content changes**
 
-Each cockpit builds its content from the in-cluster Gitea mirror **when its pod starts**. So the order
-matters: sync the mirror, wait until its HEAD matches origin, *then* restart the cockpits. Restarting
-early serves stale content and looks like your change never landed.
+- `adm git-refresh --restart-terminals --all` syncs the mirror, waits until it matches origin, then
+  restarts the cockpits. Cockpits read content only at pod start, so this order matters.
+- A scope is required: `--all` or `--user U`. Without one it restarts nothing.
+- Run it between modules, never mid-exercise.
 
-One command does the sequencing:
-
-```bash
-tools/ws/adm git-refresh --restart-terminals --all
-```
-
-A scope is required — `--restart-terminals` on its own refuses with "restart needs a target" and
-restarts nothing. Use `--user <u>` for one session or `--all` for the cohort. Run it between modules,
-never mid-exercise.
-
-### 5.2 Changing the AI model or rotating the key
-
-**No reinstall needed.** Each AI module reads its model and endpoint from a ConfigMap and its key from a
-Secret at runtime; `adm maas` is the entry point to them.
+**Change the AI model or rotate the key** — no reinstall.
 
 ```bash
-tools/ws/adm maas show                            # what are the AI modules actually running on?
-tools/ws/adm maas set --model qwen3-14b           # same key, different model
-tools/ws/adm maas set --key-file ~/new-maas.key   # rotate the key, keep model + endpoint
-pbpaste | tools/ws/adm maas set --key-stdin       # paste a key without it touching disk or history
+tools/ws/adm maas set --model qwen3-14b           # same key, other model
+tools/ws/adm maas set --key-file ~/new-maas.key   # new key, same model
+pbpaste | tools/ws/adm maas set --key-stdin       # key never touches disk or shell history
+tools/ws/adm maas show                            # every attendee should read "working"
 ```
 
-Any value you do not supply falls back to `vars.yaml`, then to what is already on the cluster.
+- Nothing changes until the key, endpoint and model pass a live test together; a 401/403 is refused.
+- There is no `--key <value>` flag on purpose: `ps` would show it to every user on the machine.
+- Attendees' AI modules pick up the change without losing their lab work.
 
-There is deliberately **no `--key <value>` flag** — a key on the command line is readable by every user
-on the machine via `ps`.
-
-**Nothing is staged until the key, endpoint and model are proven together.** `adm maas set` checks the
-key's shape, asks the endpoint's `/v1/models` whether it offers your model, then spends one token on a
-real completion. A 401/403 refuses the change and cannot be overridden. All three values are written
-together, because a key from one source paired with an endpoint from another is a known way to break a
-running cluster.
-
-Afterwards it re-converges every AI module for every attendee who has one materialized — without
-touching their lab work. Safe mid-session and safe to run twice. Scope with `--user userN`, or skip with
-`--no-converge`. Finish with `adm maas show` and confirm each attendee reads `working`.
-
-### 5.3 Rebuilding an app image mid-cluster
-
-`oc start-build` produces a new image but does **not** put it into anything already running — a
-container keeps its digest until something rolls it.
+**Rebuild an app image**
 
 ```bash
-tools/ws/adm rebuild-images --check                        # read-only: which pods are behind?
-tools/ws/adm rebuild-images --image parasol-claims --all   # build, then roll every stale consumer
-tools/ws/adm rebuild-images --no-build --user user3        # roll one attendee against current tags
+tools/ws/adm rebuild-images --check                        # read-only; exits 1 if anything is behind
+tools/ws/adm rebuild-images --image parasol-claims --all   # build, then roll only stale pods
+tools/ws/adm rebuild-images --no-build --user user3        # roll one attendee
 ```
 
-It compares the digest each **running pod** reports against the digest its ImageStream tag points at
-now — the workload spec cannot answer this, since it says `parasol-claims:1.1` before and after.
+- Knative Services cannot be rolled. Use `ws reset <module> --user userN` instead.
 
-- **A rebuild that changed nothing restarts nothing**, so it is safe against a live cohort.
-- **`--check` exits 1 when anything is behind**, so it works as a pre-session gate. It never builds or
-  restarts.
-- **Knative Services cannot be rolled** — a ksvc needs a new Revision, and the serverless entry states
-  pin revision names. Re-materialize instead: `ws reset <module> --user userN`.
+**Long deliveries:** each module an attendee starts stays on the cluster until reset. If the cluster
+gets crowded, reset finished modules.
 
 ---
 
-## 6. Ending a delivery
+## 4. After a delivery
 
-Install once. What you run next depends on what you are doing.
-
-| Command | Scope | Use when |
+| Command | Removes | Use when |
 |---|---|---|
-| `tools/ws/ws reset <module> --user U` | One attendee, one module | Someone wants to redo an exercise |
-| `./bootstrap/ogsr-reset.sh` | All attendee lab content; platform and every account stay | **End of a delivery, same cluster hosts the next cohort — the normal path** |
-| `./bootstrap/ogsr-wipe-users.sh` | `user2`…`userN` removed; `user1` kept as a working sample | Cutting the cluster down to one attendee |
-| `./bootstrap/ogsr-uninstall.sh` | Everything the workshop created | Giving the cluster back to its owner |
+| `tools/ws/ws reset <module> --user U` | One module, one attendee | Someone wants a redo |
+| `./bootstrap/ogsr-reset.sh` | All lab work. Platform, accounts, Gitea, Keycloak and cockpits stay. | **Next cohort, same cluster — the normal path** |
+| `./bootstrap/ogsr-wipe-users.sh` | `user2`…`userN` completely (`--keep 2` keeps two) | Cutting down to one sample attendee |
+| `./bootstrap/ogsr-uninstall.sh` | Everything the workshop created | Giving the cluster back |
 
-All three scripts take `--dry-run` (print the plan, change nothing) and `--yes` (skip the prompt). They
-need a full repo checkout — copying `bootstrap/` alone will not work.
+- All three scripts take `--dry-run` (show the plan) and `--yes` (no prompt).
+- They need the full repo checkout, not just `bootstrap/`.
+- `ogsr-reset.sh --restart-terminals` also cycles the cockpits for the new group.
 
-### 6.1 Between cohorts: `ogsr-reset.sh`
+**What `ogsr-wipe-users.sh` leaves behind**
 
-```bash
-./bootstrap/ogsr-reset.sh --dry-run              # print the plan
-./bootstrap/ogsr-reset.sh                        # confirm, then reset
-./bootstrap/ogsr-reset.sh --restart-terminals    # also cycle the cockpits for the new group
-```
+- SonarQube accounts. If the next cohort uses a new password, delete the old accounts in SonarQube first.
+- Developer Hub catalog entries for deleted repos. Cosmetic.
 
-Deletes all lab content and returns the cluster to its immediately-post-install state. Keeps the
-platform, every attendee account, Gitea with every repository, Keycloak with every login, and every
-cockpit — that is the design, and it is worth stating plainly to whoever uses the cluster next.
+### Remove the workshop
 
-### 6.2 Cutting down to one attendee: `ogsr-wipe-users.sh`
+1. Preview. **Never skip this on a customer cluster.**
 
-```bash
-./bootstrap/ogsr-wipe-users.sh --dry-run
-./bootstrap/ogsr-wipe-users.sh
-./bootstrap/ogsr-wipe-users.sh --keep 2          # keep user1 and user2 (default 1)
-```
+   ```bash
+   ./bootstrap/ogsr-uninstall.sh --dry-run    # WIPE / PRESERVE plan
+   ```
 
-Removes `user2`…`userN` entirely — namespaces, Keycloak identities and realms, Gitea accounts and
-repositories, cockpits, quotas, Argo projects and OpenShift identities. Verified on a real cluster:
-nothing belonging to a removed user survives in any of those.
+2. For each `⚠` component the install reported, see what is really in that namespace:
 
-**Two things it leaves behind**, neither a reason to stop:
+   ```bash
+   oc get subscriptions.operators.coreos.com,csv -n <namespace>
+   ```
 
-1. **SonarQube accounts survive** — the only leftover that can bite. The seed job is
-   create-if-absent, so re-provisioning a cohort here finds `user2` already present and skips it,
-   leaving that account on the *old* password while every other tool moves to the new one. Harmless if
-   the next cohort reuses the same password; otherwise delete the stale accounts in SonarQube first.
-2. **The Developer Hub catalog is not pruned.** Components an attendee scaffolded stay listed after
-   their repository is gone. Cosmetic, never a collision.
+3. Uninstall:
 
-### 6.3 Removing the workshop: `ogsr-uninstall.sh`
+   ```bash
+   ./bootstrap/ogsr-uninstall.sh
+   ```
 
-```bash
-./bootstrap/ogsr-uninstall.sh --dry-run    # prints the WIPE / PRESERVE plan
-./bootstrap/ogsr-uninstall.sh              # performs it
-./bootstrap/ogsr-check-clean.sh            # read-only report; the admin decides what else to remove
-```
+   Adopted operators — their namespaces, Subscriptions, CSVs and OperatorGroups — are preserved.
+   The script saves its state to `${TMPDIR:-/tmp}/ogsr-uninstall-state.txt`. Keep it.
 
-**Never skip the dry run on a customer cluster.**
+4. Check what is left. Read-only; **it never deletes anything.**
 
-**What is preserved:** every component the adoption plan marked `skip` — operators the cluster already
-had, their namespaces, Subscriptions, CSVs and OperatorGroups, all annotated `Prune=false,Delete=false`
-at install time so the cascade cannot reach them. Adopted namespaces are de-labelled rather than
-deleted.
+   ```bash
+   ./bootstrap/ogsr-check-clean.sh                      # same machine
+   ./bootstrap/ogsr-check-clean.sh --state-file <path>  # from anywhere else
+   ```
 
-A component the install **`warn`ed** about is the case to look at before you run this. That operator is
-ours, recorded as *created*, sitting in a namespace the org also has one in — so teardown removes our
-Subscription and the CSV it resolves, while the org's Subscription is preserved and de-labelled. The
-snapshot keys on *our* Subscription name, and one namespace can hold two Subscriptions resolving to a
-single CSV object, so read what is actually there first:
+   It prints an `oc` command for each leftover it can attribute. The cluster admin decides what to run.
 
-```bash
-oc get subscriptions.operators.coreos.com,csv -n <the namespace the ⚠ named>
-```
+   | Exit | Meaning |
+   |---|---|
+   | `0` | Nothing unexpected. Kept-on-purpose items are listed by name. |
+   | `1` | Leftovers listed above |
+   | `2` | Could not run: no `oc`, not logged in, or a broken residue ledger |
 
-`ogsr-check-clean.sh` **never deletes anything.** It reports leftover namespaces, stale APIServices,
-dead webhooks, orphaned CSVs and workshop-created CRDs with live instance counts. Where it can say
-safely what a finding is, it prints the exact `oc` command — a delete for something we created, a
-`strip` that removes our label and leaves the object, and deliberately *nothing* for a finding it
-cannot attribute. The cluster's admin decides. Against a full install it takes a couple of minutes and
-every section prints elapsed time, so it is visibly working rather than hung.
-
-#### Some CRDs are deliberately never offered for deletion
-
-A CRD is cluster-scoped: `oc delete crd` removes every instance of that kind in *every* namespace, the
-organisation's included, and nothing puts them back. So a CRD our operator owns is not automatically
-ours to offer.
-
-The teardown withholds one when either test fires — **another operator outside this install also
-declares it owned**, or **it still has an instance outside every namespace this teardown removes**. The
-first fires even at zero instances: their operator is still running and will create some. Withheld CRDs
-are named on every run, in `--dry-run` too, with the evidence and a read-only `oc get <crd> -A`, and
-their names are carried in the state dump under `crds_shared`.
-
-`ogsr-check-clean.sh` reads that key, re-derives the same tests live, and reports them as a category of
-its own — **`SHARED`, with an `inspect (read-only):` command and never a delete, on any cluster.**
-
-The real example, measured on a live cluster: `keycloaks.k8s.keycloak.org` is declared owned by four
-CSVs — the workshop's RHBK in `sso-workshop`, one OLM resolved as an MTA dependency, and two belonging
-to the organisation's own Keycloak. Deleting that CRD to tidy up after the workshop would take the
-organisation's Keycloak with it. It is named, and it is never offered.
-
-**The checker still exits 0 with those CRDs registered** — that is the point of the category, and it is
-the one thing to know before you wire it into anything:
-
-| Exit | Meaning |
-|---|---|
-| `0` | Nothing *unexpected* remains. Declared residue and shared CRDs may still be on the cluster — the green line then says `no UNEXPECTED leftover` and lists them, rather than claiming `clean`. |
-| `1` | Findings are listed above (works as a CI gate), or a declared-residue entry has gone stale. |
-| `2` | The scan could not run at all — no `oc`, not logged in, or a malformed residue ledger. |
-
-So **do not read a green tick as "the CRD registry is back the way it was."** When anything was kept on
-purpose the verdict says so on the same screen, counting the shared CRDs and the declared residue
-separately from the findings — read those lines, they name what is still there and why.
-
-**Keep the state dump.** The teardown deletes the namespace holding its own install state, so it writes
-a copy to `${TMPDIR:-/tmp}/ogsr-uninstall-state.txt` first and prints the exact next command. The
-checker picks that path up automatically on the same machine; from anywhere else, pass it:
-
-```bash
-./bootstrap/ogsr-check-clean.sh --state-file /path/to/ogsr-uninstall-state.txt
-```
-
-Without it the checker cannot tell an adopted operator from one of ours, falls back to heuristic
-name-matching, and says so — treat anything it prints in that mode as a suggestion to verify.
+   - `SHARED` CRDs are never offered for deletion: another operator owns them too, or they still have
+     the cluster owner's instances. Example: `keycloaks.k8s.keycloak.org`. Deleting a CRD deletes every
+     instance in every namespace.
+   - Without the state file, the checker guesses by name and says so. Verify what it prints.
 
 ---
 
-## 7. Troubleshooting
+## 5. Troubleshooting
 
-### 7.1 Attendees get "Unauthorized" on their first command
-
-```
-[lab-user: ~]$ oc whoami
-error: You must be logged in to the server (Unauthorized)
-```
-
-**The attendee's browser sign-in has lapsed — the cluster is fine.** They fix it themselves:
-
-> Reload the cockpit page, sign in again, and reopen the terminal.
-
-One shared cockpit serves the whole cohort behind an OpenShift login, and its terminal mints that
-attendee's kubeconfig from the sign-in **each time they open it**. There is no pod-start token to go
-stale, so installing the day before a workshop does not cause this, and no morning command prevents
-it. What expires is the browser session, on the cluster's own schedule — 24 hours unless overridden:
+Before escalating, collect:
 
 ```bash
-oc get oauth cluster -o jsonpath='{.spec.tokenConfig.accessTokenMaxAgeSeconds}{"\n"}'   # empty = the 24h default
+tools/ws/adm doctor [--user userN]
+tools/ws/adm status
+tools/ws/adm diag --user userN [<module>]    # read-only bundle for one attendee
+oc get applications -n openshift-gitops
 ```
 
-Everything else looks healthy while this is happening — the pod is Running, the Application is
-Synced, the cockpit page loads. Only that attendee's terminal is affected, which is why it is worth
-recognising on sight.
+### Attendee gets Unauthorized
 
-Confirm one attendee's session from your own machine:
+`oc whoami` → `error: You must be logged in to the server (Unauthorized)`
 
-```bash
-oc exec deploy/showroom-shared -n ogsr-showroom -c terminal -- ls -l /homes/user1/.kube/config
-```
+- **Cause:** their browser sign-in expired (24h by default). The cluster is fine.
+- **Fix:** reload the cockpit page, sign in, reopen the terminal.
+- Session lifetime: `oc get oauth cluster -o jsonpath='{.spec.tokenConfig.accessTokenMaxAgeSeconds}'`
+  (empty = 24h). `adm session-refresh` does not apply to the shared cockpit.
 
-An attendee who has **never** signed in has no home directory there at all. That is expected before
-the first sign-in of a delivery, and it is also why `adm smoke` refuses to run as a user nobody has
-opened the cockpit as.
+### ws prep is refused: own AppProject only
 
-> **`adm session-refresh` does not apply here.** It belongs to the retired per-user cockpit, where
-> each pod held one long-lived token written once at pod start. Against the shared cockpit it reports
-> `nothing to refresh` and changes nothing. It remains the right command if you deliberately set
-> `showroom.shared.enabled: false`, where the old failure mode — and the old fix — still hold.
+`ValidatingAdmissionPolicy 'ogsr-attendee-entry-app-guard' denied request`
 
-### 7.2 `ws prep` fails with "attendees may only use their own AppProject"
+- **Cause:** the cockpit runs an old `ws`. The cluster got the new policy; the cockpit has not re-cloned.
+- **Fix:** `tools/ws/adm git-refresh --restart-terminals --all`
+- Check a cockpit (`3` = current, `0` = old):
+  `oc exec -n ogsr-showroom deploy/showroom-shared -c terminal -- grep -c ARGO_PROJECT_PIN /showroom/repo/tools/ws/ws`
 
-```
-Error from server (Forbidden): applications.argoproj.io "entry-<module>-user1" is forbidden:
-ValidatingAdmissionPolicy 'ogsr-attendee-entry-app-guard' denied request:
-attendees may only use their own 'entries-<username>' AppProject
-```
+### A cockpit serves old content
 
-The cockpit is running an **old copy of the `ws` CLI**. Fix:
+- **Cause:** the cockpits restarted before the mirror caught up.
+- **Fix:** `tools/ws/adm git-refresh --restart-terminals --all`
+- Check what is really served. Ask the container, not the Route — the Route returns the login page
+  (HTTP 403) for everything:
+  `oc exec -n ogsr-showroom deploy/showroom-shared -c content -- curl -s http://127.0.0.1:8000/modules/<slug>/lab.html | grep -o '<expected text>'`
 
-```bash
-tools/ws/adm git-refresh --restart-terminals --all
-```
+### An Argo Application will not sync
 
-Each cockpit clones this repository when its pod starts, and never again. Attendee isolation has two
-halves that must travel together — an admission policy, which arrives with a `workshop-config` sync,
-and the `ws` CLI that knows to use the per-user `entries-<user>` AppProject, which arrives only when
-a cockpit re-clones. Sync the first without restarting the pods and every attendee's `ws prep` is
-refused by the policy the cluster just gained.
+- Never start a sync while an operation is Running; it is silently dropped. Do: sync the mirror →
+  hard refresh → wait ~10s → sync.
+- Stuck operation: patch `status.operationState.phase=Terminating`, then sync.
+- Keeps applying old content: the manifest cache is stale. Bump the chart version.
+- Helm list literals (`{a,b,c}`) do not work in `helm.parameters`. Keep lists in `values.yaml`.
+- A change to a hook only does not propagate. Delete the hook Job, then sync.
 
-Confirm which half a cockpit has:
-
-```bash
-oc exec -n ogsr-showroom deploy/showroom-shared -c terminal -- grep -c ARGO_PROJECT_PIN /showroom/repo/tools/ws/ws
-```
-
-A non-zero count means current, `0` means old — on a current cockpit this prints `3`. A `0` also exits
-non-zero, and that is `grep -c` reporting no matches rather than a broken command; the number is the
-answer.
-
-There is one cockpit now, not one per attendee, and `ws` reaches it through a read-only mount of the
-build's own clone at `/showroom/repo` rather than a copy in each attendee's home. So there is no
-`~/ocp-getting-started` to check, and no need for a login shell to expand `~` — which is why this
-command is a plain `grep` where earlier releases needed `bash -lc`.
-
-`--all` is required. `--restart-terminals` on its own refuses with "restart needs a target" and
-restarts nothing, which leaves you in exactly this half-state. Run it between modules or before a
-cohort starts, never mid-exercise.
-
-A current `ws` never fails this way silently: it resolves the AppProject by probing, and if
-`entries-<user>` is missing it prints a warning naming this exact policy before it applies anything.
-**No warning plus this error means the CLI is old**, not that the projects are missing.
-
-### 7.3 An Argo Application will not sync
-
-**Never start a sync while an operation is already Running** — the request is silently swallowed. The
-reliable sequence is: sync the mirror → hard refresh → wait ~10s → sync.
-
-For a genuinely stuck operation, patch `status.operationState.phase=Terminating`, then sync fresh.
-
-**If a sync keeps re-applying content you already changed**, the manifest cache is poisoned. It survives
-a new commit SHA, a Redis flush, and even reverting a Helm parameter override. The reliable fix is to
-**bump the chart version**.
-
-Two related traps:
-
-- Argo's `helm.parameters` does not expand Helm's `{a,b,c}` list literals the way the `helm` CLI does.
-  Keep lists in `values.yaml` and parameterize only scalars.
-- Auto-heal will not re-run a Sync-phase hook when nothing else drifted, so a hook-only change silently
-  does not propagate. Delete the hook Job first, or force a targeted resource sync.
-
-### 7.4 A namespace is stuck `Terminating`
-
-Read the conditions — they name the blast radius:
+### A namespace is stuck Terminating
 
 ```bash
 oc get ns <name> -o jsonpath='{range .status.conditions[*]}{.type}={.status}: {.message}{"\n"}{end}'
 ```
 
-| Condition | Meaning | Action |
-|---|---|---|
-| `NamespaceDeletionDiscoveryFailure=True` | A stale APIService broke discovery. **Every** namespace on the cluster is wedged, including ones that are not yours. | Find and remove the unavailable APIService. |
-| `=False` with `NamespaceFinalizersRemaining=True` | One stranded finalizer, that namespace only. | See below. |
-
-For the second: find the blocking object and check whether its controller still exists. A finalizer
-whose operator is still running clears itself if you wait; one whose operator was deleted first can
-never run and must be removed by hand.
-
-**Patch the blocking object, never the namespace's own finalizer** — patching the namespace orphans the
-content instead of deleting it.
-
-### 7.5 An operator the cluster owner cares about stops upgrading
-
-Cause: **two OperatorGroups in one namespace.** A namespace may hold exactly one. With two, OLM marks
-every CSV there `Failed` / `TooManyOperatorGroups` and stops reconciling — **while the pods keep running
-1/1**. Nothing looks wrong until an upgrade that never comes.
-
-`openshift-operators` always ships one, so nothing may ever add another there.
-
-This is the **one** condition the install refuses on: a namespace we ship an OperatorGroup into that
-already carries someone else's stops the run before anything is applied
-([§3.1](#what-the-install-does-with-an-operator-the-cluster-already-has)). Every other
-already-installed operator is either adopted or installed alongside.
-
-Assert after any install that this returns nothing:
-
-```bash
-oc get operatorgroups -A --no-headers | awk '{print $1}' | sort | uniq -c | awk '$1>1'
-```
-
-Related: three API groups claim the plural `subscriptions`. Always write
-`subscriptions.operators.coreos.com` in full.
-
-### 7.6 Database pods stuck Terminating, replacements blocked
-
-Cluster disruption can leave RWO volumes with wedged `VolumeAttachment` objects. The signature is
-**Multi-Attach errors blocking replacement pods in several namespaces at once**, which presents as
-multiple unrelated outages.
-
-Force-delete the stuck pods, then delete the wedged VolumeAttachments. An orphaned-CSV wedge can
-co-present, so re-check §7.5 afterwards.
-
-### 7.7 A cockpit serves old content
-
-Almost always the mirror-versus-restart ordering in [§5.1](#51-publishing-content-updates-mid-session).
-Confirm what is actually served rather than trusting the job that pushed it:
-
-```bash
-oc exec -n ogsr-showroom deploy/showroom-shared -c content -- \
-  curl -s "http://127.0.0.1:8000/modules/<slug>/lab.html" | grep -o '<expected string>'
-```
-
-Ask the content container directly rather than the Route. The cockpit sits behind an OpenShift login
-now, so an unauthenticated `curl` at the public URL returns the sign-in page — `<title>Log In</title>`,
-HTTP 403 — for *every* module, whatever is actually published. That looks identical to content being
-missing and is the wrong answer to this question. Going in at `127.0.0.1:8000` reads exactly what the
-cockpit serves, with no session involved.
-
-### 7.8 An attendee cannot log into a tool
-
-| Tool | Credentials |
+| Condition | Fix |
 |---|---|
-| OpenShift console | `userN` + workshop password, via the **workshop-users** identity provider |
-| Gitea | Same pair (accounts seeded at install) |
-| SonarQube | Same pair — but signing in is optional, the dashboard is readable anonymously |
-| MTA | No login at all — the Hub is open |
-| Argo CD (attendee instance) | Via the cockpit link |
+| `NamespaceDeletionDiscoveryFailure=True` | A stale APIService. Every namespace on the cluster is stuck. Remove the unavailable APIService. |
+| `NamespaceFinalizersRemaining=True` | Find the blocking object. If its operator is gone, remove the finalizer **from that object** — never from the namespace. |
 
-If SonarQube rejects the login, the seed job did not run. It is an Argo sync hook, so re-syncing
-`workshop-config` re-runs it:
+### An operator stops upgrading
 
-```bash
-oc logs job/sonarqube-user-seed -n sonarqube --tail=20
-```
+- **Cause:** two OperatorGroups in one namespace. OLM fails every CSV there while the pods keep running.
+- Check (must print nothing):
+  `oc get operatorgroups -A --no-headers | awk '{print $1}' | sort | uniq -c | awk '$1>1'`
+- Always write `subscriptions.operators.coreos.com` in full; three API groups use `subscriptions`.
 
-### 7.9 AI modules return authentication errors
+### Pods stuck Terminating, Multi-Attach errors
 
-**MaaS keys are model-scoped.** A key issued for one model fails against another, and the error looks
-generic rather than saying so.
+- **Cause:** wedged `VolumeAttachment`s after a disruption. Looks like several unrelated outages.
+- **Fix:** force-delete the stuck pods, delete the wedged VolumeAttachments, then re-check OperatorGroups.
 
-Start with `tools/ws/adm maas show` — it prints, per attendee, the model and endpoint in use and a
-working / degraded / unknown verdict. Two verdicts name this problem directly:
+### Attendee cannot log into a tool
 
-- `credential-rejected-by-endpoint` — the key is wrong for this endpoint, **or** right for a different
-  model.
-- `credential-is-a-jwt-not-an-api-key` — the modules fell back to an adopted Lightspeed secret belonging
-  to another provider. Stage the workshop's own credential.
+| Tool | Login |
+|---|---|
+| OpenShift console | `userN` + workshop password, **workshop-users** provider |
+| Gitea, SonarQube | Same pair (SonarQube is readable without login) |
+| MTA | None — the Hub is open |
+| Argo CD (attendee) | Through the cockpit link |
 
-The fix is `adm maas set` ([§5.2](#52-changing-the-ai-model-or-rotating-the-key)), not a reinstall.
+SonarQube rejects the login → its seed job did not run: `oc logs job/sonarqube-user-seed -n sonarqube --tail=20`.
+Re-syncing `workshop-config` re-runs it.
 
-### 7.10 Lightspeed never becomes ready: "Waiting for OpenShift Lightspeed service"
+### AI modules fail with auth errors
 
-```
-Waiting for OpenShift Lightspeed service
-The OpenShift Lightspeed service is not yet ready to receive requests.
-If this message persists, please check the OLSConfig.
-```
+- **Cause:** usually a key for a different model — keys are model-scoped.
+- Run `tools/ws/adm maas show`:
+  - `credential-rejected-by-endpoint` — wrong key for this endpoint or model.
+  - `credential-is-a-jwt-not-an-api-key` — fell back to an adopted Lightspeed secret. Stage the workshop's own key.
+- **Fix:** `tools/ws/adm maas set`. No reinstall.
 
-**This usually arrives with the cluster, not with the workshop.** RHDP's OpenShift base image ships
-Lightspeed already installed and pointed at Azure OpenAI, authenticating with an Entra ID service
-principal. When that app registration has been removed from the tenant — which happens routinely, and
-silently — every readiness probe fails and the console shows the banner above forever.
+### Lightspeed shows "Waiting for OpenShift Lightspeed service"
 
-The workshop does not cause this and does not fix it on its own: an `OLSConfig` on the cluster means
-the `ai-assist` stack is never requested and **the existing provider secret is deliberately left
-untouched** ([§3.1](#31-preflight-read-only)). Adopted means adopted.
+- **Cause:** RHDP clusters ship Lightspeed pointed at Azure OpenAI, and its service principal was
+  deleted. Not caused by the workshop. **AI modules are unaffected**; only the console assistant is.
+- Confirm: the `lightspeed-app-server` pod is `1/2`, and its log shows `AADSTS700016`:
+  `oc -n openshift-lightspeed logs deploy/lightspeed-app-server -c lightspeed-service-api --tail=50 | grep -iE "AADSTS|LLM connection"`
+- **Fix:** point it at the workshop's MaaS (`adm maas show` prints your endpoint and model):
 
-**The AI modules are unaffected.** They read `ogsr-system/ogsr-maas-credentials`, which they prefer
-over any adopted Lightspeed secret. Only the console assistant is dead. If you are not demoing that
-button, you can ignore this entirely.
+  ```bash
+  oc get olsconfig cluster -o yaml > olsconfig-cluster-ORIGINAL.yaml    # gitignored; restore with oc replace -f
+  oc -n openshift-lightspeed create secret generic ogsr-maas-apitoken \
+    --from-literal=apitoken="$(oc -n ogsr-system get secret ogsr-maas-credentials -o jsonpath='{.data.apitoken}' | base64 -d)"
+  oc patch olsconfig cluster --type merge -p '{"spec": {
+    "llm": {"providers": [{"name": "MaaS", "type": "openai", "url": "https://YOUR-MAAS-ENDPOINT/v1",
+            "credentialsSecretRef": {"name": "ogsr-maas-apitoken"}, "models": [{"name": "YOUR-MODEL"}]}]},
+    "ols": {"defaultProvider": "MaaS", "defaultModel": "YOUR-MODEL"}}}'
+  ```
 
-**Confirm it is this and not something else:**
+- Done when the pod is `2/2`. Reload the console tab.
+- The key now lives in two places. `adm maas set` updates only `ogsr-system`; update
+  `openshift-lightspeed/ogsr-maas-apitoken` yourself after a rotation.
 
-```bash
-oc -n openshift-lightspeed get pods | grep app-server
-```
+### MTA: attendees see each other's applications
 
-A pod stuck at `1/2 Running` — the `lightspeed-service-api` container never ready — is the signature.
-Then read the cause:
+Expected — one shared Hub. Attendees name theirs `parasol-legacy-claims-<user>`. `ws reset` does not
+remove them; delete stale ones in the MTA console between cohorts.
 
-```bash
-oc -n openshift-lightspeed logs deploy/lightspeed-app-server -c lightspeed-service-api --tail=50 | grep -iE "AADSTS|LLM connection"
-```
+### A hook Job fails immediately
 
-`AADSTS700016: Application with identifier '...' was not found in the directory '...'` is the dead
-service principal. The readiness endpoint says the same thing more briefly:
-`{"detail":{"response":"Service is not ready","cause":"LLM is not ready"}}`.
+- `ose-cli` OOMs at 256Mi. Give hook Jobs at least 512Mi.
+- No `dnf` at runtime under the restricted SCC. Use a purpose-built image.
 
-**Fix — repoint Lightspeed at the workshop's own MaaS endpoint.** Save the original first; the
-uninstall has no record of this change, because the installer never made it. `*-ORIGINAL.yaml` is
-gitignored, so this snapshot cannot be committed by accident:
+### parasol-web or parasol-claims never become Ready
 
-```bash
-oc get olsconfig cluster -o yaml > olsconfig-cluster-ORIGINAL.yaml
-```
+Their images have not loaded yet. Check the ImageStreams in `ogsr-parasol-images`.
 
-Copy the workshop's credential into the Lightspeed namespace (the `openai` provider type expects the
-key to be named `apitoken`):
+### A LoadBalancer Service stays pending
 
-```bash
-oc -n openshift-lightspeed create secret generic ogsr-maas-apitoken \
-  --from-literal=apitoken="$(oc -n ogsr-system get secret ogsr-maas-credentials -o jsonpath='{.data.apitoken}' | base64 -d)"
-```
-
-Point the CR at it, substituting your endpoint and model — `adm maas show` prints both:
-
-```bash
-oc patch olsconfig cluster --type merge -p '{
-  "spec": {
-    "llm": {"providers": [{
-      "name": "MaaS",
-      "type": "openai",
-      "url": "https://YOUR-MAAS-ENDPOINT/v1",
-      "credentialsSecretRef": {"name": "ogsr-maas-apitoken"},
-      "models": [{"name": "YOUR-MODEL"}]
-    }]},
-    "ols": {"defaultProvider": "MaaS", "defaultModel": "YOUR-MODEL"}
-  }
-}'
-```
-
-The operator rolls the app-server automatically. It is fixed when the pod reaches `2/2` and the log
-says `LLM connection checked - LLM is ready`:
-
-```bash
-oc -n openshift-lightspeed get pods | grep app-server
-```
-
-Reload the console tab afterwards — the banner does not clear on its own.
-
-**Two things to carry forward.** The console assistant now answers from the same model the lab pages
-name, which removes a mismatch worth knowing about if you demo both. And your MaaS key now lives in
-**two** places — `ogsr-system/ogsr-maas-credentials` for the modules and
-`openshift-lightspeed/ogsr-maas-apitoken` for the console — so a key rotation
-([§5.2](#52-changing-the-ai-model-or-rotating-the-key)) has to update both, and `adm maas set` only
-knows about the first.
-
-To hand the cluster back as you found it:
-
-```bash
-oc replace -f olsconfig-cluster-ORIGINAL.yaml
-```
-
-### 7.11 MTA: attendees see each other's applications
-
-Expected — brief the room. The Hub is one shared instance with no per-user view, and MTA's roles are
-personas rather than tenants, so enabling authentication would not change what anyone sees.
-
-This is why the lab has each attendee name their application `parasol-legacy-claims-<user>`. Portfolio
-state lives in the Hub database, not the attendee's namespace, so `ws reset` does not remove it — delete
-stale applications in the MTA console between cohorts.
-
-### 7.12 A hook Job fails immediately
-
-Two recurring causes:
-
-- **`ose-cli` OOMs at 256Mi.** Give hook Jobs **≥512Mi**.
-- **No runtime `dnf`** under the restricted SCC. Use a purpose-built image rather than installing
-  packages at runtime.
-
-### 7.13 `parasol-web` / `parasol-claims` never become Ready
-
-They run images built into the cluster by the workshop's image-load step. If those ImageStreams have not
-populated, the Deployments exist but never start — check the `ogsr-parasol-images` namespace. This is a
-provisioning timing issue, not a module defect.
-
-### 7.14 A `LoadBalancer` Service sits `<pending>` forever
-
-Expected. There is no MetalLB on purpose — it is a cluster-wide networking component, and installing it
-would change the character of a cluster we do not own. The workshop exposes everything through Routes,
-and the networking module teaches the `<pending>` as real bare-metal behaviour.
-
-### Collect this before escalating
-
-```bash
-tools/ws/adm doctor                             # whole cluster
-tools/ws/adm doctor --user <userN>              # same checks, other attendees filtered out
-tools/ws/adm status
-tools/ws/adm diag --user <userN> [<module>]     # read-only bundle for one stuck attendee
-oc get applications -n openshift-gitops
-```
-
-`adm diag` prints entry-app status and conditions, recent events per namespace, not-Ready pods, cockpit
-status and a logs pointer. It always exits 0 — it is a report, not a gate.
+Expected. There is no MetalLB, on purpose. Everything is exposed through Routes.
 
 ---
 
-## Appendix — how the install stays non-invasive
+## 6. What the install never changes
 
-The workshop must drop onto an existing cluster without changing its character:
+- **Operators already on the cluster** are adopted where safe — never reinstalled, upgraded or
+  removed. Where adopting is not safe, ours runs alongside theirs and the install says so.
+- **Cluster-wide defaults stay as they are.** (That is why the console opens in a new tab: embedding
+  it would need a cluster-wide ingress change.)
+- **Attendees are walled off** from the organisation's namespaces and from each other: one Argo CD
+  AppProject per attendee, enforced by an admission policy.
+- **Uninstall removes what we created and leaves the rest.** A CRD the owner's operators also use is
+  never offered for deletion.
+- Two Argo CD instances: the platform one builds every attendee's world; a second one is where
+  attendees create their own Applications, so an attendee mistake cannot break the machinery.
 
-- **An operator already present is adopted wherever adopting it is safe** — never reinstalled or
-  upgraded, and never touched by the uninstall. Where the workshop's component ships more than the
-  operator, or where dropping it would strand a sibling, ours is installed *alongside* theirs instead
-  and the install says so; the only thing that stops an install outright is a namespace where a second
-  OperatorGroup of ours would silently break OLM ([§3.1](#what-the-install-does-with-an-operator-the-cluster-already-has)).
-- **Cluster-wide default behaviour is never altered.** (This is why the OpenShift console opens in a new
-  tab instead of being embedded in the cockpit — embedding would require a global IngressController
-  header rewrite, which changes behaviour for every workload on the cluster.)
-- **Attendees are walled off** from the organisation's namespaces and from each other: each gets their
-  own Argo `AppProject` listing only their own namespaces, and an admission policy pins them to it.
-- **Full removal reverses what we created and leaves the rest**, and a read-only checker reports what
-  is left. Where reversing something would reach the organisation's data — a cluster-scoped CRD their
-  operator also owns, or that still has their instances in it — it is deliberately left registered,
-  named with its evidence, and never handed to anyone as a delete command
-  ([§6.3](#some-crds-are-deliberately-never-offered-for-deletion)).
-
-The litmus test for any change: *would anything of the cluster owner's differ after a full removal?*
-
-### Two design choices that look odd until you know why
-
-- **Two Argo CD instances, not one** (~5 extra pods). The platform instance owns the machinery that
-  builds every attendee's world; a second, namespace-scoped instance is where attendees create their own
-  Applications during the GitOps modules. Split that way, an attendee mistake cannot delete the
-  machinery.
-- **Every attendee's starting state is an Argo Application**, not a script. `adm start` writes a small
-  Application and lets Argo materialize it, so entry states are reproducible and `ws reset` is a
-  delete-and-resync rather than a cleanup script guessing what changed.
+The test for any change: *would anything of the cluster owner's differ after a full removal?*

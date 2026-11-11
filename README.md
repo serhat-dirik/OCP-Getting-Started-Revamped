@@ -74,53 +74,44 @@ Alongside the per-attendee workshop cockpits, the install deploys an **SA-Demos 
 
 ## Quick Installation on OpenShift
 
-The steps below get a cluster running. For sizing it before you order, verifying the install, and
-troubleshooting, see **[INSTALL.md](INSTALL.md)**.
+Sizing, every option and troubleshooting: **[INSTALL.md](INSTALL.md)**.
 
 **Prerequisites**
 
-* An OpenShift **4.20+** cluster with a default StorageClass and **`linux/amd64` workers** (any footprint: self-managed, ROSA/ARO, or an RHDP sandbox). ODF/NooBaa is needed only if you enable M22 (its backup target is an in-cluster S3 bucket).
-* **Red Hat SAs:** order [**Field Sourced Content - OpenShift Base**](https://catalog.demo.redhat.com/catalog/babylon-catalog-prod?item=babylon-catalog-prod/published.ocp-field-asset.prod) from the Red Hat Demo Platform (internal) and **set worker nodes to 3** — the catalog item does not default to 3, and 3 dedicated workers is the floor this workshop needs. Size up first via [INSTALL.md §2](INSTALL.md#2-sizing-the-cluster) if you are running a larger room.
-  * **This "3" is not the "5" in INSTALL §2, and they measure different things.** 3 is the *dedicated-worker* floor, below which the installer withholds the batch taint (next bullet). The 5 in §2 is a count of **schedulable `worker`-role nodes** for M18's spread-and-surge exercise — and **schedulable control planes count toward it**, so this 3-worker order presents 3 control planes + 3 workers = 6 and clears it. Check, don't infer: `oc get nodes -l node-role.kubernetes.io/worker`.
-  * **With only 2 workers the install still succeeds**, and everything works except one half of one exercise: M18 `deployment-targets-scheduling` needs a node it can taint, and with two workers the installer deliberately withholds the taint rather than starve the cluster. The `nodeSelector` half of that lab still runs and is graded; the toleration half cannot be demonstrated, and `adm verify` reports it not-applicable rather than failed. Everything else is unaffected.
-* `cluster-admin` access, with the `oc` CLI logged in to that cluster.
-* On the machine you install from: `git`, `yq`, `htpasswd`, `openssl`. See [INSTALL.md](INSTALL.md) for why each is needed.
-* The installer is **non-invasive on existing clusters**: an operator already present is adopted wherever adopting it is safe (never overwritten or upgraded) and otherwise the workshop's own is installed *alongside* it rather than over it, attendees live in their own identity provider, and nothing about the cluster's default behavior is changed. Check your cluster and preview every adoption decision before you install — read-only, applies nothing:
+* OpenShift **4.20+**, `cluster-admin`, a default StorageClass, `linux/amd64` workers.
+  Red Hat SAs: order [**Field Sourced Content - OpenShift Base**](https://catalog.demo.redhat.com/catalog/babylon-catalog-prod?item=babylon-catalog-prod/published.ocp-field-asset.prod)
+  with **3 workers or more** ([how many](INSTALL.md#sizing)).
+* On your machine: `oc`, `git`, `yq`, `htpasswd`, `openssl`.
+* Optional, for the AI modules: an OpenAI-compatible model endpoint and key.
 
-  ```bash
-  tools/ws/adm preflight
-  ```
-
-  It verifies local tooling, cluster-admin, the OpenShift version, the StorageClass and the worker count, then prints what an install would adopt versus create. **On a customer cluster, show this to them before installing.** For the per-operator detail behind those rows, see [INSTALL.md §3.1](INSTALL.md#31-preflight-read-only).
-
-**1. Clone this repository**
+**1. Clone**
 
 ```bash
 git clone https://github.com/serhat-dirik/OCP-Getting-Started-Revamped.git
 cd OCP-Getting-Started-Revamped
 ```
 
-**2. Configure the install** — all inputs live in one gitignored vars file; the installer takes no flags:
+**2. Preflight** — read-only. It shows what the install would adopt versus create. On a customer
+cluster, show them this first.
+
+```bash
+tools/ws/adm preflight
+```
+
+**3. Configure** — set at least `users` and the `maas` endpoint, model and key
+([all keys](INSTALL.md#2-install)):
 
 ```bash
 cp bootstrap/vars.example.yaml bootstrap/vars.yaml
-# edit bootstrap/vars.yaml
 ```
 
-The variables that matter:
-
-* `users` — how many attendees to provision (`user1`…`userN`).
-* `cluster_domain` — leave `""` to auto-detect from the cluster.
-* `maas` — the LLM endpoint behind the workshop's AI beats (Lightspeed answers, batch inference, agent modules). Any **OpenAI-compatible chat-completions endpoint** works: Red Hat Models-as-a-Service, an on-cluster vLLM/OpenShift AI serving runtime, or a **public provider** — OpenAI directly, Google Gemini via its OpenAI-compatible endpoint, or Anthropic Claude behind an OpenAI-compatible gateway (for example LiteLLM). Set `endpoint`, `model`, and `api_key`; the key is a secret and never leaves `vars.yaml`.
-* `lightspeed` — installs OpenShift Lightspeed wired to the model above. If no LLM endpoint is configured, the installer **skips this automatically**; on a cluster that already runs Lightspeed, the existing install is adopted, not touched.
-* `modules_disabled` — the module filter, e.g. `modules_disabled: [m13, m22]`. A filtered module is **hidden from the workshop showroom** and its components and platform stacks are **not installed** (unless another enabled module needs them). Leave the list empty to install the full catalog.
-* `modules_enabled` — the same filter the other way round, e.g. `modules_enabled: [m1, m2, m3, m4, m5]` for a foundations-only day. Everything not listed is disabled. Usually less typing for a short workshop, and it does not need revisiting when the catalogue grows. **Empty or absent means the full catalog, never none** — and the two keys are mutually exclusive, because an allow-list already expresses any subset.
-
-**3. Install** — stands up the platform stacks and the workshop layer in one command:
+**4. Install** — about 15–20 minutes, safe to re-run:
 
 ```bash
 ./bootstrap/install.sh
 ```
+
+Then verify with `tools/ws/adm doctor` and `tools/ws/adm status`.
 
 ## Starting the Workshop
 
@@ -136,7 +127,7 @@ tools/ws/adm git-refresh --restart-terminals --all
 
 A cockpit clones the workshop when its pod starts and never again, so a cluster that has not been
 restarted since an update serves the old copy. The symptom is `ws prep` being refused —
-[INSTALL.md §7.2](INSTALL.md). Skip this if nothing has changed since the install.
+[INSTALL.md](INSTALL.md#ws-prep-is-refused-own-appproject-only). Skip this if nothing has changed since the install.
 
 **Attendee logins need no morning refresh.** One cockpit serves the whole cohort behind an OpenShift
 login, and its terminal mints each attendee's kubeconfig from that sign-in — there is no pod-start
@@ -149,7 +140,7 @@ error: You must be logged in to the server (Unauthorized)
 
 their *browser* sign-in has lapsed, not the cluster: they reload the cockpit page and reopen the
 terminal. Nothing else looks wrong when that happens — the pod is Running and the page loads — so it
-is worth recognising on sight rather than diagnosing. See [INSTALL.md §7.1](INSTALL.md).
+is worth recognising on sight rather than diagnosing. See [INSTALL.md](INSTALL.md#attendee-gets-unauthorized).
 
 > `adm session-refresh` belongs to the retired per-user cockpit, where each pod held one long-lived
 > token. Against the shared cockpit it reports `nothing to refresh` and changes nothing. It is still
@@ -216,7 +207,7 @@ tools/ws/adm git-refresh                # publish content updates to a live sess
 
 ## Ending a Delivery
 
-Install once; what you run next depends on what you're doing — see **[INSTALL.md §6](INSTALL.md)** for
+Install once; what you run next depends on what you're doing — see **[INSTALL.md §4](INSTALL.md#4-after-a-delivery)** for
 the full picture. In order of how often you'll actually reach for them:
 
 **a) One attendee, one module** — reset a single exercise so someone can redo it; nothing else changes:
@@ -268,7 +259,7 @@ Two further things the teardown deliberately leaves behind, and says so on every
 still has their instances in it. Deleting such a CRD would delete every instance of it in every
 namespace, so it is named with its evidence and a read-only `oc get <crd> -A`, never a delete command.
 The checker exits **0** with those still registered, saying `no UNEXPECTED leftover` rather than
-`clean` — see [INSTALL.md §6.3](INSTALL.md).
+`clean` — see [INSTALL.md](INSTALL.md#remove-the-workshop).
 
 ## Local Content Preview
 
