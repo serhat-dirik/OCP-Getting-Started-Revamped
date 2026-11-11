@@ -460,6 +460,9 @@ operators and the workshop's own namespaces, it changes these cluster-wide setti
 - **Cluster RBAC and policy:** attendee ClusterRoles and bindings (read-only cluster views, Gateway
   rights in their own namespaces), and an admission policy that limits attendee Argo CD Applications.
 - **Shared objects:** a `java-21` builder ImageStream in `openshift`, and Kueue cluster queues.
+- **Image imports:** `image.config/cluster` `spec.allowedRegistriesForImport` limits ImageStream imports
+  to `registry.redhat.io`, `registry.access.redhat.com`, `quay.io` and the internal registry (pod pulls
+  are unaffected). The first apply briefly restarts `openshift-apiserver`.
 
 `ogsr-uninstall.sh` removes the workshop's own objects but does not restore every setting above.
 Dispose of the cluster after the delivery rather than hand it back.

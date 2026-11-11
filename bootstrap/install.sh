@@ -1190,6 +1190,15 @@ else
   ok "OAuth IdP 'workshop-users' appended (existing IdPs preserved)"
 fi
 
+# 2a''. ImageStream imports only from the registries the workshop uses (dedicated cluster, INSTALL.md §6).
+# registry-images-catalog-governance has attendees import from docker.io and watch it refused. Sets ONLY
+# spec.allowedRegistriesForImport — never registrySources (that re-renders every node). quay.io stays:
+# the openshift-namespace release streams re-import from it on every upgrade. The first apply briefly
+# rolls openshift-apiserver. Same list in helm/bootstrap/templates/job-workshop-users.yaml.
+oc patch image.config.openshift.io/cluster --type=merge \
+  -p '{"spec":{"allowedRegistriesForImport":[{"domainName":"registry.redhat.io"},{"domainName":"registry.access.redhat.com"},{"domainName":"quay.io"},{"domainName":"image-registry.openshift-image-registry.svc:5000"}]}}' >/dev/null
+ok "image import allowlist: registry.redhat.io, registry.access.redhat.com, quay.io, internal registry"
+
 # 2b. MaaS token for OpenShift Lightspeed (only when WE install it — a pre-installed
 # Lightspeed brings its own provider secret, which we must never overwrite).
 if [[ "$LIGHTSPEED" == "true" && "$LIGHTSPEED_PREINSTALLED" == "false" ]]; then
