@@ -248,8 +248,8 @@ deployment.apps/parasol-claims   3/3     3            3           11m
 NAME                                        MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
 poddisruptionbudget.policy/parasol-claims   2               N/A               1                     11m
 
-NAME                                                 REFERENCE                   TARGETS       MINPODS   MAXPODS   REPLICAS
-horizontalpodautoscaler.autoscaling/parasol-claims   Deployment/parasol-claims   cpu: 4%/80%   3         6         3
+NAME                                                 REFERENCE                   TARGETS       MINPODS   MAXPODS   REPLICAS   AGE
+horizontalpodautoscaler.autoscaling/parasol-claims   Deployment/parasol-claims   cpu: 4%/80%   3         6         3          11m
 ----
 
 Read that as a resilience posture: *three* replicas so losing one is a non-event; a `PodDisruptionBudget` that keeps *two* available during any voluntary disruption (`ALLOWED DISRUPTIONS: 1` — a node drain evicts *at most one* at a time); and a `HorizontalPodAutoscaler` holding the floor at three, bursting to six. Confirm the replicas are *spread across nodes*, so one node loss can't take them all:
@@ -306,10 +306,11 @@ done
 echo "DONE: $ok served, $failed failed"'
 ----
 
-Back in *Terminal 1*, define an `evict` helper. It posts an `Eviction` for one pod, the same request `oc adm drain` sends. Then evict two claims pods back to back:
+Back in *Terminal 1*, define an `evict` helper. It posts an `Eviction` for one pod, the same request `oc adm drain` sends. The block first waits until the replacement for the pod you killed above is Ready, so the budget has its one disruption of room again. Then it evicts two claims pods back to back:
 
 [source,sh,role=execute]
 ----
+oc wait pdb/parasol-claims -n $SITEA --for=jsonpath='{.status.disruptionsAllowed}'=1 --timeout=90s
 evict() { echo '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"'"$1"'"}}' | oc create --raw /api/v1/namespaces/$SITEA/pods/$1/eviction -f - ; echo; }
 P1=$(oc get pod -n $SITEA -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
 P2=$(oc get pod -n $SITEA -l app=parasol-claims -o jsonpath='{.items[1].metadata.name}')
@@ -321,6 +322,7 @@ oc get pdb parasol-claims -n $SITEA
 .Expected output (the first eviction is admitted; the second is refused with HTTP 429)
 [source,texinfo]
 ----
+poddisruptionbudget.policy/parasol-claims condition met
 {"kind":"Status","apiVersion":"v1","metadata":{},"status":"Success","code":201}
 
 Error from server (TooManyRequests): Cannot evict pod as it would violate the pod's disruption budget.
@@ -392,7 +394,7 @@ First, meet the client and prove the problem. The client calls a *stable endpoin
 
 [source,sh,role=execute]
 ----
-oc logs deploy/claims-client -n $CLIENT --tail=5
+oc logs deploy/claims-client -n $CLIENT --tail=3
 ----
 
 .Expected output (the stable endpoint exists, but nothing routes through it yet — `404`)
@@ -514,7 +516,7 @@ Give the mesh a few seconds to program the gateway, then look at the client log 
 [source,sh,role=execute]
 ----
 sleep 8
-oc logs deploy/claims-client -n $CLIENT --tail=5
+oc logs deploy/claims-client -n $CLIENT --tail=3
 ----
 
 .Expected output (the stable endpoint now routes — steadily to the primary site A)
@@ -568,14 +570,15 @@ oc get svc claims -n $SITEB -o jsonpath='site-b claims ClusterIP: {.spec.cluster
 Two endpoints, both `HEALTHY`, and both IPs appearing in the two lines you just printed — that is the shape you want. If the gateway lists addresses that are *neither* of yours, your routing is resolving to something outside your own namespaces; check that the `exportTo: ["."]` line survived on all three resources.
 ====
 
-Now *the failover*. In a *second terminal*, start tailing the client log live so you can watch it in real time:
+Now *the failover*. Watch it from *Terminal 2*. If exercise 1's request loop is still running there, let it print its `DONE` line or stop it with `Ctrl-C`. Then start tailing the client log live:
 
-[source,sh,role=execute]
+[source,sh,role="execute send-to-tty-bottom",subs="attributes"]
 ----
+CLIENT={user}-client
 oc logs -f deploy/claims-client -n $CLIENT --tail=3
 ----
 
-Then, back in your *first* terminal, *fail the entire primary site* — scale site A to zero. There is no site A anymore:
+Then, back in *Terminal 1*, *fail the entire primary site* — scale site A to zero. There is no site A anymore:
 
 [source,sh,role=execute]
 ----
@@ -616,7 +619,7 @@ Back in the tailing log, watch the marker flip *back to A*:
 10:27:48  HTTP 200  served-by-site=A
 ----
 
-Stop the tailing log (`Ctrl-C`). You just failed and recovered a whole site with the client none the wiser.
+Stop the tail in Terminal 2 (`Ctrl-C`). You just failed and recovered a whole site with the client none the wiser.
 
 [NOTE]
 .Why the brief pause, and why no `404`/`503`
