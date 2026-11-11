@@ -8,7 +8,7 @@ repo. `tools/ws/adm` is the operator CLI; attendees only get `ws` inside their c
 3. [During a delivery](#3-during-a-delivery)
 4. [After a delivery](#4-after-a-delivery)
 5. [Troubleshooting](#5-troubleshooting)
-6. [What the install never changes](#6-what-the-install-never-changes)
+6. [Dedicated cluster](#6-dedicated-cluster)
 
 ---
 
@@ -19,6 +19,7 @@ repo. `tools/ws/adm` is the operator CLI; attendees only get `ws` inside their c
 | Need | Value |
 |---|---|
 | OpenShift | 4.20 or newer (verified on 4.22) |
+| Cluster | Dedicated and fresh: the install changes cluster-wide settings ([§6](#6-dedicated-cluster)) |
 | Access | `cluster-admin` |
 | Storage | A default StorageClass. Some labs need RWX. |
 | Nodes | `linux/amd64`. See [Node count](#node-count). |
@@ -112,13 +113,13 @@ Both floors exist for one module, `deployment-targets-scheduling`:
    tools/ws/adm preflight
    ```
 
-   It must end with `✅ ready to install`. On a customer cluster, **show them this output first.**
+   It must end with `✅ ready to install`.
 
    | Row | Meaning |
    |---|---|
    | `ADOPT` | They already have it. The workshop reuses theirs; uninstall leaves it. |
    | `CREATE` | The workshop adds it; uninstall removes it. |
-   | `⚠ Argo CD controller memory` | Their Argo CD runs at 2Gi; the workshop needs 6Gi. The install asks before raising it (restarts their controller; uninstall restores it). |
+   | `⚠ Argo CD controller memory` | The cluster's Argo CD runs at 2Gi; the workshop needs 6Gi. The install raises it (restarts the controller). |
    | `⚠ prior install detected` | The installer ran here before. Re-running is safe. For a new cohort, use `ogsr-reset.sh` ([§4](#4-after-a-delivery)). |
 
    The preflight does not cover each operator. To preview those too (also read-only):
@@ -150,6 +151,7 @@ Both floors exist for one module, `deployment-targets-scheduling`:
    | `users` | Attendee count (`user1`…`userN`). Change later with `adm scale-users N`. |
    | `cluster_domain` | `""` to auto-detect |
    | `workshop_user_password` | Shared attendee password. Memorable on purpose; not a secret. |
+   | `dedicated_cluster` | Must be `true`: the install refuses otherwise ([§6](#6-dedicated-cluster)) |
    | `maas.endpoint` / `.model` / `.api_key` | The AI endpoint, model and key |
    | `lightspeed` | `true` installs OpenShift Lightspeed on your model. Skipped automatically without a MaaS key, or when the cluster already has Lightspeed. |
    | `modules_disabled` | Modules to leave out, e.g. `[m13, m22]`. Hidden from the cockpit, and their components are not installed. |
@@ -271,7 +273,7 @@ gets crowded, reset finished modules.
 
 ### Remove the workshop
 
-1. Preview. **Never skip this on a customer cluster.**
+1. Preview.
 
    ```bash
    ./bootstrap/ogsr-uninstall.sh --dry-run    # WIPE / PRESERVE plan
@@ -445,17 +447,22 @@ Expected. There is no MetalLB, on purpose. Everything is exposed through Routes.
 
 ---
 
-## 6. What the install never changes
+## 6. Dedicated cluster
 
-- **Operators already on the cluster** are adopted where safe — never reinstalled, upgraded or
-  removed. Where adopting is not safe, ours runs alongside theirs and the install says so.
-- **Cluster-wide defaults stay as they are.** (That is why the console opens in a new tab: embedding
-  it would need a cluster-wide ingress change.)
-- **Attendees are walled off** from the organisation's namespaces and from each other: one Argo CD
-  AppProject per attendee, enforced by an admission policy.
-- **Uninstall removes what we created and leaves the rest.** A CRD the owner's operators also use is
-  never offered for deletion.
-- Two Argo CD instances: the platform one builds every attendee's world; a second one is where
-  attendees create their own Applications, so an attendee mistake cannot break the machinery.
+The workshop installs only on a dedicated, fresh cluster (`dedicated_cluster: true`). Besides the
+operators and the workshop's own namespaces, it changes these cluster-wide settings:
 
-The test for any change: *would anything of the cluster owner's differ after a full removal?*
+- **Identity:** adds an htpasswd identity provider with the attendee accounts to `oauth/cluster`.
+- **Nodes:** labels every node with a synthetic zone (`workshop.redhat.com/zone`) and labels and taints
+  one worker as the batch pool (`workshop.redhat.com/pool=batch:NoSchedule`).
+- **Console:** enables the operators' console plugins.
+- **Argo CD:** raises the `openshift-gitops` controller memory limit to 6Gi.
+- **Cluster RBAC and policy:** attendee ClusterRoles and bindings (read-only cluster views, Gateway
+  rights in their own namespaces), and an admission policy that limits attendee Argo CD Applications.
+- **Shared objects:** a `java-21` builder ImageStream in `openshift`, and Kueue cluster queues.
+
+`ogsr-uninstall.sh` removes the workshop's own objects but does not restore every setting above.
+Dispose of the cluster after the delivery rather than hand it back.
+
+The platform portfolio on its own (`platform-portfolio/`) stays safe on a shared cluster: it adopts
+operators the cluster already runs and asks before changing anything it does not own.

@@ -92,6 +92,13 @@ case "$MAAS_MODEL" in
   *"<"*|*">"*|CHANGEME) MAAS_MODEL_WAS_PLACEHOLDER="true"; MAAS_MODEL="" ;;
 esac
 WS_PASS="$(v '.workshop_user_password')"
+# The workshop layer targets DEDICATED, fresh clusters (owner decision 2026-11-12): it changes cluster-wide
+# settings (INSTALL.md §6). Refused here, before anything touches the cluster, unless vars.yaml says so.
+[[ "$(v '.dedicated_cluster')" == "true" ]] \
+  || die "dedicated_cluster is not true in ${VARS} — the workshop changes cluster-wide settings and installs only on a dedicated, fresh cluster. Set 'dedicated_cluster: true' (see INSTALL.md §6)."
+# A dedicated cluster has no other owner to ask, so the adopted-Argo-CD memory raise needs no prompt.
+# (The portfolio installer run on its own keeps asking.)
+export OGSR_ADOPTED_ARGOCD_MEMORY="${OGSR_ADOPTED_ARGOCD_MEMORY:-apply}"
 # Console plugins default ON (owner 2026-07-19: mostly console links). Explicit `false` opts out; the
 # workshop-config hook stays append-if-absent and skips any name without a matching ConsolePlugin CR.
 CONSOLE_PLUGINS="$(v '.console_plugins')"; [[ "$CONSOLE_PLUGINS" == "false" ]] || CONSOLE_PLUGINS="true"

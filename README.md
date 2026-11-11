@@ -86,8 +86,8 @@ git clone https://github.com/serhat-dirik/OCP-Getting-Started-Revamped.git
 cd OCP-Getting-Started-Revamped
 ```
 
-**2. Preflight** — read-only. It shows what the install would adopt versus create. On a customer
-cluster, show them this first.
+**2. Preflight** — read-only. It shows what the install would adopt versus create. The workshop
+needs a dedicated, fresh cluster ([INSTALL.md §6](INSTALL.md#6-dedicated-cluster)).
 
 ```bash
 tools/ws/adm preflight
@@ -235,7 +235,8 @@ One deliberate side effect: the Developer Hub catalog is **not pruned**, so comp
 removed users stay listed after their namespaces are gone. Expected, not a bug.
 
 **d) Remove the workshop entirely** — reach for this only when the *cluster* has to go back to its
-owner. Adopted operators and anything the cluster had before the install are preserved:
+owner. The workshop needs a dedicated cluster and does not restore every cluster-wide setting it changed
+([INSTALL.md §6](INSTALL.md#6-dedicated-cluster)), so prefer disposing of the cluster. Adopted operators are preserved:
 
 ```bash
 ./bootstrap/ogsr-uninstall.sh --dry-run   # prints the full removal plan; changes nothing
