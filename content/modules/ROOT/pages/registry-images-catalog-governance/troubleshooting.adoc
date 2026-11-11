@@ -4,7 +4,10 @@ include::partial$version-attributes.adoc[]
 
 // Real entries from performing the module on OCP 4.21.22 (Kubernetes 1.34, 2026-07-13 as user3)
 // plus known failure-mode seeds. Format: Symptom / Cause / Fix. Commands use $NS = {user}-dev (set it
-// once). NAMESPACE in output is the sample user user3-dev.
+// once). NAMESPACE in output is the sample user user3-dev. The two allowlist entries (exercise 6) were
+// added 2026-11-12 as user9 on OCP 4.22.22: the "accepted docker.io import" + "tag points to" error pair
+// is a real capture from a cluster whose allowlist was not yet applied; the refused-import wording is
+// the 2026-07-31 disposable-cluster capture kept in instructor.adoc.
 
 Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
 Set the shortcut first: `NS={user}-dev`.
@@ -92,18 +95,47 @@ oc get is parasol-claims -n $NS -o jsonpath='{range .status.tags[*]}{.tag}={.ite
 +
 Either way, `prod` and `1.0` share the same `sha256` — the promotion is honest; `referencePolicy` is a pull-source detail, not the identity.
 
-== The governance reads are "Forbidden" (exercise 6)
+== An import is refused: `registry "docker.io" not allowed by whitelist`
 
-Symptom:: `oc get image.config.openshift.io/cluster` (or the samples/pruner/catalogsource reads) returns `Error … "…" is forbidden`.
+Symptom:: `oc import-image … --from=docker.io/…` prints `The ImageStream "…" is invalid:` with two `Forbidden: registry "docker.io" not allowed by whitelist` lines, and no ImageStream exists afterwards.
+Cause:: Working as designed (exercise 6). The cluster's `Image` config sets `allowedRegistriesForImport`, and admission refuses any import from a registry that is not on the list — for every user, cluster-admin included. It is a validation error (HTTP `422`), not a permissions problem, so no role you could be granted changes it.
+Fix:: Import the same kind of image from a registry on the list. Read the list, then use an approved source:
++
+[source,sh,role=execute]
+----
+oc get image.config.openshift.io cluster -o jsonpath='{range .spec.allowedRegistriesForImport[*]}{.domainName}{"\n"}{end}'
+oc import-image nginx -n $NS --from=registry.access.redhat.com/ubi9/nginx-124:latest --confirm | head -1
+----
++
+On a real team, a registry that genuinely needs to be on the list is a request to the platform team — the list is one cluster-wide field they own.
+
+== My `docker.io` import was accepted — and the approved one now fails
+
+Symptom:: In exercise 6, `oc import-image nginx … --from=docker.io/library/nginx:latest` printed `imagestream.image.openshift.io/nginx imported`, and the Red Hat import that follows fails with `error: the tag "latest" points to "docker.io/library/nginx:latest" - use the 'tag' command if you want to change the source to "registry.access.redhat.com/ubi9/nginx-124:latest"`.
+Cause:: This cluster has no import allowlist: `allowedRegistriesForImport` was never set, so every registry is allowed. The workshop installer sets it; if it is missing, that is a platform gap, not your mistake. The second error is a side effect: `oc import-image` will not silently re-point an existing tag at a different source.
+Fix:: Tell your instructor the allowlist is missing. Then delete the stream and import from the approved registry, so the rest of the module matches:
++
+[source,sh,role=execute]
+----
+oc get image.config.openshift.io cluster -o jsonpath='allowed: {.spec.allowedRegistriesForImport[*].domainName}{"\n"}'
+oc delete is nginx -n $NS
+oc import-image nginx -n $NS --from=registry.access.redhat.com/ubi9/nginx-124:latest --confirm | head -1
+----
++
+An empty `allowed:` line confirms the cause. Both behaviours were reproduced on a build cluster where the allowlist had not been applied yet.
+
+== The governance reads are "Forbidden" (exercises 6–7)
+
+Symptom:: `oc get image.config.openshift.io/cluster` (or the samples/ConsoleSample/pruner/catalogsource reads) returns `Error … "…" is forbidden`.
 Cause:: The read-only `platform-observer` role isn't granting those resources — the Registry, Images & Catalog Governance extension (image config, samples, pruner, catalog sources, ConsoleSample) didn't land on this cluster, or your user isn't in the `workshop-attendees` group bound to it.
 Fix:: This is a *platform* gap, not something to fix in your namespace — confirm the grant and tell your instructor if it's missing:
 +
 [source,sh,role=execute]
 ----
-oc get clusterrole platform-observer -o jsonpath='{range .rules[*]}{.apiGroups}:{.resources}{"\n"}{end}' | grep -iE 'image|sample|catalog'
+oc get clusterrole platform-observer -o jsonpath='{range .rules[*]}{.apiGroups}:{.resources}{"\n"}{end}' | grep -iE 'image|sample|catalog|console'
 ----
 +
-Expect rules covering `config.openshift.io` `images`, `imageregistry.operator.openshift.io` `imagepruners`/`configs`, `samples.operator.openshift.io` `configs`, and `operators.coreos.com` `catalogsources`. If they're absent, the workshop-config `platform-observer` extension needs to be applied (an instructor/platform action).
+Expect rules covering `config.openshift.io` `images`, `imageregistry.operator.openshift.io` `imagepruners`/`configs`, `samples.operator.openshift.io` `configs`, `console.openshift.io` `consolesamples`, and `operators.coreos.com` `catalogsources`. If they're absent, the workshop-config `platform-observer` extension needs to be applied (an instructor/platform action).
 
 == My namespaced Template doesn't appear in the Software Catalog
 

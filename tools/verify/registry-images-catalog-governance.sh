@@ -7,11 +7,13 @@
 #   End:   the attendee ran the three namespaced beats — parasol-claims carries the promoted tag
 #          (tag/promote), an ext-ubi ImageStream re-imports an external repo on a schedule (scheduled
 #          import), a custom Template lives in {user}-dev (namespaced catalog governance), and the sample
-#          pull secret is referenced for pull by a workload or ServiceAccount (deploy-from-private-registry).
+#          pull secret is referenced for pull by a workload or ServiceAccount (deploy-from-private-registry),
+#          and an nginx ImageStream was imported from an APPROVED registry after the docker.io import was
+#          refused by the install-set image.config allowedRegistriesForImport (exercise 6).
 # Runnable as the ATTENDEE: reads ONLY {user}-dev objects the attendee sees via namespace admin (rule 10).
 # The cluster-wide governance surface registry-images-catalog-governance also teaches (image.config, samples Config, ImagePruner, IDMS/
 # ITMS, OperatorHub sources) is inspected via platform-observer and exercised by ws-meta smokeCommands, not
-# here. The G1 cockpit smoke runs `--entry-only` as {user}.
+# here — including whether the allowlist is set at all; this script only sees its namespaced CONSEQUENCE. The G1 cockpit smoke runs `--entry-only` as {user}.
 #
 # IMAGE-GAP NOTE: the seed tag resolves against the shared parasol-images build (populated by the workshop
 # image-load step). Checks assert the DECLARED spec tags + object presence (immediate, import-independent),
@@ -27,6 +29,7 @@ SEED_TAG="1.0"
 PROMOTE_TAG="prod"
 EXT_STREAM="ext-ubi"
 PULL_SECRET="parasol-registry-creds"
+APPROVED_STREAM="nginx"   # exercise 6: refused from docker.io, then imported from an approved registry
 
 # --- helpers (oc only) -------------------------------------------------------
 
@@ -127,6 +130,16 @@ pull_secret_deploy_ready() {
   return 0
 }
 
+# Exercise 6's outcome: the nginx stream exists and NO tag of it is sourced from Docker Hub — written
+# explicitly (docker.io/, index.docker.io/) or implicitly (no slash at all, e.g. `nginx:latest`, or a first
+# path segment with no dot or colon, e.g. `library/nginx`). A docker.io-sourced stream can only exist if the import was ACCEPTED,
+# i.e. the cluster has no allowlist — the hint says so, because that is a platform gap, not the attendee's.
+approved_import() {
+  oc_read get is "$APPROVED_STREAM" -n "$NS" -o jsonpath='{range .spec.tags[*]}{.from.name}{"\n"}{end}' || return 1
+  [[ -n "$OC_OUT" ]] || return 1
+  ! printf '%s\n' "$OC_OUT" | grep -qE '^(docker\.io/|index\.docker\.io/|[^/]*$|[^./:]+/)'
+}
+
 # Entry clean-slate helpers: return 0 when the lab outcome is ABSENT (attendee has done nothing).
 # Each requires the namespace to actually exist first — otherwise "absent" is vacuous (true on a
 # cluster where nothing materialized at all), not evidence of a clean, correctly-seeded entry state.
@@ -144,6 +157,10 @@ no_promote_tag() {
 no_ext_stream() {
   oc_present get ns "$NS" -o name || return 1
   oc_absent get is "$EXT_STREAM" -n "$NS" -o name
+}
+no_approved_stream() {
+  oc_present get ns "$NS" -o name || return 1
+  oc_absent get is "$APPROVED_STREAM" -n "$NS" -o name
 }
 no_custom_template() {
   oc_present get ns "$NS" -o name || return 1
@@ -169,21 +186,25 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: clean slate — the attendee has acted on NOTHING yet ---------------------------------
   check "no promoted :${PROMOTE_TAG} tag yet (attendee tags/promotes it)"    no_promote_tag      || hint "entry ships only :${SEED_TAG}; if :${PROMOTE_TAG} exists the lab already started — ws reset registry-images-catalog-governance --user ${USER_NAME}"
   check "no ${EXT_STREAM} scheduled-import stream yet (attendee imports it)" no_ext_stream       || hint "entry ships no ${EXT_STREAM}; if it exists the lab already started — ws reset registry-images-catalog-governance --user ${USER_NAME}"
+  check "no ${APPROVED_STREAM} ImageStream yet (attendee imports it in exercise 6)" no_approved_stream || hint "entry ships no ${APPROVED_STREAM}; if it exists the lab already started — ws reset registry-images-catalog-governance --user ${USER_NAME}"
   check "no custom Template in ${NS} yet (attendee adds one)"                no_custom_template  || hint "entry ships no namespaced Template; if one exists the lab already started — ws reset registry-images-catalog-governance --user ${USER_NAME}"
   check "sample pull Secret is NOT referenced yet (attendee links/uses it)"  secret_unreferenced || hint "entry ships it unreferenced; if a SA/Deployment uses it the lab already started — ws reset registry-images-catalog-governance --user ${USER_NAME}"
 else
-  # --- end state: the lab's OUTCOMES — promote + scheduled import + catalog Template + pull-secret use ---
+  # --- end state: the lab's OUTCOMES — promote + scheduled import + catalog Template + pull-secret use +
+  #     an approved-registry import (exercise 6) ---
   # Assert OUTCOMES (a promoted tag exists; a scheduled stream exists; a custom Template exists; the pull
   # secret is referenced), never the exact mechanism, so any correct solution stays green (rule 14).
   info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
   check "parasol-claims carries the promoted :${PROMOTE_TAG} tag (tag/promote)" has_tag "$PROMOTE_TAG" \
     || hint "not done yet — the entry state ships only :${SEED_TAG}, and promoting is the lab: oc tag ${NS}/${IS_NAME}:${SEED_TAG} ${NS}/${IS_NAME}:${PROMOTE_TAG}"
   check "${EXT_STREAM} ImageStream re-imports on a schedule (scheduled import)" ext_scheduled \
-    || hint "not done yet — the entry state ships no ${EXT_STREAM}, and importing it is the lab: oc import-image ${NS}/${EXT_STREAM} --from=registry.access.redhat.com/ubi9/ubi:latest --scheduled --confirm"
+    || hint "not done yet — the entry state ships no ${EXT_STREAM}, and importing it is the lab: oc import-image ${EXT_STREAM} -n ${NS} --from=registry.access.redhat.com/ubi9/ubi:latest --scheduled --confirm"
   check "a custom Template exists in ${NS} (namespaced catalog governance)" custom_template_min 1 \
     || hint "not done yet — the entry state ships no namespaced Template; adding one is the lab: oc apply -f <your-template>.yaml -n ${NS} (see the lab)"
   check "sample pull Secret ${PULL_SECRET} is referenced for pull (private-registry deploy)" secret_referenced \
     || hint "not done yet — the entry state ships ${PULL_SECRET} unreferenced on purpose; using it is the lab: oc secrets link deployer ${PULL_SECRET} --for=pull -n ${NS} (or name it in a pod's imagePullSecrets)"
+  check "${APPROVED_STREAM} ImageStream imported from an approved registry, not docker.io (import allowlist)" approved_import \
+    || hint "not done yet? exercise 6 ends with: oc import-image ${APPROVED_STREAM} -n ${NS} --from=registry.access.redhat.com/ubi9/nginx-124:latest --confirm. If ${APPROVED_STREAM} EXISTS but is sourced from docker.io, the docker.io import was accepted: the cluster has no import allowlist (a platform gap — tell your instructor); oc delete is ${APPROVED_STREAM} -n ${NS}, then re-import from the approved registry"
   check "the workload naming ${PULL_SECRET} is actually running (mechanic B)" pull_secret_deploy_ready \
     || hint "not done yet? exercise 4's Deployment does not exist until you create it, so this red is expected before then. If it EXISTS and is short of >=1 ready replica, that one is real — and if it is ImagePullBackOff with 'authentication required', the pod template names a pull secret AND pulls from the internal registry: naming one REPLACES the ServiceAccount's default-dockercfg-*, so use a public image or name both secrets"
 fi

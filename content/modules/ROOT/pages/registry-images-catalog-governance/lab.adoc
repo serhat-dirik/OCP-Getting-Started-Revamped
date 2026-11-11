@@ -14,11 +14,17 @@ include::partial$version-attributes.adoc[]
 // and-fix, the pull-secret link + pod-level reference, the namespaced Template create+deploy, and the
 // whole governance-surface read are real captures. The captures were taken in user3-dev; the namespace
 // is now rendered as {user}-dev in the output blocks (see above) while every other value stays
-// byte-faithful. Digests are the real captured sha256 values. The cluster-wide governance
-// mutations (allowedRegistriesForImport / registrySources / IDMS-ITMS / samples-skip / ConsoleSample)
-// are [INSTRUCTOR-DEMO] singletons — attendees READ them, never set them. Console click-paths are
-// grounded against the unified console (OCP 4.19+, no perspective switch); labels a build couldn't
-// click get CAPTURE-VERIFY + the authoritative CLI.
+// byte-faithful. Digests are the real captured sha256 values. No exercise is instructor-only: the
+// INSTALL sets image.config `allowedRegistriesForImport` before the workshop (the list lives in the
+// platform lane's install change), and attendees read it and hit it with two imports in their own
+// namespace (exercise 6). Exercises 6-7 were re-performed as user9 on OCP 4.22.22 on 2026-11-12: the
+// approved nginx-124 import, the samples/ConsoleSample/catalog reads and the pruner read are real
+// captures. The REFUSED docker.io import could not be captured there — the allowlist was not yet applied
+// on that cluster, and a builder lane never sets cluster config — so its block carries
+// TODO(verify-on-cluster) and narrates the shape of the 2026-07-31 disposable-cluster capture recorded
+// in instructor.adoc. registrySources / IDMS-ITMS mirroring stays concept-only (it re-renders every
+// node). Console click-paths are grounded against the unified console (OCP 4.19+, no perspective
+// switch); labels a build couldn't click get CAPTURE-VERIFY + the authoritative CLI.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -69,18 +75,18 @@ ws prep registry-images-catalog-governance
 
 This demo runs from the *entry* state — only the seeded `parasol-claims:1.0` ImageStream in `{user}-dev` and the sample pull secret, nothing promoted and nothing imported — so there is no finished state to stage. The same command returns the world to that state between runs.
 
-If step 2 has been run, confirm the cluster-wide import policy is empty again before the next session:
+Step 2 relies on the import allowlist the workshop installer sets on the cluster. Confirm it is in place:
 
 [source,sh,role=execute]
 ----
-oc get image.config.openshift.io/cluster -o jsonpath='allowed-now={.spec.allowedRegistriesForImport}{"\n"}'
+oc get image.config.openshift.io/cluster -o jsonpath='allowed: {.spec.allowedRegistriesForImport[*].domainName}{"\n"}'
 ----
+
+Expect a list of Red Hat registries and no `docker.io`. If it prints `allowed:` and nothing else, the allowlist is not set and the `docker.io` import in step 2 will be accepted.
 
 Keep the terminal font large enough for a `sha256` digest to be readable: the two digests in step 1 and the refusal in step 2 are the evidence this demo rests on.
 
-NOTE: The wording of the refusal in step 2 is deliberately not quoted anywhere on this page, because no capture from the cluster you are on can exist — the patch mutates a singleton and is only ever run on a disposable cluster. What is certain: the import is refused *at admission*, instantly, with no node reboot and no exemption, cluster-admin included; and `oc` answers with a multi-line *validation* error (`Invalid`, HTTP `422`), not a tidy one-liner and not a `403`. The word *Forbidden* is on that screen more than once — as the per-field cause reason, not as the HTTP status. Call the import refused or rejected, point at the cause line naming the registry, and move on.
-
-CAUTION: Step 2 patches `image.config.openshift.io/cluster`, a cluster-wide singleton. While the field is set it blocks imports for *every* concurrent user, and the patch itself rolls the `openshift-apiserver` for every tenant. Run this demo on your own demo cluster, never on a shared workshop cluster mid-session. Step 2 lifts the field again as part of the demo; the check above confirms it.
+NOTE: The refusal in step 2 is refused *at admission*, instantly, with no node reboot and no exemption, cluster-admin included. `oc` answers with a multi-line *validation* error (`Invalid`, HTTP `422`), not a tidy one-liner and not a `403`. The word *Forbidden* is on that screen more than once — as the per-field cause reason, not as the HTTP status. Call the import refused or rejected, point at the cause line naming the registry, and move on.
 ====
 
 === Brief
@@ -102,7 +108,7 @@ The catalog is curated with the same kind of lever: OperatorHub sources, the sam
 *In this demo*
 
 . The tested claims image promoted to production by immutable digest, with `prod` and `1.0` proven to be the same bits
-. An unapproved `docker.io` import refused by an allowed-registries policy, then allowed again the moment it is lifted
+. An unapproved `docker.io` import refused by the cluster's allowed-registries policy, and the same need met from an approved registry
 . A base image marked for scheduled re-import, so it stays current with nobody watching it
 . A catalog entry published into one project, and offered in that project alone
 
@@ -128,38 +134,37 @@ oc get is parasol-claims -n $NS -o jsonpath='{range .status.tags[*]}{.tag}{" -> 
 
 Both tags print the same `sha256`. `prod` is a second *name* for one image, not a second copy of it — an ImageStream promotion is a pointer to immutable content.
 
-=== 2 · Set the floor: where images may come from — 3 min
+=== 2 · The floor: where images may come from — 3 min
 
-As it stands, this cluster will import an image from anywhere on the public internet. Set the floor to the registries Parasol trusts, watch an unapproved `docker.io` import be turned away, then lift it and watch the same import succeed.
+The platform team set this cluster's floor before anyone signed in: images are imported only from registries Parasol trusts. Read that list, watch an unapproved `docker.io` import be turned away, then meet the same need from an approved registry.
 
-image::registry-images-catalog-governance/registry-images-catalog-governance-04-cluster-image-config.png["The cluster-scoped Image configuration object — config.openshift.io/v1, kind Image, name cluster — on its YAML tab, shown whole. Line 46 is a bare spec with an empty pair of braces: nothing is set, so neither allowedRegistriesForImport nor registrySources exists and no import restriction is in force. Below it, status reports imageStreamImportMode Legacy and internalRegistryHostname image-registry.openshift-image-registry.svc:5000."]
+[mermaid]
+....
+include::example$diagrams/registry-images-catalog-governance/05-import-allowlist.mmd[]
+....
 
 *Why it matters*
 
-Nothing in the default configuration stops `oc import-image docker.io/anything`. One field on this object is the difference between "anywhere" and "only what we trust", and it takes effect at admission — instantly, with no node change and no exemption, cluster-admin included.
+Without this list, `oc import-image docker.io/anything` succeeds. One field on the cluster `Image` config is the difference between "anywhere" and "only what we trust", and it takes effect at admission — instantly, with no node change and no exemption, cluster-admin included.
 
 [source,sh,role=execute]
 ----
-oc get image.config.openshift.io/cluster -o jsonpath='allowed-now={.spec.allowedRegistriesForImport}{"\n"}'
-oc patch image.config.openshift.io/cluster --type=merge \
-  -p '{"spec":{"allowedRegistriesForImport":[{"domainName":"registry.redhat.io"},{"domainName":"registry.access.redhat.com"}]}}'
-oc import-image demo-blocked -n $NS --from=docker.io/library/nginx:latest --confirm
+oc get image.config.openshift.io/cluster -o jsonpath='{range .spec.allowedRegistriesForImport[*]}{.domainName}{"\n"}{end}'
+oc import-image nginx -n $NS --from=docker.io/library/nginx:latest --confirm
 ----
 
 The import is refused and no image arrives. `oc` answers with a multi-line validation error rather than a single line; the cause line names the registry that was turned away. Nothing rebooted and no pool rolled — admission simply declined the request.
 
-Lifting the field again is the other half of the point:
+The same need, met from a registry on the list — a Red Hat-built nginx:
 
 [source,sh,role=execute]
 ----
-oc patch image.config.openshift.io/cluster --type=json -p '[{"op":"remove","path":"/spec/allowedRegistriesForImport"}]'
-oc import-image demo-blocked -n $NS --from=docker.io/library/nginx:latest --confirm >/dev/null && echo "now allowed"
-oc delete is demo-blocked -n $NS >/dev/null
+oc import-image nginx -n $NS --from=registry.access.redhat.com/ubi9/nginx-124:latest --confirm | head -1
 ----
 
 *What just happened*
 
-The same import that was impossible a moment ago succeeded, and the temporary stream was cleaned up. One field decided whether an image from an unapproved registry could enter the cluster at all — which is why it is the control a platform team sets on day one, and the heavier node-level controls are planned work.
+The same stream name was refused from `docker.io` and accepted from `registry.access.redhat.com`, by one field nobody in this project can change. That is why it is the control a platform team sets on day one — and why the heavier node-level controls, `registrySources` and IDMS/ITMS mirroring, are planned maintenance work rather than something switched on in a session.
 
 === 3 · A base image that re-pulls itself — 2 min
 
@@ -234,7 +239,7 @@ oc get templates -n $NS
 Three reasons, all of them on screen in this demo. It pins a moving tag to an immutable digest, so `prod` is provably the bits that were tested. It can re-import on a schedule, so a base image stays current on its own. And with `referencePolicy: Local` it acts as a pull-through cache — workloads pull from the internal registry rather than the source, which is faster and survives the source being briefly unreachable. A bare image reference gives you none of the three: the tag can move silently, nothing re-imports, and every pod pulls from the source.
 
 *The allowed-registries control is cluster-wide — how do you change it safely?*::
-`allowedRegistriesForImport` is admission-level and instant: no node reboot, no pool roll, and it reverts as fast as it applies. It does govern every user's imports while it is set, so it is changed in an announced window like any other cluster policy. The heavier controls are the ones to plan around — `registrySources` and IDMS/ITMS mirroring re-render `/etc/containers/registries.conf` on every node and roll the pool, so they are maintenance work, never a live toggle.
+`allowedRegistriesForImport` is admission-level and instant: no node reboot, no pool roll, and it reverts as fast as it applies. It governs every user's imports, so it is set before people arrive — this cluster's installer set it — and changed afterwards in an announced window like any other cluster policy. The list must name every registry the cluster already imports from, including the release images and the stock samples, or their scheduled re-imports start failing. The heavier controls are the ones to plan around — `registrySources` and IDMS/ITMS mirroring re-render `/etc/containers/registries.conf` on every node and roll the pool, so they are maintenance work, never a live toggle.
 
 *Can we push to the internal registry from outside the cluster?*::
 Not on this cluster: the registry has no external route, so it is reachable only from inside, and everything runs through the API — `oc tag`, `oc import-image`, in-cluster builds. A default route can be enabled, but it adds an internet-facing surface with TLS and pull-secret handling to own. Route-free is the usual posture for shared and locked-down clusters. Where an organization needs a shared multi-cluster registry with scanning, geo-replication and fine-grained access control, that is Red Hat Quay rather than the integrated registry.
@@ -333,7 +338,7 @@ oc get is parasol-claims -n $NS -o jsonpath='{range .spec.tags[*]}{.name}{" -> "
 ----
 
 Finally, peek at a *curated* stream the platform team shipped for everyone — the shared `java-21` builder image in the `openshift` namespace.
-It's the same mechanics you just read, applied as *governance* (you'll return to this in exercise 6):
+It's the same mechanics you just read, applied as *governance* (you'll return to this in exercise 7):
 
 [source,sh,role=execute]
 ----
@@ -691,7 +696,7 @@ parasol-registry-demo-...                1/1     Running   0          5s
 ⏱ *~5 min* · a namespaced Template appears in *your* catalog and nobody else's
 
 The Software Catalog isn't fixed — you can *add* to it.
-A `Template` you create in your *own* project becomes a one-click catalog entry in *your* Software Catalog only (contrast the cluster-wide samples operator, which you'll read in exercise 6).
+A `Template` you create in your *own* project becomes a one-click catalog entry in *your* Software Catalog only (contrast the cluster-wide samples operator, which you'll read in exercise 7).
 Create a Parasol claims quickstart Template — save this manifest and apply it:
 
 [source,sh,role=execute]
@@ -848,36 +853,112 @@ service/claims-quickstart   ClusterIP   172.30.x.x       8080/TCP
 ✔ *Verify:* You published a namespaced `Template` (`parasol-claims-quickstart`) that appears in *your* Software Catalog only, then *instantiated* it to create a running `claims-quickstart` Deployment + Service — a self-service catalog entry with no cluster-admin required.
 ****
 
-== 6. Read the governance surface (instructor demo)
-⏱ *~5 min* · watch — where images may come from, and what the catalog offers
+== 6. Hit the import allowlist
+⏱ *~5 min* · read where images may come from, get refused, fix it with an approved registry
 
 Everything so far was *yours* to change, in your own namespace.
-The controls that govern *the whole cluster* — which registries images may come from, what the catalog offers — are cluster singletons.
-You *read* them here (the read-only `platform-observer` role grants you cluster-wide *read*); *setting* them is the instructor's segment, because one change affects every tenant.
+Which registries images may be imported from is decided *cluster-wide*, on the `Image` config object — and the platform team set it before the workshop started.
+You can't change it (one edit affects every tenant), but you can read it and run into it.
 
-First, the *trust boundary* — where images may come from.
-Read the cluster `Image` config and the mirroring objects:
+Read the policy (the read-only `platform-observer` role lets you read cluster configuration):
 
 [source,sh,role=execute]
 ----
-oc get image.config.openshift.io/cluster -o jsonpath='allowedRegistriesForImport={.spec.allowedRegistriesForImport}{"\n"}registrySources={.spec.registrySources}{"\n"}'
-oc get imagedigestmirrorset,imagetagmirrorset -A
+oc get image.config.openshift.io cluster -o yaml
 ----
 
-.Expected output (open by default here — no restriction, no mirrors)
+// TODO(verify-on-cluster): this block is the list the platform install applies,
+// not a capture — on 2026-11-12 the build cluster still read `spec: {}`.
+// Re-capture as an attendee once the platform lane's install change has landed, and drop this marker.
+.Expected output (the part that matters — `spec` and `status`)
 [source,texinfo]
 ----
-allowedRegistriesForImport=
-registrySources=
-No resources found
+...
+spec:
+  allowedRegistriesForImport:
+  - domainName: registry.redhat.io
+  - domainName: registry.access.redhat.com
+  - domainName: quay.io
+  - domainName: image-registry.openshift-image-registry.svc:5000
+status:
+  imageStreamImportMode: Legacy
+  internalRegistryHostname: image-registry.openshift-image-registry.svc:5000
 ----
 
-Both are *empty* on this cluster — images may come from anywhere, and nothing is mirrored.
-Those are the fields the instructor will demonstrate: `allowedRegistriesForImport` (instant, admission-level) and `registrySources` / *ImageDigestMirrorSet (IDMS)* / *ImageTagMirrorSet (ITMS)* (heavy — they re-render every node).
+`allowedRegistriesForImport` is the whole policy: Red Hat's two registries, `quay.io` (where OpenShift's own release images live) and the internal registry.
+`docker.io` is not on it.
 
-image::registry-images-catalog-governance/registry-images-catalog-governance-04-cluster-image-config.png["The cluster-scoped Image configuration object — config.openshift.io/v1, kind Image, name cluster — on its YAML tab, shown whole. Line 46 is a bare spec with an empty pair of braces: nothing is set, so neither allowedRegistriesForImport nor registrySources exists and no import restriction is in force. Below it, status reports imageStreamImportMode Legacy and internalRegistryHostname image-registry.openshift-image-registry.svc:5000. Everything between line 10 and line 37 is managedFields, which the console renders in full — scroll past it."]
+Now do what a developer in a hurry does — import `nginx` straight from Docker Hub:
 
-Next, *retention* — the nightly pruner that reclaims registry storage:
+[source,sh,role=execute]
+----
+oc import-image nginx -n $NS --from=docker.io/library/nginx:latest --confirm
+----
+
+// TODO(verify-on-cluster): the wording below is the shape of the 2026-07-31 disposable-cluster capture
+// (instructor.adoc keeps it byte-exact), with this lab's stream name and the registry list elided. The
+// build cluster had no allowlist on 2026-11-12, so the same command was ACCEPTED there. Re-capture as
+// an attendee once the install sets the allowlist, and drop this marker.
+.Expected output (refused — a validation error with two causes; the registry list is elided here)
+[source,texinfo]
+----
+The ImageStream "nginx" is invalid:
+* spec.tags[latest].from.name: Forbidden: registry "docker.io" not allowed by whitelist: ...
+* status.tags[latest].items[0].dockerImageReference: Forbidden: registry "docker.io" not allowed by whitelist: ...
+----
+
+Read it like any failed import: the cause line names the registry that was turned away.
+It is *Invalid* — the request was refused at admission, instantly, with no node involved — so nothing was created:
+
+[source,sh,role=execute]
+----
+oc get is nginx -n $NS
+----
+
+.Expected output
+[source,texinfo]
+----
+Error from server (NotFound): imagestreams.image.openshift.io "nginx" not found
+----
+
+*The fix* is not a way around the policy — it is the same need met from a registry on the list.
+Red Hat builds nginx too:
+
+[source,sh,role=execute]
+----
+oc import-image nginx -n $NS --from=registry.access.redhat.com/ubi9/nginx-124:latest --confirm | head -1
+oc get is nginx -n $NS -o jsonpath='{range .status.tags[*]}{.tag}{" -> "}{.items[0].dockerImageReference}{"\n"}{end}'
+----
+
+.Expected output (Red Hat updates this image regularly, so your digest will differ)
+[source,texinfo]
+----
+imagestream.image.openshift.io/nginx imported
+latest -> registry.access.redhat.com/ubi9/nginx-124@sha256:c6ac8980fa5de4b92db6b7ed814ca8316697f97bfbe056f6f244a12c19cc728f
+----
+
+Same stream name, same kind of image — refused from `docker.io`, accepted from `registry.access.redhat.com`.
+
+IMPORTANT: If the `docker.io` import was *accepted* (`imagestream.image.openshift.io/nginx imported`), this cluster has no import allowlist — tell your instructor. Run `oc delete is nginx -n $NS` and then the Red Hat import above.
+
+[NOTE]
+.Why there is no mirroring exercise
+====
+Two heavier controls answer the same question at the container runtime: `registrySources` (which registries *any* pod or build may pull from) and *ImageDigestMirrorSet* / *ImageTagMirrorSet* (redirect pulls to a mirror — how a disconnected cluster runs).
+Changing either re-renders `/etc/containers/registries.conf` on *every* node and rolls the whole pool, rescheduling every tenant's pods.
+That is planned maintenance, not a workshop step, so they stay on the concept page.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* You read the cluster's `allowedRegistriesForImport` list, watched an import from `docker.io` refused at admission with no ImageStream created, and imported `nginx` from `registry.access.redhat.com` instead — the policy decides *where* images may come from, for everyone, cluster-admin included.
+****
+
+== 7. Read retention and the catalog supply
+⏱ *~3 min* · view-only — what the registry keeps, and what the catalog offers
+
+Two more cluster-wide controls, both read-only for you.
+First, *retention* — the nightly pruner that reclaims registry storage:
 
 [source,sh,role=execute]
 ----
@@ -885,60 +966,53 @@ oc get imagepruner/cluster -o jsonpath='keepTagRevisions={.spec.keepTagRevisions
 oc get cronjob image-pruner -n openshift-image-registry
 ----
 
-// Re-grounded on OCP 4.22.6: the `oc` client's `cronjob` printer now adds a TIMEZONE column between
-// SCHEDULE and SUSPEND (empty here — this CronJob sets no explicit zone). Included below.
-.Expected output (a daily pruner keeping the last 3 revisions)
+.Expected output (a daily pruner keeping the last 3 revisions — your ages will differ)
 [source,texinfo]
 ----
 keepTagRevisions=3 suspend=false
 NAME           SCHEDULE    TIMEZONE   SUSPEND   ACTIVE   LAST SCHEDULE   AGE
-image-pruner   0 0 * * *   <none>     False     0        101m            4d
+image-pruner   0 0 * * *   <none>     False     0        22h             26h
 ----
 
 `0 0 * * *` is midnight daily; it keeps the last 3 tag revisions and spares anything younger than an hour.
 On a multi-day event, an *unreferenced* image can be pruned overnight — which is why the images you use stay *referenced* by a running workload.
 
-Finally, the *catalog supply* — what developers can pick from.
-Read the samples operator, the operator catalog sources, and the cluster samples:
+Next, the *catalog supply* — what developers can pick from.
+Read how the samples operator is curated, how many samples it ships, any cluster-wide samples, and the operator catalog sources:
 
 [source,sh,role=execute]
 ----
-oc get configs.samples.operator.openshift.io/cluster -o jsonpath='samples: {.spec.managementState}{"\n"}'
+oc get configs.samples.operator.openshift.io/cluster -o jsonpath='samples: {.spec.managementState}{"\n"}skipped imagestreams: {.spec.skippedImagestreams}{"\n"}skipped templates: {.spec.skippedTemplates}{"\n"}'
 echo "sample imagestreams: $(oc get is -n openshift --no-headers | wc -l | tr -d ' ')  sample templates: $(oc get templates -n openshift --no-headers | wc -l | tr -d ' ')"
+oc get consolesamples
 oc get catalogsources -A
 ----
 
-.Expected output (a managed samples operator; the default catalogs plus a curated internal one — your exact counts and source list will vary)
+.Expected output (your counts and source list may vary)
 [source,texinfo]
 ----
 samples: Managed
+skipped imagestreams:
+skipped templates:
 sample imagestreams: 61  sample templates: 51
-NAMESPACE               NAME                  DISPLAY                         TYPE   PUBLISHER
-gitea-operator          redhat-rhpds-gitea    Red Hat Demo Platform (Gitea)   grpc   Red Hat Demo Platform
-openshift-marketplace   certified-operators   Certified Operators             grpc   Red Hat
-openshift-marketplace   community-operators   Community Operators             grpc   Red Hat
-openshift-marketplace   redhat-operators      Red Hat Operators               grpc   Red Hat
+No resources found
+NAMESPACE               NAME                  DISPLAY                         TYPE   PUBLISHER               AGE
+gitea-operator          redhat-rhpds-gitea    Red Hat Demo Platform (Gitea)   grpc   Red Hat Demo Platform   12h
+openshift-marketplace   certified-operators   Certified Operators             grpc   Red Hat                 26h
+openshift-marketplace   community-operators   Community Operators             grpc   Red Hat                 26h
+openshift-marketplace   redhat-operators      Red Hat Operators               grpc   Red Hat                 26h
 ----
 
-That's the catalog you browsed in the Build & Deliver module, *governed*: the samples operator manages about 60 image streams and 50-odd templates (the exact counts drift with the OpenShift release), and the default catalog sources plus one *curated internal* catalog (`redhat-rhpds-gitea`) feed OperatorHub.
-Don't be surprised if your source list is one row longer: clusters provisioned without the Red Hat Marketplace catalog (common on RHDP/bare-metal) show four sources; clusters with it show five — a `redhat-marketplace` row in `openshift-marketplace` appears when Marketplace is enabled.
-A platform team *skips* a sample it doesn't want and *adds* a `ConsoleSample` for one it does — exactly the levers your instructor demonstrates next.
+That's the catalog you browsed in the Build & Deliver module, *governed*.
+The samples operator is `Managed` with both skip lists empty, so every stock sample — about 60 image streams and 50-odd templates, counts that drift with the OpenShift release — is offered.
+A platform team removes *one* sample by naming it in `skippedImagestreams` or `skippedTemplates` — never `managementState: Removed`, which deletes them all — and adds a cluster-wide entry with a `ConsoleSample`; this cluster has none.
+The catalog sources feed OperatorHub: the defaults plus one *curated internal* catalog (`redhat-rhpds-gitea`). Clusters provisioned with the Red Hat Marketplace catalog show one more row.
 
-:demo-title: Govern the cluster-wide supply — block a registry, curate the catalog
-:demo-body: Your instructor blocks an unapproved registry with allowedRegistriesForImport (instant, then reverted), talks through registrySources + IDMS/ITMS mirroring (they reboot nodes, so they're pre-recorded), disables a stock catalog sample with skippedImagestreams, and adds a cluster ConsoleSample — the cluster-wide operations you just read the results of.
-include::partial$instructor-demo.adoc[]
-
-Your instructor demonstrates the *cluster-wide* operations you only read above (each affects every tenant, so they're not hands-on):
-
-. *Block a registry for import.* Set `image.config/cluster` `spec.allowedRegistriesForImport` to a trusted list, show an unapproved `oc import-image docker.io/...` *refused* by admission (instant, no reboot), then revert.
-. *Mirror for disconnected (talk-through).* `registrySources.allowedRegistries` + an *IDMS/ITMS* — how an air-gapped cluster pulls; pre-recorded because they re-render every node.
-. *Curate the catalog.* Disable one stock sample with the samples operator's `skippedImagestreams`/`skippedTemplates` (never `managementState: Removed`), and add a cluster `ConsoleSample`.
-
-You'll find the exact commands and expected output in this module's instructor guide.
+Your own lever on the catalog is the Template you published in exercise 5: the same curation, scoped to one project, with no cluster-admin and no ticket.
 
 [.checkpoint]
 ****
-✔ *Verify (observed):* You read the *trust boundary* (`allowedRegistriesForImport` and mirroring — empty here), the *retention* pruner (daily, keep 3 revisions), and the *catalog supply* (a managed samples operator with about 60 image streams + 50-odd templates, and the catalog sources — four or five, depending on the cluster — including a curated internal one) — the cluster-wide surface a platform team governs.
+✔ *Verify (observed):* You read the *retention* pruner (daily, keep 3 revisions) and the *catalog supply* — a `Managed` samples operator with nothing skipped, no cluster `ConsoleSample`, and the OperatorHub catalog sources including a curated internal one — and you know which lever is yours: a namespaced Template.
 ****
 
 == Challenge (optional)
