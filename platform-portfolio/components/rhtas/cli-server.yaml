@@ -1,0 +1,85 @@
+# RHTAS client downloads (cosign, rekor-cli, gitsign, ec …) served in-cluster.
+#
+# WHY: RHTAS 1.5 stopped deploying the operator-managed cli-server; its ConsoleCLIDownloads now point at
+# developers.redhat.com, which needs a Red Hat login (measured on OCP 4.22 / RHTAS 1.5.1, 2026-11-12). This
+# serves the same files from the RHTAS client-server image (the one trust-signing's keygen Job already
+# pins) at the route the older operator created: cli-server-<namespace>.<apps>, i.e.
+# https://cli-server-trusted-artifact-signer.<apps>/clients/linux/cosign-amd64.gz. Everything lives in
+# this component's own namespace.
+# Serves the client binaries from the RHTAS client-server image (httpd on 8080).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cli-server
+  namespace: trusted-artifact-signer
+  labels:
+    app.kubernetes.io/name: cli-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cli-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cli-server
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: httpd
+          image: registry.redhat.io/rhtas/client-server-rhel9@sha256:050f362dc6b245851e58348e82a057fac7a6efc31e274fe03f3420a440b8ef11
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /clients/linux/cosign-amd64.gz
+              port: http
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+---
+# In-cluster address of the client downloads.
+apiVersion: v1
+kind: Service
+metadata:
+  name: cli-server
+  namespace: trusted-artifact-signer
+  labels:
+    app.kubernetes.io/name: cli-server
+spec:
+  selector:
+    app.kubernetes.io/name: cli-server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+# Edge Route with no host: OpenShift names it cli-server-trusted-artifact-signer.<apps>, the URL labs use.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: cli-server
+  namespace: trusted-artifact-signer
+  labels:
+    app.kubernetes.io/name: cli-server
+spec:
+  to:
+    kind: Service
+    name: cli-server
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
