@@ -139,6 +139,8 @@ CLUSTER_OWNED_NAMESPACES = {
     # STATE_NS — created directly by bootstrap/install.sh for the ogsr-uninstall-state ConfigMap,
     # outside the portfolio entirely (see .Values.systemNamespace's comment in the chart).
     "ogsr-system": "bootstrap/install.sh",
+    # Shipped with OpenShift; holds cluster configuration (the project-request Template lives here).
+    "openshift-config": "OpenShift built-in",
 }
 
 
