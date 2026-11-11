@@ -11,6 +11,12 @@ include::partial$version-attributes.adoc[]
 // exchange to aud=parasol-fraud (401 with the user token, 200 with the exchanged token, and the
 // escalation to aud=parasol-batch that Keycloak refused). The minutes in the Demo page's step
 // headings are measured from that run.
+// UI-first rewrite, 2026-11-12, performed as user6 on OCP 4.22.22 / RHBK 26.6 (realm-user6): every
+// terminal step re-run; the Keycloak admin-console steps validated through the admin REST calls the
+// console makes (role-mappings POST/DELETE, evaluate-scopes/generate-example-access-token, client
+// reads), and the CLI lane's admin-API block run end to end as a throwaway realm-scoped realm-admin
+// (deleted after). Console labels grounded from the 26.6 admin UI's own i18n bundle and its
+// RoleMapping / ClientDetails chunks, served unauthenticated by the workshop Keycloak.
 // Source-block rule: subs="attributes" ONLY where {user}/{cluster_domain} must interpolate; blocks using
 // $NS/$REALM/$CLAIMS shell vars omit subs. Console labels I could not ground from a screenshot in the
 // build env are marked // CAPTURE-VERIFY for the media pass.
@@ -152,15 +158,15 @@ ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
 
 Your Parasol apps are running *wide open*: the claims API answers anyone, and the web frontend lets anyone in.
-On one shared Keycloak, *your own realm* (`realm-{user}`) has already been seeded with the clients, roles, and two users you will use.
+On one shared Keycloak, *your own realm* (`realm-{user}`) has already been seeded with the clients, roles, and two users you will use — and you are its administrator.
 You will put a front door on both apps — a browser login for the frontend, bearer tokens with a role check for the API — give the batch job a machine identity, learn to read a token, and finish with the token-exchange encore.
 
 [NOTE]
 .Where you work
 ====
-Keep two things open: a *terminal* logged in as `{user}` (the CLI tab of each step runs there), and the {ocp_console_url}[OpenShift web console^] (the Console tab).
-Most configuration steps can be done either way — pick a lane with the *Console / CLI* toggle and it stays put across the page.
-A few steps are *terminal-only* by nature: getting and decoding tokens, and calling the APIs with `curl`. Those have no Console tab, and that is called out where it happens.
+Keep three things open: a *terminal* logged in as `{user}`, the {ocp_console_url}[OpenShift web console^], and your realm's *Keycloak admin console* (exercise 1 signs you in).
+Pick a lane with the *Console / CLI* toggle and it stays put across the page: *Console* works in the two web consoles, *CLI* does the same work from the terminal.
+Calling the APIs with `curl` is how you *prove* what changed, so those blocks appear in both lanes.
 ====
 
 Set up your shell once so the later command blocks stay copy-paste clean.
@@ -213,20 +219,56 @@ decode() { jq -Rr 'split(".")[1] | gsub("-";"+") | gsub("_";"/")
 
 ifndef::demo[]
 == 1. Tour your realm and mint your first token
-⏱ *~5 min* · read the realm's public menu, then get a token and see what is inside it
+⏱ *~8 min* · sign in to your realm's admin console, see what it holds, then look inside a token
 
-A realm publishes a *discovery document* — the public, unauthenticated "menu" of every OpenID Connect (OIDC) endpoint and capability it offers.
-Reading it is how any client (or you) learns where to send a login, where to get a token, and which flows are supported.
+Your realm is your own world on a shared Keycloak: four Parasol *clients* (the applications that talk to it), one *role*, and two Parasol *users*.
+Every token in this module is minted from it, and you administer it.
 
-[NOTE]
-.Why this beat is terminal-only
+Open https://keycloak-sso-workshop.{cluster_domain}/admin/realm-{user}/console/[your realm's admin console^] and sign in as `{user}` with your workshop password.
+This is Keycloak's own sign-in page for your realm, not OpenShift's, and your `{user}` account here administers `realm-{user}` and nothing else.
+// TODO(verify-on-cluster): the sign-in needs the install's per-realm admin ({user} holding realm-management/realm-admin in realm-{user}).
+// Until it lands, every console step below was validated through the admin REST call the console makes, on realm-user6.
+
+[tabs]
 ====
-The natural place to "tour a realm" is the Keycloak *admin console* — but that needs a per-realm admin identity this workshop does not hand out (sharing one admin across every attendee's realm would break the isolation the workshop depends on).
-Everything you need for this module lives at the realm's *public OIDC endpoints* and *inside your tokens*, and that is what you use here.
-Touring the realm in the admin console is noted as a go-deeper on the wrap-up page.
-====
-
-Read your realm's discovery document and pick out the endpoints you will use all module:
+Console::
++
+--
+. Tour the realm from the left menu:
+* *Realm settings* → *Endpoints* → *OpenID Endpoint Configuration* opens the realm's public *discovery document*: every OpenID Connect (OIDC) endpoint an app needs, readable by anyone.
+* *Clients* — `parasol-web` (the browser frontend), `parasol-claims` (the claims API), `parasol-fraud` (the fraud service) and `parasol-batch` (the nightly job). The others are Keycloak's own.
+* *Realm roles* → `claims-adjuster` → *Users in role*: only `adjuster` holds it.
+* *Users* — `adjuster`, `viewer`, and `{user}`, which is you.
++
+// media-pass: screenshot securing-apps-keycloak-09-admin-console-clients.png — the realm-{user} admin console on Clients, listing parasol-batch, parasol-claims, parasol-fraud and parasol-web (HIGH). Alt: "Keycloak admin console for the attendee's realm, Clients list showing the four Parasol clients beside Keycloak's built-in clients."
+. Mint a token without leaving the browser: *Clients* → `parasol-web` → *Client scopes* tab → *Evaluate*.
+In *Users*, pick `adjuster`, then open *Generated access token*.
++
+// media-pass: screenshot securing-apps-keycloak-10-evaluate-token.png — Clients > parasol-web > Client scopes > Evaluate, user adjuster, Generated access token tab open (HIGH). Alt: "Keycloak Evaluate tab showing the example access token for adjuster, with aud parasol-claims and realm_access roles claims-adjuster."
++
+.Expected token (trimmed to the claims an API reads)
+[%collapsible]
+=====
+[source,json]
+----
+{
+  "iss": "https://keycloak-sso-workshop.<cluster-domain>/realms/realm-<user>",
+  "aud": "parasol-claims",
+  "azp": "parasol-web",
+  "preferred_username": "adjuster",
+  "realm_access": {
+    "roles": [
+      "claims-adjuster"
+    ]
+  }
+}
+----
+=====
+--
+CLI::
++
+--
+Read your realm's public *discovery document* — every OpenID Connect (OIDC) endpoint an app needs — and pick out the ones this module uses:
 
 [source,sh,role=execute]
 ----
@@ -236,7 +278,7 @@ curl -ks "$REALM/.well-known/openid-configuration" \
 
 .Expected output (endpoints are your realm's; grant types include the four flows this module teaches)
 [%collapsible]
-====
+=====
 [source,json]
 ----
 {
@@ -250,10 +292,7 @@ curl -ks "$REALM/.well-known/openid-configuration" \
   ]
 }
 ----
-====
-
-The `jwks_uri` is worth a pause: it is where the *public keys* live.
-An API validates a token's signature against those keys — that is how it trusts a token *without ever calling Keycloak*, and why bearer auth scales.
+=====
 
 Now get a token for `adjuster` and read what Keycloak put inside it:
 
@@ -265,7 +304,7 @@ echo "$ADJ" | decode | jq '{iss, aud, azp, preferred_username, realm_access, exp
 
 .Expected output (the claims an API will read to make its decision)
 [%collapsible]
-====
+=====
 [source,json]
 ----
 {
@@ -281,13 +320,16 @@ echo "$ADJ" | decode | jq '{iss, aud, azp, preferred_username, realm_access, exp
   "exp": 1783789453
 }
 ----
+=====
+--
 ====
 
-Read it like the claims API will: `iss` is who issued it (your realm), `aud` is who it is *for* (the `parasol-claims` service), `preferred_username` is the human, and `realm_access.roles` carries `claims-adjuster` — the permission the API is about to start checking.
+Read the token like the claims API will: `iss` is who issued it (your realm), `aud` is who it is *for* (the `parasol-claims` service), `preferred_username` is the human, and `realm_access.roles` carries `claims-adjuster` — the permission the API is about to start checking.
+The discovery document's `jwks_uri` holds the realm's *public keys*: an API checks a token's signature against them, so it trusts a token *without calling Keycloak* — that is why bearer auth scales.
 
 [.checkpoint]
 ****
-✔ *Verify:* `curl` returned your realm's discovery document, and you decoded an `adjuster` token to see its `realm_access.roles` contains `claims-adjuster` and its `aud` is `parasol-claims`.
+✔ *Verify:* you found your realm's four Parasol clients and the one user holding `claims-adjuster`, and you read an `adjuster` access token — in *Generated access token* or with `decode` — whose `aud` is `parasol-claims` and whose `realm_access.roles` contains `claims-adjuster`.
 You can point at *where in the token* the role lives — that location is the whole game in the next two exercises.
 ****
 
@@ -394,7 +436,7 @@ The claims API now trusts a *token it can validate*, not whoever can reach it on
 ****
 
 == 3. Enforce a role — authentication is not authorization
-⏱ *~5 min* · require the `claims-adjuster` role, and watch a valid login get turned away
+⏱ *~10 min* · require the `claims-adjuster` role, watch a valid login get turned away, then grant and revoke it in the realm
 
 Right now *any* valid token opens the API — including `viewer`, who is a real user but has no business listing claims.
 Prove that gap first, then close it.
@@ -455,7 +497,20 @@ viewer   (no role)             -> HTTP 403
 ====
 
 There is the whole authN/authZ split in two lines: `viewer` *authenticated fine* (the token is valid) and *was authorized nothing* — *403 Forbidden*, not 401.
-See why by decoding both tokens side by side:
+See why:
+
+[tabs]
+====
+Console::
++
+--
+In the Keycloak admin console, open *Users* → `adjuster` → *Role mapping*: it lists `claims-adjuster`.
+Open *Users* → `viewer` → *Role mapping*: *No roles for this user*.
+--
+CLI::
++
+--
+Decode both tokens side by side:
 
 [source,sh,role=execute]
 ----
@@ -465,7 +520,7 @@ echo "viewer roles:  "; get_token viewer   | decode | jq -c '.realm_access.roles
 
 .Expected output (the role is present for one, absent for the other — the API reads exactly this)
 [%collapsible]
-====
+=====
 [source,texinfo]
 ----
 adjuster roles:
@@ -473,6 +528,8 @@ adjuster roles:
 viewer roles:
 null
 ----
+=====
+--
 ====
 
 [NOTE]
@@ -483,10 +540,120 @@ Protecting an app that does *not* set it, a user who genuinely has the role stil
 The code-level equivalent of this whole exercise — annotating the endpoint with `@RolesAllowed("claims-adjuster")` instead of the `quarkus.http.auth.*` policy — is in the wrap-up's *Go deeper*; it produces the exact same 401/403 outcome.
 ====
 
+*Now change the answer without touching the app.*
+The API now requires the `claims-adjuster` role, and *who* holds it is decided in your realm.
+Grant the role to `viewer`:
+
+[tabs]
+====
+Console::
++
+--
+. *Users* → `viewer` → *Role mapping* → *Assign role* → *Realm roles*.
+. Tick `claims-adjuster` and click *Assign*. The console confirms *Role mapping updated*.
++
+// media-pass: screenshot securing-apps-keycloak-11-assign-role.png — the "Assign realm roles to viewer" dialog with claims-adjuster ticked, Assign button visible (HIGH). Alt: "Keycloak admin console dialog assigning the claims-adjuster realm role to the viewer user."
+--
+CLI::
++
+--
+The admin console is a client of Keycloak's admin REST API, and so is this lane.
+First sign in to that API as your realm's administrator.
+This block ends at a prompt: type your workshop password and press *Enter*. It is read silently and never written to a file.
+
+// DO NOT merge this block with the next one: an interactive `read` must be the LAST line of a
+// click-to-run block, or the lines after it are swallowed as the password (see gitops-at-scale).
+[source,sh,role=execute]
+----
+read -rsp "Your workshop password: " PW; echo
+----
+
+[source,sh,role=execute]
+----
+KCADM=$(curl -ks "$REALM/protocol/openid-connect/token" -d grant_type=password -d client_id=admin-cli \
+  -d username="$(oc whoami)" --data-urlencode password="$PW" | jq -r .access_token); unset PW
+API="${REALM%/realms/*}/admin/realms/${REALM##*/}"
+if [ "$KCADM" = null ]; then echo "sign-in failed — re-run the password block"; else echo "signed in to the admin API of ${REALM##*/}"; fi
+VIEWER_ID=$(curl -ks -H "Authorization: Bearer $KCADM" "$API/users?username=viewer&exact=true" | jq -r '.[0].id')
+ROLE=$(curl -ks -H "Authorization: Bearer $KCADM" "$API/roles/claims-adjuster")
+curl -ks -o /dev/null -w 'assign claims-adjuster to viewer -> HTTP %{http_code}\n' -X POST \
+  -H "Authorization: Bearer $KCADM" -H 'Content-Type: application/json' \
+  "$API/users/$VIEWER_ID/role-mappings/realm" -d "[$ROLE]"
+----
+
+.Expected output
+[%collapsible]
+=====
+[source,texinfo]
+----
+signed in to the admin API of realm-<user>
+assign claims-adjuster to viewer -> HTTP 204
+----
+=====
+--
+====
+
+Ask the API again as `viewer`, with a fresh token:
+
+[source,sh,role=execute]
+----
+VIEW=$(get_token viewer)
+curl -ks -o /dev/null -w 'viewer (role granted) -> HTTP %{http_code}\n' -H "Authorization: Bearer $VIEW" "$CLAIMS/api/claims"
+----
+
+It returns `HTTP 200`.
+Same app, same configuration, no rollout: the answer changed because the realm changed.
+That is the point of keeping authorization in the identity provider — granting or revoking access is an admin action, not a deployment.
+
+Now take the role back:
+
+[tabs]
+====
+Console::
++
+--
+On `viewer` → *Role mapping*, tick `claims-adjuster`, click *Unassign*, and confirm with *Remove*.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+curl -ks -o /dev/null -w 'unassign claims-adjuster from viewer -> HTTP %{http_code}\n' -X DELETE \
+  -H "Authorization: Bearer $KCADM" -H 'Content-Type: application/json' \
+  "$API/users/$VIEWER_ID/role-mappings/realm" -d "[$ROLE]"
+----
+
+It returns `HTTP 204`.
+--
+====
+
+Call the API with the token you minted *while* `viewer` held the role, then with a fresh one:
+
+[source,sh,role=execute]
+----
+curl -ks -o /dev/null -w 'viewer, token from before the change -> HTTP %{http_code}\n' -H "Authorization: Bearer $VIEW" "$CLAIMS/api/claims"
+VIEW=$(get_token viewer)
+curl -ks -o /dev/null -w 'viewer, fresh token                  -> HTTP %{http_code}\n' -H "Authorization: Bearer $VIEW" "$CLAIMS/api/claims"
+----
+
+.Expected output
+[%collapsible]
+====
+[source,texinfo]
+----
+viewer, token from before the change -> HTTP 200
+viewer, fresh token                  -> HTTP 403
+----
+====
+
+The old token still works.
+A bearer token is a signed snapshot that the API checks *without calling Keycloak*, so a removed role disappears at the *next* token — one reason access tokens are short-lived (30 minutes in this realm).
+
 [.checkpoint]
 ****
-✔ *Verify:* `GET /api/claims` is *200* for `adjuster` and *403* for `viewer`, and you decoded both tokens to see `claims-adjuster` present in one and absent in the other.
-You can say out loud why `viewer` gets *403* and no-token gets *401* — the difference between "who are you?" and "what may you do?"
+✔ *Verify:* `GET /api/claims` is *200* for `adjuster` and *403* for `viewer`; you saw why in the realm (or in the decoded tokens); and you watched `viewer` go *403* → *200* → *403* as you granted and removed `claims-adjuster`, with no change to the app.
+`viewer` is back to *no roles* — your realm is not reset by `ws prep`, and the rest of the module relies on `viewer` being refused.
 ****
 
 == 4. Protect the web frontend — and hit the redirect trap on purpose
@@ -572,6 +739,7 @@ The Keycloak page reads *"We are sorry... Invalid parameter: redirect_uri"*.
 
 *What happened.* Your app sits behind the OpenShift *edge Route*, which terminates HTTPS and forwards plain HTTP to the pod.
 The app, seeing an HTTP request, built an `http://` `redirect_uri` — but the realm only trusts the `https://` callback it was registered with, so Keycloak refuses it.
+You can see that rule in your admin console: *Clients* → `parasol-web` → *Settings* → *Access settings* → *Valid redirect URIs* holds one pattern, `https://parasol-web-{user}-dev.{cluster_domain}/*`.
 The fix is to tell the app to honor the `X-Forwarded-*` headers the Route sets, so it knows the *original* request was HTTPS:
 
 [source,sh,role=execute]
@@ -625,7 +793,9 @@ A batch job like the monthly-statement run in the Jobs, Batch & Queued Workloads
 It has no password to type and no browser to redirect, so the human flows do not apply.
 Instead it authenticates as *itself* with the *client-credentials* flow — a client id and secret it holds — and receives a token that represents the *service account*, not a person.
 
-This is a terminal-only beat: it is a direct call to the token endpoint.
+Your admin console shows how the realm sets that up: *Clients* → `parasol-batch` → *Settings* → *Capability config* has *Client authentication* on, *Service account roles* ticked and *Standard flow* off — a client that can sign in as itself and nothing else.
+Its secret is on the *Credentials* tab.
+Ask the token endpoint for its token:
 
 [source,sh,role=execute]
 ----
@@ -725,6 +895,8 @@ get_token adjuster | decode | jq -c '{aud}'
 ----
 ====
 
+The stamp comes from your realm: *Clients* → `parasol-web` → *Client scopes* → `parasol-web-dedicated` → *Mappers* → `claims-audience`, an audience mapper whose *Included Client Audience* is `parasol-claims`.
+// media-pass: screenshot securing-apps-keycloak-12-audience-mapper.png — the claims-audience mapper on parasol-web-dedicated, Included Client Audience parasol-claims, Add to access token on (MEDIUM). Alt: "Keycloak mapper details for claims-audience, an audience mapper adding parasol-claims to access tokens issued to parasol-web."
 That single claim is why the same token that opens the claims API will be *refused* by the fraud service: a token minted for `parasol-claims` is not valid at `parasol-fraud`.
 That is the exact problem the final exercise solves — and where you will watch this audience get rewritten.
 
@@ -829,6 +1001,11 @@ curl -ks -o /dev/null -w 'user token (aud=parasol-claims) -> fraud -> HTTP %{htt
 ----
 
 It returns `HTTP 401`: right user, valid token, *wrong audience*.
+
+Your realm decides which exchanges are allowed.
+In the admin console, *Clients* → `parasol-claims` → *Settings* → *Capability config* has *Standard Token Exchange* ticked, and its dedicated scope (*Client scopes* → `parasol-claims-dedicated` → *Mappers*) holds one audience mapper, `fraud-audience`, whose *Included Client Audience* is `parasol-fraud`.
+That mapper is what lets `parasol-claims` reach `parasol-fraud`, and nothing in its configuration reaches `parasol-batch` — keep that in mind for the escalation attempt below.
+
 Now do the exchange.
 The `parasol-claims` client (a confidential client, so it authenticates with its secret) hands Keycloak the user's token and asks for the `parasol-fraud` audience:
 
@@ -916,31 +1093,47 @@ That is what makes a chain of services auditable — each hop provably sees only
 You proved exchange can downscope but never escalate.
 ****
 
-== 8. [INSTRUCTOR-DEMO] The same Keycloak runs the cluster login
-⏱ *~5 min* · read-only — how identity ties to the platform (leads into Multi-Tenancy & Workload Security)
+== 8. Which front door did you come in through?
+⏱ *~3 min* · view-only — how identity ties to the platform (leads into Multi-Tenancy & Workload Security)
 
 Everything so far secured *your applications*.
-The same product — Red Hat build of Keycloak — can also back *OpenShift's own* console login, wired as an *OAuth identity provider (IdP)* so that logging in to the cluster and logging in to your apps share one identity source; your instructor will show whether that is wired up here.
+OpenShift's own login works the same way: the cluster trusts one or more *identity providers*, and every sign-in goes through one of them.
+Look at the list, then find the one you used.
+This is a *look, don't touch* step — the cluster's login configuration is not yours to change, and you only read it.
 
-This is a *look, don't touch* beat: if the cluster's console login runs on its own Keycloak (or any other IdP), that is separate infrastructure from your workshop realm, and reconfiguring it would lock people out.
-Your instructor will show the cluster's OAuth configuration read-only:
-
-[source,sh]
+[source,sh,role=execute]
 ----
 oc get oauth cluster -o jsonpath='{range .spec.identityProviders[*]}{.name}{"\t"}{.type}{"\n"}{end}'
+oc get user '~' -o jsonpath='{.identities}{"\n"}'
 ----
+// Line 1 run as user6 (attendee groups) on 2026-11-12 once the install's read grant on oauth/cluster landed: two rows,
+// OpenID + HTPasswd; `can-i update oauth/cluster` = no. Line 2's format ["workshop-users:<user>"] read from a real
+// signed-in attendee's User object.
+// TODO(verify-on-cluster): line 2 as an attendee who signed in through OAuth (impersonated user6 has no User object yet, so it printed empty).
 
-[NOTE]
+.Expected output (the provider list is the cluster's own — yours may hold more rows, or only `workshop-users`)
+[%collapsible]
 ====
-This command reads a *cluster-scoped* resource and is **instructor/admin-only** — running it from your attendee terminal returns `Forbidden`. That is itself the point: cluster OAuth configuration is admin-scoped, separate from the per-application Keycloak realms you secured above.
+[source,texinfo]
+----
+<the cluster's own provider>	OpenID
+workshop-users	HTPasswd
+["workshop-users:<user>"]
+----
 ====
 
-The takeaway is the *reach* of what you learned: the realm/client/role model is not just for the Parasol apps — it is how the whole platform, and every app on it, can share *one* front door.
+Your user record names the provider before the colon: `workshop-users`, an `HTPasswd` provider that holds the workshop's attendee accounts.
+It is the same list the OpenShift login page shows whenever it offers a choice.
+Any other row belongs to the cluster's owners.
+An `OpenID` row is how a Keycloak realm — or any OpenID Connect provider — plugs into the cluster login: the realm, client and role model you just used, serving OpenShift instead of Parasol.
+
+The takeaway is the *reach* of what you learned: the same model can give the platform and every app on it *one* front door.
 Wiring an app *and* the cluster to the same identity provider — and the multi-tenancy that rides on it — is the Multi-Tenancy & Workload Security story.
 
 [.checkpoint]
 ****
-✔ *Verify (understanding):* you can state that Red Hat build of Keycloak secures *applications* (what you did) and can also back the *OpenShift console login* as a cluster IdP, and why one shared identity source is the goal — without having changed any cluster configuration.
+✔ *Verify:* you listed the cluster's identity providers and found `workshop-users` — the one your own user record names — without changing anything.
+You can say how an `OpenID` provider lets one Keycloak realm serve the cluster login as well as your apps.
 ****
 
 == Recap
@@ -951,11 +1144,11 @@ Wiring an app *and* the cluster to the same identity provider — and the multi-
 ws verify {module-id}
 ----
 
-You put a front door on Parasol: a browser login for the web frontend (auth-code + PKCE), bearer tokens with a role check for the API (401 vs 403, told apart), a machine identity for the batch job, the discipline to read a token instead of guessing, and a token-exchange chain that delegates without ever escalating — all on a Keycloak that ships with your subscription.
+You put a front door on Parasol: a browser login for the web frontend (auth-code + PKCE), bearer tokens with a role check for the API (401 vs 403, told apart), access granted and revoked in the realm with no redeploy, a machine identity for the batch job, the discipline to read a token instead of guessing, and a token-exchange chain that delegates without ever escalating — all on a Keycloak that ships with your subscription.
 
 [.checkpoint]
 ****
-✔ *Verify:* `ws verify {module-id}` passes — the claims API is bearer-protected (401 without a token, 200 with an `adjuster` token) and the web frontend redirects an unauthenticated request to Keycloak (302).
+✔ *Verify:* `ws verify {module-id}` passes — the claims API is bearer-protected (401 without a token, 200 with an `adjuster` token, 403 for `viewer`) and the web frontend redirects an unauthenticated request to Keycloak (302).
 ****
 endif::demo[]
 

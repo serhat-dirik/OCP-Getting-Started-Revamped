@@ -7,37 +7,40 @@ include::partial$version-attributes.adoc[]
 // realm-user1) on 2026-07-11. Pre-flight expected outputs are real captures. The signature beat is
 // exercise 2-3 (open API -> 401/200/403 by config); the encore is exercise 7 (RFC 8693 exchange +
 // the escalation Keycloak refuses).
+// UI-first rewrite re-run as user6 on OCP 4.22.22 / RHBK 26.6, 2026-11-12: rollouts 14-15s, fraud rollout 14s
+// plus ~30s before its new Route answered (503 until then), ws prep 3m53s, ws verify 13/13 on the lab end state.
 
-This module is mostly *terminal + curl*, and its drama is watching HTTP status codes change: an open API that starts returning *401*, a valid login that gets *403*, and a token exchange that Keycloak flatly *refuses*.
-Nearly every step is a *configuration* change (`oc set env` / the console Environment tab) on an image that already carries the OpenID Connect (OIDC) library — there is no build, so steps are fast and the room stays together.
+Each attendee administers their own realm in the *Keycloak admin console*, and the drama is watching HTTP status codes change: an open API that starts returning *401*, a valid login that gets *403*, the same user flipping to *200* when the role is granted in the realm, and a token exchange that Keycloak flatly *refuses*.
+App steps are *configuration* changes (`oc set env` / the console Environment tab) on an image that already carries the OpenID Connect (OIDC) library, and realm steps are clicks in the admin console (or its REST API in the CLI lane) — there is no build, so steps are fast and the room stays together.
 Two things need your attention before you teach: exercise 4 contains a *deliberate break* (an `http` `redirect_uri` that Keycloak rejects) that every attendee is meant to hit and fix, so do not let them "fix" it early; and the whole module depends on the *workshop* Keycloak (`sso-workshop`) and each attendee's seeded realm being up — confirm pre-flight items 2 and 3 before the session.
 
 include::partial$prep-before-you-teach.adoc[]
 
 == Timing
 
-Total hands-on: *~40 minutes*.
-There are no long waits — the pacing is set by the ~25-second rollouts after each config change and by reading tokens.
+Total hands-on: *~48 minutes*.
+There are no long waits — the pacing is set by the ~15-second rollouts after each config change, by the admin-console tour, and by reading tokens.
 
 [cols="1,4,1,2",options="header"]
 |===
-| # | Exercise group | Attendee time | Measured core (as user1, 4.21.22)
+| # | Exercise group | Attendee time | Measured core (as user6, 4.22.22)
 
-| 1 | Tour your realm and mint a token | ~5 min | discovery `curl` + token get/decode are *instant* (~0.7s round-trip); no cluster change
-| 2 | Protect the claims API (bearer) | ~5 min | `oc set env` → rollout *~25s*; 401/200 immediately after
-| 3 | Enforce a role (authZ) | ~5 min | second `oc set env` → rollout *~25s*; adjuster 200 / viewer 403; decode is instant
-| 4 | Protect the web frontend (break-fix) | ~5 min | two rollouts *~25s* each; the `http`→400 break and the proxy-forwarding fix are the time sink (reading + understanding)
+| 1 | Admin-console sign-in, realm tour, first token | ~8 min | token get/decode *instant*; the admin-console tour and *Evaluate* are reading time (estimated — not timed in a browser)
+| 2 | Protect the claims API (bearer) | ~5 min | `oc set env` → rollout *15s*; 401/200 immediately after
+| 3 | Enforce a role, then grant and revoke it in the realm | ~10 min | second rollout *14s*; adjuster 200 / viewer 403; the grant → 200 and revoke → 403 are instant (no rollout)
+| 4 | Protect the web frontend (break-fix) | ~5 min | two rollouts *14s* each; the `http`→400 break and the proxy-forwarding fix are the time sink (reading + understanding)
 | 5 | Machine identity (client credentials) | ~5 min | one `curl` to the token endpoint; instant
 | 6 | Debug tokens like an adult | ~5 min | pure decode/inspection; no cluster change
-| 7 | [ADVANCED] token exchange (RFC 8693) | ~5 min | fraud deploy rollout *~20-30s* (image cached); exchange + calls instant; the escalation refusal is instant
-| 8 | [INSTRUCTOR-DEMO] cluster identity provider (IdP) tie | ~5 min | one read-only `oc get oauth`; discussion
+| 7 | [ADVANCED] token exchange (RFC 8693) | ~6 min | fraud rollout *14s*, then *~30s* before the new Route answers (503 until then); exchange + refusal instant
+| 8 | Which front door did you come in through? (view-only) | ~3 min | two read-only `oc get` calls; discussion
 |===
 
 [NOTE]
 .How this timing was measured
 ====
-Every core number was captured performing the lab as `user1` on 2026-07-11, not estimated.
-A representative `oc set env` + `oc rollout status` cycle on `parasol-claims` took *25 seconds*; a token round-trip (`get_token` → `decode`) took *~660 ms*.
+Every terminal number was captured performing the lab as `user6` on 2026-11-12 (first measured as `user1` on 2026-07-11), not estimated.
+An `oc set env` + `oc rollout status` cycle took *14-15 seconds*; a token round-trip (`get_token` → `decode`) is well under a second.
+The admin-console minutes are an estimate: the console steps were validated through the admin REST calls the console makes, not timed in a browser.
 There is no multi-minute wait anywhere in this module, so the attendee-time figures are dominated by *reading and understanding*, not by the cluster — budget generously for exercises 3, 4, and 7 where the concept load is highest.
 ====
 
@@ -98,6 +101,25 @@ curl -ks "$REALM/protocol/openid-connect/token" -d grant_type=password -d client
 Expect `True` (the realm import completed) then `token OK`.
 If the import status is not `True`, the realm was not seeded — realm imports are *import-once* and survive `ws reset`, so a missing realm is a workshop-layer gap (`gitops/workshop-config`), not something a reset fixes.
 
+. *The sample user administers their realm, and holds nothing extra.*
+*(REQUIRED — exercise 1 signs in to the admin console.)*
++
+Open https://keycloak-sso-workshop.{cluster_domain}/admin/realm-user1/console/ in a private window and sign in as `user1` with the workshop password: the console opens on `realm-user1`.
+Then, still as `user1`, open *Users* → `viewer` → *Role mapping*: it should read *No roles for this user*.
+A `viewer` holding `claims-adjuster` is left over from a rehearsal — the realm is not reset by `ws prep` — and breaks exercise 3's *403*.
+
+. *Attendees can read the cluster's identity providers.*
+*(Exercise 8.)*
++
+[source,sh,role=execute]
+----
+oc get oauth cluster --as=user1 --as-group=workshop-attendees --as-group=system:authenticated \
+  -o jsonpath='{range .spec.identityProviders[*]}{.name}{"\t"}{.type}{"\n"}{end}'
+----
++
+Expect one row per provider, including `workshop-users` of type `HTPasswd`.
+`Forbidden` means the install's attendee read grant on `oauth/cluster` is missing; exercise 8 then falls back to its expected output.
+
 . *The end state solves — as a reference for grading, not as demo prep.*
 +
 [source,sh,role=execute]
@@ -106,8 +128,8 @@ adm solve securing-apps-keycloak --user user1
 ws verify securing-apps-keycloak --user user1
 ----
 +
-Expect `✅ all 10 checks passed`: the entry checks *plus* the API protected (401 without a token, 200 with an `adjuster` token) and the web frontend redirecting an unauthenticated request (302).
-`adm solve` also deploys `parasol-fraud` (the exchange target).
+Expect `✅ all 13 checks passed`: the entry checks *plus* the API protected (401 without a token, 200 with an `adjuster` token, 403 with a `viewer` token), the web frontend redirecting an unauthenticated request (302), and the two token-exchange checks.
+`adm solve` also deploys `parasol-fraud` (the exchange target), which is what turns those last two on.
 Those two protected-state expectations are the same reason `adm solve` must not be used as demo prep — see *Demo-mode notes*.
 Reset with `ws prep securing-apps-keycloak --user user1 --yes` when done; if you are presenting, that reset is mandatory, not tidy-up.
 
@@ -148,12 +170,11 @@ The app is behind the edge Route (HTTPS terminated, HTTP forwarded to the pod), 
 The fix is `QUARKUS_HTTP_PROXY_PROXY_ADDRESS_FORWARDING=true`.
 If someone's login fails *after* that, check they did not typo the client id (`parasol-web`) or the realm URL.
 
-*3. "Can I open the Keycloak admin console to look at my realm?"*::
-Not in this workshop.
-Attendees have no per-realm admin identity — and sharing one admin across every attendee's realm would break the isolation the workshop depends on.
-Everything needed lives at the realm's *public OIDC endpoints* (the discovery document) and *inside the tokens* (decode them).
-Point curious attendees at the wrap-up's go-deeper note.
-This is a known scoping decision, not a missing feature.
+*3. "Can I break someone else's realm from the admin console?"*::
+No.
+Each attendee signs in as `{user}`, who holds `realm-admin` in `realm-{user}` only: the admin API answers *403* for any other realm and for `master`.
+Inside their own realm they can change anything, and nothing resets it — `ws prep` restores the apps, not the realm.
+The one change the lab makes, granting `claims-adjuster` to `viewer`, is undone in the same exercise; `ws verify` fails its `viewer` check if it was not.
 
 *4. "The token-exchange escalation attempt returns 'Requested audience not available' — is that an error in the lab?"*::
 That *is* the lesson — the exchange toward `parasol-batch` is *supposed* to fail.
@@ -164,7 +185,7 @@ The *successful* exchange in the same exercise is toward `parasol-fraud` (return
 *5. "Is this the same Keycloak that logs me in to the OpenShift console?"*::
 No — deliberately.
 The cluster login runs on a *separate* Keycloak (`keycloak/keycloak`); this module uses a *workshop* instance (`sso-workshop/sso-workshop`) with a throwaway realm per attendee, so nobody can lock themselves (or the room) out of the cluster by experimenting.
-The `[INSTRUCTOR-DEMO]` shows that the *same product* backs both, which is the bridge to the multi-tenancy module — but the two instances are intentionally distinct.
+Exercise 8 has attendees read the cluster's identity providers and find the one they signed in through, which is the bridge to the multi-tenancy module — but the two instances are intentionally distinct.
 
 == Watchouts
 
@@ -176,9 +197,11 @@ Confirm pre-flight item 2 explicitly.
 That instance backs live cluster logins.
 The module only reads `oauth cluster` (exercise 8) and only ever writes to the `sso-workshop` realms via seeded imports.
 Reconfiguring the login IdP can lock the room out of OpenShift.
-* *Realm imports are import-once and survive `ws reset`.*
+* *Realms survive `ws reset` — including what attendees changed in them.*
 `ws prep`/`reset` restores the *apps* in `{user}-dev`; it does *not* re-seed the realm (the realm is workshop-layer state, seeded once).
-So a broken realm is not fixed by a reset — escalate it as a platform-layer issue.
+Attendees are realm administrators, so a role grant they forgot to remove, or a client they edited, outlives the reset.
+The common one is `viewer` still holding `claims-adjuster`: exercise 3 then shows *200* where it promises *403*, and `ws verify` fails its `viewer` check. Remove the role in the admin console.
+A realm broken beyond that is not fixed by a reset — escalate it as a platform-layer issue.
 * *The break in exercise 4 is intentional — coach, don't pre-empt.*
 Attendees are meant to configure the web app, watch the login fail with the `redirect_uri` error, and fix it.
 If you warn them off it, you remove the lesson.

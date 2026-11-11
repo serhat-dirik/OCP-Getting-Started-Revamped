@@ -3,7 +3,8 @@
 #   Entry: {user}-dev has parasol-web + parasol-claims + an ephemeral claims-db, all UNPROTECTED (the
 #          OIDC tenant is off) — GET /api/claims returns 200 with NO token; parasol-fraud is not up yet.
 #   End:   the apps are OIDC-protected — GET /api/claims is 401 without a token and 200 with a valid
-#          claims-adjuster token; the web frontend 302-redirects an unauthenticated request to Keycloak.
+#          claims-adjuster token and 403 with a viewer token; the web frontend 302-redirects an
+#          unauthenticated request to Keycloak.
 # Runnable as the attendee: reads only {user}-dev + the app's OWN Routes, and gets a demo token from the
 # public Keycloak route recorded in the entry marker (no cross-namespace reads — rule 10).
 set -euo pipefail
@@ -132,6 +133,10 @@ else
         route_answers parasol-claims /api/claims 401                                            || hint "not done yet — the entry state ships this API deliberately OPEN (the entry check above asserts exactly that), so an un-401 response before the lab is the expected state, not a broken app. Securing it is the lab: enable the OIDC tenant + require claims-adjuster on /api/claims"
   check "a valid claims-adjuster token is accepted — GET /api/claims is 200" \
         route_answers_as parasol-claims /api/claims 200 adjuster                                || hint "not done yet? until the API is secured at all there is no role wiring to accept a token, so this follows from the check above. If the API IS 401 without a token but rejects a valid one, that one is real: map realm_access/roles and allow claims-adjuster; token from ${USER_NAME}'s realm (adjuster/parasol)"
+  # The role check itself. Also catches the one piece of attendee state ws prep cannot undo: exercise 3
+  # grants claims-adjuster to viewer in the realm and removes it again, and the realm survives a reset.
+  check "the role is enforced — a viewer token (no claims-adjuster) is refused — GET /api/claims is 403" \
+        route_answers_as parasol-claims /api/claims 403 viewer                                  || hint "not done yet if the API still accepts any valid token: require claims-adjuster on /api/claims (exercise 3). If you did, viewer still holds claims-adjuster in realm-${USER_NAME} — remove it (Users > viewer > Role mapping > Unassign); ws prep does not reset your realm"
   check "web frontend redirects an unauthenticated request to login (302)" \
         route_answers parasol-web /api/claims 302                                               || hint "not done yet — the web frontend also starts unprotected on purpose; making it an OIDC web-app (auth-code + PKCE) is a later beat, so this red is expected until you get there"
 
