@@ -13,15 +13,22 @@ include::partial$version-attributes.adoc[]
 // timing below was performed as user3 on OCP 4.21.22 / OpenShift Pipelines 1.23.0 /
 // RHACS 4.11.1 / RHTAS 1.4.2 on 2026-07-18. The clean, scanned-green, Chains-signed
 // parasol-claims:latest is built ONCE at install in ogsr-supply-chain (workshop-config trusted-image.yaml)
-// and copied with its .sig/.att into {user}-cicd at prep (since 2026-11-12), so the trust story runs
+// and copied with its .sig/.att into {user}-cicd/parasol-claims-trusted at prep (since 2026-11-12), so the trust story runs
 // against a ready image and the scan step READS a verdict instead of waiting on a second build. Grounded:
 // seeded build Failed at acs-scan on Log4Shell (CVSS 10, log4j-core 2.14.1) in 7m11s to a :candidate tag;
 // CycloneDX SBOM = 239 components; cosign v3.0.4 + rekor-cli fetched from the RHTAS cli-server; cosign
-// verify + verify-attestation against parasol-claims:latest RC=0 (SLSA provenance v0.2, builder
+// verify + verify-attestation against the trusted image RC=0 (SLSA provenance v0.2, builder
 // tekton.dev/chains/v2); keyless `cosign sign-blob` recorded the SBOM in the live Rekor transparency log
-// and `verify-blob` returned "Verified OK". The ImagePolicy admission step stays [INSTRUCTOR-DEMO] —
-// attendees cannot create the cluster-config resource (verified: `can-i create imagepolicies` = no) — see
-// instructor.adoc.
+// and `verify-blob` returned "Verified OK".
+// 2026-11-12, as user11 on cluster-5vqxc (OCP 4.22.22, RHTAS 1.5.1): the trusted copy moved to its own
+// repository, parasol-claims-trusted, and admission became attendee work. The install applies ONE
+// ClusterImagePolicy (ogsr-signed-parasol-claims: every attendee's parasol-claims-trusted, ExactRepository
+// = ogsr-supply-chain/parasol-claims); attendees read it (platform-observer) and run one signed and one
+// unsigned pod. Re-performed: ex 1 seeded run Failed at acs-scan in 2m39s; ex 2–3 cosign verify +
+// verify-attestation against the restored cli-server's cosign v3.0.4; ex 5 claims-signed Running,
+// claims-unsigned SignatureValidationFailed "A signature was required, but no signature exists"; the
+// Challenge's signed :candidate refused "Signature for identity … is not accepted". Ex 4's keyless
+// sign-blob was NOT re-run on 5vqxc (it mints a ServiceAccount token); cosign initialize + loginfo were.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -46,9 +53,9 @@ Scanning is *one compact beat*: your environment already holds a clean, *pre-sca
 .Your environment came with a signed image
 ====
 The platform ran this same pipeline once, when the cluster was installed, on the *clean* `main` branch, in the shared project `ogsr-supply-chain`.
-Your project was prepared with a copy of the *scanned-green, signed* `parasol-claims:latest` it produced, its signature and attestation included.
-That is the image the trust exercises below verify.
-You will *also* build the *seeded* branch yourself to watch the scan gate catch a real CVE — that build goes to a separate `:candidate` tag, so it never disturbs the trusted `:latest`.
+Your project was prepared with a copy of the *scanned-green, signed* image it produced, its signature and attestation included, as `parasol-claims-trusted:latest`.
+That is the image the trust exercises below verify, and the only repository the cluster's signature policy guards.
+You will *also* build the *seeded* branch yourself to watch the scan gate catch a real CVE — that build goes to `parasol-claims:candidate`, a separate repository, so it never touches the trusted image.
 ====
 
 [NOTE]
@@ -91,9 +98,9 @@ This demo starts from the finished lab state. Stage it before the session:
 adm solve trusted-supply-chain
 ----
 
-It copies the scanned, signed `parasol-claims:latest` that the install built into the registry, with its signature and attestation, and returns in about a minute.
+It copies the scanned, signed image that the install built into your registry as `parasol-claims-trusted:latest`, with its signature and attestation, and returns in about three minutes.
 
-Once it returns, start step 2's build once yourself and let it finish while you set the rest up. That build goes to the throwaway `:candidate` tag and never touches the trusted `:latest`, so a second copy costs nothing but cluster time — and it means a finished verdict exists whatever the live run is doing. Step 2 starts a build that takes *6–12 minutes*, longer than the step itself; steps 3 and 4 need no build, so the demo carries on and comes back when the status line flips.
+Once it returns, start step 2's build once yourself and let it finish while you set the rest up. That build goes to the throwaway `parasol-claims:candidate` and never touches the trusted image, so a second copy costs nothing but cluster time — and it means a finished verdict exists whatever the live run is doing. Step 2 starts a build that takes *about three minutes on a warm cluster and up to twelve on a cold one*, as long as the step itself or longer; steps 3 and 4 need no build, so the demo carries on and comes back when the status line flips.
 
 If the live run has still not reached the scan by the end of step 4, read the earlier one instead. Both runs come from the same manifest, so the older `demo-vuln-…` is the one staged here, and this picks it without a name to type. Its first line makes it safe to run from a terminal that has not been set up yet:
 
@@ -111,7 +118,7 @@ Have the fork open at {gitea_url}/{user}/parasol-claims[{user}/parasol-claims^].
 
 NOTE: On a freshly installed cluster the RHACS vulnerability store needs about an hour to populate before the Log4Shell policy fires; until then the seeded build passes the gate. Confirm that a seeded run prints `Block Log4Shell` before the session.
 
-CAUTION: `ws prep trusted-supply-chain` returns `{user}-cicd` to the entry state — the signed `parasol-claims:latest` copied back in, the pipeline, the copied trust secrets, and the fork with its vulnerable `seed-vulnerable` branch — so the demo can be run again from the top.
+CAUTION: `ws prep trusted-supply-chain` returns `{user}-cicd` to the entry state — the signed `parasol-claims-trusted:latest` copied back in, the pipeline, the copied trust secrets, and the fork with its vulnerable `seed-vulnerable` branch — so the demo can be run again from the top.
 ====
 
 === Brief
@@ -128,7 +135,7 @@ So when a flaw like Log4Shell lands, the hard questions are not about the code t
 
 A *signature* says the image is intact and came from us. An *attestation* — signed SLSA provenance — says how it was built: the builder, the source, the steps. An *SBOM* says what is inside, component by component. They are different facts and they reinforce each other: the attestation is signed, the SBOM can be attested, and the signature is what an admission gate checks.
 
-On OpenShift those artifacts are produced by the pipeline rather than by anyone remembering to make them. Tekton Chains signs every image the pipeline builds and attaches its provenance with no per-build wiring, Red Hat Trusted Artifact Signer records signatures in a public transparency log, and a native `ImagePolicy` makes the cluster verify a signature before it will pull an image.
+On OpenShift those artifacts are produced by the pipeline rather than by anyone remembering to make them. Tekton Chains signs every image the pipeline builds and attaches its provenance with no per-build wiring, Red Hat Trusted Artifact Signer records signatures in a public transparency log, and a native `ClusterImagePolicy` makes the cluster verify a signature before it will pull an image.
 
 *In this demo*
 
@@ -192,7 +199,7 @@ spec:
 EOF
 ----
 
-That is six to twelve minutes of Maven and buildah. Track it on one line rather than on a log stream — `SUCCEEDED` reads `Unknown` while it works and `False` once the gate refuses it:
+That is about three minutes of Maven and buildah on a warm cluster, longer on a cold one. Track it on one line rather than on a log stream — `SUCCEEDED` reads `Unknown` while it works and `False` once the gate refuses it:
 
 [source,sh,role=execute]
 ----
@@ -230,7 +237,7 @@ export PATH="$HOME/bin:$PATH"
 oc registry login --to="$HOME/.docker/config.json" --skip-check && export DOCKER_CONFIG="$HOME/.docker"
 oc get istag -n $NS | grep parasol-claims
 oc get cm chains-cosign-pub -n $NS -o jsonpath='{.data.cosign\.pub}' > ~/cosign.pub
-IMG=$(oc get istag parasol-claims:latest -n $NS -o jsonpath='{.image.dockerImageReference}')
+IMG=$(oc get istag parasol-claims-trusted:latest -n $NS -o jsonpath='{.image.dockerImageReference}')
 cosign verify --key ~/cosign.pub --allow-insecure-registry --insecure-ignore-tlog "$IMG"
 ----
 
@@ -253,9 +260,22 @@ Signing without enforcement is a policy on a wiki. Admission is what turns "we s
 rekor-cli loginfo --rekor_server "$REKOR" | grep 'Tree Size'
 ----
 
+The cluster's signature policy guards the repository the signed image lives in. Put an unsigned image there and ask a node to run it:
+
+[source,sh,role=execute]
+----
+oc tag --source=docker registry.access.redhat.com/ubi9/ubi-minimal:latest \
+  parasol-claims-trusted:unsigned --reference-policy=local -n $NS
+oc run demo-unsigned -n $NS --image=image-registry.openshift-image-registry.svc:5000/$NS/parasol-claims-trusted:unsigned \
+  --image-pull-policy=Always --command -- sleep infinity
+sleep 10
+oc get pod demo-unsigned -n $NS -o jsonpath='{.status.containerStatuses[0].state.waiting.message}' \
+  | grep -oE 'SignatureValidationFailed|Source image rejected: [^;]*'
+----
+
 *What just happened*
 
-That tree size is the live Rekor log run by Red Hat Trusted Artifact Signer: every keyless signature lands there permanently. Add an `ImagePolicy` to a namespace and the node verifies the image's signature before pulling it — a bad image cannot be built, an unsigned image cannot run, and every signature is on the record.
+That tree size is the live Rekor log run by Red Hat Trusted Artifact Signer: every keyless signature lands there permanently. The `ClusterImagePolicy` the platform applied at install made the node look for a signature before pulling, and it refused the unsigned image: `SignatureValidationFailed`, "A signature was required, but no signature exists". A bad image cannot be built, an unsigned image cannot run, and every signature is on the record.
 
 == Frequently asked questions
 
@@ -351,7 +371,7 @@ Four Tasks in order: `fetch-source` → `sbom-report` → `build-image` → `acs
 The blank `TASKREF` cells are cluster-resolver references (`fetch-source` resolves the bundled `git-clone`, `build-image` the `buildah` task, and `acs-scan` the curated `acs-image-check`); `sbom-report` is defined inline (`EMBEDDED`).
 The last Task is the *gate*: `acs-image-check` runs a *Red Hat Advanced Cluster Security* (RHACS) build-time check and *fails the build* on a policy violation.
 
-Now *start a build of the seeded branch* — to a throwaway `:candidate` tag, so the trusted `:latest` already in your registry is untouched.
+Now *start a build of the seeded branch* — to a throwaway `parasol-claims:candidate`, so the trusted `parasol-claims-trusted:latest` already in your registry is untouched.
 This build takes a few minutes, so start it and read on:
 
 // Grounded 2026-07-29 on OCP 4.22.5, signed in as an attendee (user1), viewport 1600x1000:
@@ -496,8 +516,8 @@ EOF
 --
 ====
 
-While that builds (*roughly 6–12 minutes*, longer on a cold node), read the verdict on the image you *already* have.
-Your registry holds the clean `parasol-claims:latest` this pipeline built on the `main` branch when the cluster was installed — and that run, in the shared project `ogsr-supply-chain`, recorded its scan verdict as a *result*:
+While that builds (*a few minutes* — 2m39s measured on a warm cluster, longer on a cold node), read the verdict on the image you *already* have.
+Your registry holds the clean image this pipeline built on the `main` branch when the cluster was installed, as `parasol-claims-trusted:latest` — and that run, in the shared project `ogsr-supply-chain`, recorded its scan verdict as a *result*:
 
 // Grounding note 2026-07-30: this marker's premise (a "Results" section on the PipelineRun
 // Details page) is already superseded by the note four lines below, grounded live 2026-07-26
@@ -515,7 +535,7 @@ Open *Pipelines* → *PipelineRuns*, switch the project to `ogsr-supply-chain` (
 // Grounded live on OCP 4.22.5 (2026-07-26, pipelines-fundamentals Ex 1): results are NOT on the
 // Details page — they live on the run's own Output tab.
 Open the run's *Output* tab: under *PipelineRun results*, `scan-passed` = `true` — the gate's verdict on the clean image, published as run data.
-Back in project `{user}-cicd`, *Builds* → *ImageStreams* → `parasol-claims` shows that image as your `latest` tag.
+Back in project `{user}-cicd`, *Builds* → *ImageStreams* → `parasol-claims-trusted` shows that image as your `latest` tag.
 --
 CLI::
 +
@@ -612,7 +632,7 @@ image::trusted-supply-chain/trusted-supply-chain-05-pipelineruns-list.png["OpenS
 
 [.checkpoint]
 ****
-✔ *Verify:* the install-time clean run in `ogsr-supply-chain` shows `scan-passed=true` (the clean `:latest` cleared the gate); your `jq` query found `log4j-core@2.14.1` in the SBOM; and your seeded `:candidate` build is `Failed` with the `acs-scan` step logging `Block Log4Shell (CVE-2021-44228) ... CRITICAL` — the gate refused a *built* image, it did not stop the build.
+✔ *Verify:* the install-time clean run in `ogsr-supply-chain` shows `scan-passed=true` (the clean trusted image cleared the gate); your `jq` query found `log4j-core@2.14.1` in the SBOM; and your seeded `:candidate` build is `Failed` with the `acs-scan` step logging `Block Log4Shell (CVE-2021-44228) ... CRITICAL` — the gate refused a *built* image, it did not stop the build.
 ****
 
 [TIP]
@@ -666,7 +686,7 @@ export DOCKER_CONFIG="$HOME/.docker"
 # the public key Chains signs with — copied into your namespace by the entry state
 oc get cm chains-cosign-pub -n $NS -o jsonpath='{.data.cosign\.pub}' > ~/cosign.pub
 # the exact clean image, by digest
-IMG=$(oc get istag parasol-claims:latest -n $NS -o jsonpath='{.image.dockerImageReference}')
+IMG=$(oc get istag parasol-claims-trusted:latest -n $NS -o jsonpath='{.image.dockerImageReference}')
 echo "verifying: $IMG"
 ----
 
@@ -680,13 +700,16 @@ cosign verify --key ~/cosign.pub --allow-insecure-registry --insecure-ignore-tlo
 .Expected output (abridged)
 [source,texinfo]
 ----
-Verification for image-registry.openshift-image-registry.svc:5000/<you>-cicd/parasol-claims@sha256:... --
+Verification for image-registry.openshift-image-registry.svc:5000/<you>-cicd/parasol-claims-trusted@sha256:... --
 The following checks were performed on each of these signatures:
   - The cosign claims were validated
   - The signatures were verified against the specified public key
+
+[{"critical":{"identity":{"docker-reference":"image-registry.openshift-image-registry.svc:5000/ogsr-supply-chain/parasol-claims"},"image":{"docker-manifest-digest":"sha256:..."},"type":"cosign container image signature"},"optional":null}]
 ----
 
 The signature is *valid*: this image is intact and was signed with the key your pipeline signs with.
+The last line is the signed payload. Its `docker-reference` names the repository the image was built and signed in — `ogsr-supply-chain/parasol-claims`, where the platform ran the pipeline — even though you pulled a copy from your own project. Exercise 5's cluster policy checks exactly that name.
 (`--insecure-ignore-tlog` tells cosign not to look for a transparency-log entry — this key-based signature does not use one; you will meet the transparency log with *keyless* signing in exercise 4. `--allow-insecure-registry` skips the internal registry's service-CA TLS.)
 
 Now watch it *reject* an image that was not signed with your key — a stock public image:
@@ -709,7 +732,7 @@ Exercise 5 turns that check into a cluster rule.
 
 [.checkpoint]
 ****
-✔ *Verify:* `cosign version` prints `v3.0.4` (fetched from the RHTAS cli-server); `cosign verify --key` against `parasol-claims:latest` reports *"The signatures were verified against the specified public key"*; and the same command against a stock image fails with *"no signatures found"*.
+✔ *Verify:* `cosign version` prints `v3.0.4` (fetched from the RHTAS cli-server); `cosign verify --key` against `parasol-claims-trusted:latest` reports *"The signatures were verified against the specified public key"*; and the same command against a stock image fails with *"no signatures found"*.
 ****
 
 == 3. Provenance and SBOM: prove *how* it was built
@@ -719,83 +742,49 @@ A signature says the image is intact and yours.
 An *attestation* says _how it was built_ — the builder, the source, the steps, the timestamps — as a signed *SLSA provenance* statement.
 Chains attached one to your image, stored in the registry beside it as a `.att` tag.
 
-First see the artifacts Chains stored — the image plus two tags derived from its digest:
+First see the artifacts Chains stored — each image plus two tags derived from its digest, in two repositories: the trusted copy, and your own seeded build:
 
-// Grounded 2026-07-29 (screenshot after this block): Builds > ImageStreams > parasol-claims lands on
-// the *Details* tab, and the Tags table is at the BOTTOM of that page — the console has no separate
-// Tags tab. Three rows in this state: `latest`, and `sha256-<digest>.att` / `.sig`, each "pushed image"
-// with its own distinct identifier. The CLI form below stays authoritative for the exact digests.
+// Grounded 2026-11-12 as user11 on cluster-5vqxc (OCP 4.22.22), after exercise 1's seeded run:
+// the trusted copy lives in its own ImageStream, parasol-claims-trusted (latest + .att + .sig, the
+// install-time digest fed0a90b…), and the seeded build in parasol-claims (candidate + .att + .sig).
+// One pair per repository. The console screenshot below predates the split (2026-07-29, a single
+// parasol-claims stream holding latest + .att + .sig) — the three-row Tags shape it shows is what
+// parasol-claims-trusted renders; its stream name differs.
 [tabs]
 ====
 Console::
 +
 --
-In the navigation, choose *Builds* → *ImageStreams* (project `{user}-cicd`) and click `parasol-claims`.
+In the navigation, choose *Builds* → *ImageStreams* (project `{user}-cicd`) and click `parasol-claims-trusted`.
 Its *Tags* list shows `latest` (the image) plus two derived from its digest — `sha256-….att` (the attestation) and `sha256-….sig` (the signature).
+The `parasol-claims` stream beside it holds your `candidate` with its own pair.
 --
 CLI::
 +
 --
 [source,sh,role=execute]
 ----
-oc get imagestream parasol-claims -n $NS \
-  -o jsonpath='{range .status.tags[*]}{.tag}{"\n"}{end}'
+oc get imagestream parasol-claims-trusted parasol-claims -n $NS \
+  -o jsonpath='{range .items[*]}{.metadata.name}{":\n"}{range .status.tags[*]}{"  "}{.tag}{"\n"}{end}{end}'
 ----
 
 .Expected output
-// two `.att`/`.sig` pairs — CLOSED 2026-07-31, browser-verified as user6 (same session as the
-// marker above; identity re-confirmed via the same /users/~ check).
-//
-// CLI (`oc get imagestream parasol-claims -n user6-cicd -o jsonpath='{range .status.tags[*]}
-// {.tag}{"\n"}{end}'`) now returns NINE tags, not the six the block below shows: `candidate`,
-// `cleancheck`, `latest`, and a `.att`/`.sig` pair for each of the three digests — THREE pairs, one
-// more than this block claims. The extra one is `cleancheck`: the out-of-band clean-baseline
-// PipelineRun from the marker above (`clean-check-9mjb2`, `main` branch → `:cleancheck`, run to
-// prove the green half of this same verification pass). It is a genuine Chains artifact, correctly
-// signed and attested like the other two — but it is NOT something this lab's own instructions ever
-// produce: following this exercise only ever builds `:candidate` (ex. 1) beside the pre-existing
-// `:latest` (entry state), i.e. exactly the TWO pairs / SIX tags this block describes. That claim is
-// CONFIRMED CORRECT as the module's own canonical shape — `candidate`, `latest`, and their four
-// derived tags are all present, live, on this cluster, exactly as described — it is just not the
-// only thing present right now, because of this session's extra verification traffic.
-//
-// Console, confirmed live: the Tags table renders all NINE rows correctly (columns Name | From |
-// Identifier | Last updated; "pushed image" under From on every row; a distinct sha256: identifier
-// per row; real timestamps) — no pagination cap, no rendering issue at 3x the row count any prior
-// pass had seen. The ImageStream's own "Image count" field (Details tab, above the Tags table)
-// reads 9, matching. This closes the open rendering question from the prior pass (which had only
-// ever seen a 1-pair, 3-row table): the console handles multiple pairs correctly.
-//
-// All three PipelineRuns carry the label `workshop.redhat.com/module=trusted-supply-chain`,
-// confirming all three builds — including the `latest` one from the entry state — genuinely belong
-// to THIS module. That closes the provenance caveat media-manifest.md recorded against the original
-// capture of the embedded screenshot below (shot while `{user}-cicd` was contested with
-// pipelines-fundamentals).
-//
-// The embedded screenshot below (trusted-supply-chain-03-imagestream-tags.png) was deliberately
-// LEFT AS the existing 3-tag/1-pair capture rather than re-shot against today's 9-tag state: the
-// extra `cleancheck` pair is real but not part of the canonical two-pair story this exercise tells,
-// and re-shooting now would put a tag attendees never produce into the module's reference image. A
-// 9-tag reference capture was taken and reviewed for this closure but intentionally not added to the
-// asset directory, for that same reason. If the module ever wants to show three pairs on purpose,
-// re-derive that capture against a clean `{user}-cicd` running only the canonical two builds.
-//
-// CLOSED. The two-pair claim is verified true as a subset of current cluster state; the console
-// renders it correctly; nothing about this marker remains open.
 [source,texinfo]
 ----
-candidate
-latest
-sha256-<candidate-digest>.att
-sha256-<candidate-digest>.sig
-sha256-<latest-digest>.att
-sha256-<latest-digest>.sig
+parasol-claims-trusted:
+  latest
+  sha256-<trusted-digest>.att
+  sha256-<trusted-digest>.sig
+parasol-claims:
+  candidate
+  sha256-<candidate-digest>.att
+  sha256-<candidate-digest>.sig
 ----
-
-Two `.att`/`.sig` pairs, one per built image: Tekton Chains signs *every* build — including the failed `:candidate` one.
-Signing answers "who built it", a different question from "is it clean"; the gate answered that one.
 --
 ====
+
+One `.att`/`.sig` pair per built image: Tekton Chains signs *every* build — including your failed `:candidate`.
+Signing answers "who built it", a different question from "is it clean"; the gate answered that one.
 
 .The Chains artifacts in the console: the image tag, plus the `.att` and `.sig` derived from its digest
 image::trusted-supply-chain/trusted-supply-chain-03-imagestream-tags.png["OpenShift console showing the ImageStream details page for parasol-claims in the user1-cicd project. Image count is 3, and the Tags table lists three rows: parasol-claims:latest, and two tags derived from that image's digest ending .att and .sig. Each row reads \"pushed image\" under From, with its own distinct sha256 identifier — the attestation and the signature are separate artifacts stored beside the image, not inside it."]
@@ -911,7 +900,7 @@ Verified OK
 Keyless signing records in Rekor *before* it stores the signature — which is exactly what you want to see here.
 Signing the *SBOM file* (`sign-blob`) keeps the beat self-contained and registry-independent; the OpenShift internal registry does not accept cosign's keyless image-signature manifest (you would see an `UNKNOWN` push error _after_ the log entry is already written).
 In production you would push keyless *image* signatures to an external registry (Quay), where the same `cosign sign` you saw in exercise 2 lands them.
-You can browse every entry in this log in the *Rekor Search UI* at https://rekor-search-ui-trusted-artifact-signer.{cluster_domain}[the Rekor Search UI^].
+You can browse every entry in this log on the *Rekor Search* page of the Trusted Artifact Signer console: https://console-ui-trusted-artifact-signer.{cluster_domain}/rekor-search[Rekor Search^].
 ====
 
 [.checkpoint]
@@ -920,96 +909,115 @@ You can browse every entry in this log in the *Rekor Search UI* at https://rekor
 ****
 
 == 5. Only signed images run: admission control
-⏱ *~6 min* · the cluster refuses to pull an unsigned image into your namespace
+⏱ *~6 min* · read the cluster's signature policy, then watch the node refuse an unsigned image and run the signed one
 
 Signing is worthless if nobody checks the signature.
 // version-anchor-ok: a feature-introduction fact, not a cluster fact — ImagePolicy arrived in this release and the API is simply absent on anything older, so an SA delivering on an earlier cluster needs the floor. Held in versions.yaml as ocp_image_policy_version so it stays reviewable.
-The final control is *admission*: OpenShift's native `ImagePolicy` (a `config.openshift.io/v1` resource, shipped with OpenShift {ocp_image_policy_version}) tells the node to *verify a signature before it will pull an image* into a namespace.
-An image that never went through your signing pipeline is *refused at pull time*.
+The final control is *admission*: OpenShift's native signature policy (`config.openshift.io/v1`, shipped with OpenShift {ocp_image_policy_version}) tells every node to *verify a signature before it pulls an image*.
+A `ClusterImagePolicy` covers the whole cluster; an `ImagePolicy` covers one namespace.
+Changing either reconfigures the container runtime on every node, so the platform team applied one `ClusterImagePolicy` when this cluster was installed, and you test it from your own project.
 
-Because an `ImagePolicy` changes cluster-node behavior (the node's container runtime re-reads its signature-verification config), it is applied by the instructor cluster-wide in this workshop — but the effect lands in *your* namespace, and you verify it.
+*Read the policy.*
+You have read access to cluster signature policies:
 
-[NOTE,role=instructor-demo]
-.🧑‍🏫 Instructor demo — the cluster blocks an unsigned image
-====
-The instructor applies an `ImagePolicy` scoped to your `parasol-claims` image, pinned to the same cosign public key Chains signs with:
-
-[source,yaml]
-----
-apiVersion: config.openshift.io/v1
-kind: ImagePolicy
-metadata:
-  name: only-signed-claims
-  namespace: <you>-cicd
-spec:
-  scopes:
-    - image-registry.openshift-image-registry.svc:5000/<you>-cicd/parasol-claims
-  policy:
-    rootOfTrust:
-      policyType: PublicKey              # <1>
-      publicKey:
-        keyData: <base64 cosign.pub>     # <2>
-    signedIdentity:
-      matchPolicy: MatchRepository       # <3>
-----
-<1> Key-based verification (the lab's path); the keyless alternative is `policyType: FulcioCAWithRekor`.
-<2> The base64-encoded cosign public key — the same `chains-cosign-pub` your namespace already holds.
-<3> This field decides *which identity* the signature has to claim, and it is the one that bites.
-A Tekton Chains signature's payload carries the **bare repository** as its `docker-reference` — no
-tag, no digest. You can see this yourself in the `cosign verify` output back in exercise 2.
-`MatchRepoDigestOrExact` demands the reference match the pulled digest or the exact tag, which a
-Chains signature can never satisfy, so CRI-O finds a perfectly valid signature and rejects it on
-identity: `Signature for identity "…/parasol-claims" is not accepted`. `MatchRepository` asks the
-question the signature can actually answer — is this signed for this repository — which is the
-property the policy is there to enforce.
-
-With the policy in place:
-
-* Deploying your *signed* `parasol-claims:latest` image *works* — the node verifies the signature against the key and pulls it.
-* Deploying an *unsigned* image (say a stock `docker.io` image) into the same scope is *refused* — the pod stays `ImagePullBackOff`, and its events read `SignatureValidationFailed: ... A signature was required, but no signature exists`.
-
-That is the point of admission: it does not matter whether anyone _remembered_ to run the scan gate — the cluster will not pull an image it cannot verify.
-====
-
-Confirm the pieces that make this possible are already in *your* namespace — the public key the policy trusts, and a signed image for it to admit:
-
-// Grounded 2026-07-30 live on OCP, signed in as user1: Workloads > ConfigMaps (project
-// user1-cicd) lists 7 ConfigMaps and `chains-cosign-pub` is one of them (confirmed both via
-// `oc get configmap chains-cosign-pub -n user1-cicd`, which returns the key with its
-// `cosign.pub` PEM data, and by loading the console's ConfigMaps list page itself). Prose matches.
-[tabs]
-====
-Console::
-+
---
-Under *Workloads* → *ConfigMaps* (project `{user}-cicd`), `chains-cosign-pub` is present (the key admission trusts); and under *Builds* → *ImageStreams* → `parasol-claims` (from exercise 3), the `.sig`/`.att` tags are the signature admission verifies.
---
-CLI::
-+
---
+// Grounded 2026-11-12 as user11 on cluster-5vqxc (OCP 4.22.22): the install's policy, read with the
+// attendee identity (platform-observer grants get/list on clusterimagepolicies). Output trimmed to
+// the first two scopes and the key shortened; the real list names every attendee's repository (13 here).
 [source,sh,role=execute]
 ----
-echo "trust key present:  $(oc get configmap chains-cosign-pub -n $NS -o name)"
-echo "signed image tags:  $(oc get imagestream parasol-claims -n $NS -o jsonpath='{range .status.tags[*]}{.tag}{" "}{end}')"
+oc get clusterimagepolicy ogsr-signed-parasol-claims -o yaml | sed -n '/^spec:/,$p'
+----
+
+.Expected output (abridged)
+[source,yaml]
+----
+spec:
+  policy:
+    rootOfTrust:
+      policyType: PublicKey                                  # <1>
+      publicKey:
+        keyData: LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0K...
+    signedIdentity:
+      exactRepository:                                       # <2>
+        repository: image-registry.openshift-image-registry.svc:5000/ogsr-supply-chain/parasol-claims
+      matchPolicy: ExactRepository
+  scopes:                                                    # <3>
+  - image-registry.openshift-image-registry.svc:5000/user1-cicd/parasol-claims-trusted
+  - image-registry.openshift-image-registry.svc:5000/user2-cicd/parasol-claims-trusted
+  - ...
+----
+<1> Key-based verification against `keyData`: the base64 of the same `chains-cosign-pub` key you verified with in exercise 2. (The keyless alternative is `policyType: FulcioCAWithRekor`.)
+<2> The identity a signature must claim. Exercise 2 showed it: the trusted image was signed in `ogsr-supply-chain/parasol-claims`, where the platform built it, and your copy carries that signature unchanged. `ExactRepository` accepts exactly that build and nothing else.
+<3> The scopes: one repository per attendee, yours among them. Nothing outside these repositories is checked, which keeps the policy from refusing images it was never meant for.
+
+Confirm your repository is in scope and that the policy trusts the key Chains signs with:
+
+[source,sh,role=execute]
+----
+oc get clusterimagepolicy ogsr-signed-parasol-claims -o jsonpath='{range .spec.scopes[*]}{@}{"\n"}{end}' | grep "/$NS/"
+KEY=$(oc get configmap chains-cosign-pub -n $NS -o jsonpath='{.data.cosign\.pub}' | base64 -w0)
+[ "$KEY" = "$(oc get clusterimagepolicy ogsr-signed-parasol-claims -o jsonpath='{.spec.policy.rootOfTrust.publicKey.keyData}')" ] \
+  && echo "✔ the policy trusts the key Chains signs with"
 ----
 
 .Expected output
 [source,texinfo]
 ----
-trust key present:  configmap/chains-cosign-pub
-signed image tags:  candidate latest sha256-....att sha256-....sig sha256-....att sha256-....sig
+image-registry.openshift-image-registry.svc:5000/<you>-cicd/parasol-claims-trusted
+✔ the policy trusts the key Chains signs with
 ----
 
-The two `.att`/`.sig` pairs are one per built image — Chains signed the failed `:candidate` build too (who-built-it, not is-it-clean).
---
-====
+*Test it.*
+Put an image nobody signed into that repository — a stock UBI image, tagged `parasol-claims-trusted:unsigned`:
 
-The key that admission verifies against, and the signature it verifies — both are here.
-`ImagePolicy` is the switch that turns "we sign our images" into "the cluster will not run one we did not sign."
+[source,sh,role=execute]
+----
+oc tag --source=docker registry.access.redhat.com/ubi9/ubi-minimal:latest \
+  parasol-claims-trusted:unsigned --reference-policy=local -n $NS
+----
+
+Now start one pod from the signed image and one from the unsigned one.
+`--image-pull-policy=Always` makes the node pull — and so verify — even if it cached the image earlier:
+
+[source,sh,role=execute]
+----
+R=image-registry.openshift-image-registry.svc:5000/$NS/parasol-claims-trusted
+oc run claims-signed   -n $NS --image=$R:latest   --image-pull-policy=Always --command -- sleep infinity
+oc run claims-unsigned -n $NS --image=$R:unsigned --image-pull-policy=Always --command -- sleep infinity
+oc wait pod/claims-signed -n $NS --for=condition=Ready --timeout=120s
+oc get pod claims-signed claims-unsigned -n $NS
+----
+
+.Expected output
+[source,texinfo]
+----
+NAME              READY   STATUS             RESTARTS   AGE
+claims-signed     1/1     Running            0          4s
+claims-unsigned   0/1     ImagePullBackOff   0          3s
+----
+
+The signed pod runs: the node found the `.sig` beside the image, checked it against the key, and accepted its identity.
+The unsigned pod never starts. Read why:
+
+[source,sh,role=execute]
+----
+oc get pod claims-unsigned -n $NS -o jsonpath='{.status.containerStatuses[0].state.waiting.message}' \
+  | grep -oE 'SignatureValidationFailed|Source image rejected: [^;]*'
+----
+
+.Expected output
+[source,texinfo]
+----
+SignatureValidationFailed
+Source image rejected: A signature was required, but no signature exists
+----
+
+The node looked for a `.sig` beside the image in `parasol-claims-trusted`, found none, and refused the pull. (`STATUS` may read `ErrImagePull` for the first few seconds; it settles on `ImagePullBackOff` as the node retries, and every retry is refused the same way.)
+It does not matter whether anyone _remembered_ to run the scan gate: the node will not pull an image in this repository that it cannot verify.
 
 [.checkpoint]
 ****
-✔ *Verify:* you watched the instructor's `ImagePolicy` admit your *signed* image and refuse an *unsigned* one (`SignatureValidationFailed` at pull); and you confirmed your namespace holds the trust key (`chains-cosign-pub`) and a signed image the policy admits.
+✔ *Verify:* the policy lists your `{user}-cicd/parasol-claims-trusted` and trusts the `chains-cosign-pub` key; `claims-signed` is `Running`; and `claims-unsigned` is refused at pull with `SignatureValidationFailed` — *"A signature was required, but no signature exists"*.
 ****
 
 == Challenge (optional)
@@ -1026,9 +1034,23 @@ That is exactly the query you would run the day a CVE lands in an Apache library
 That is the machine-readable answer to "how was this image built."
 * *Inspect a Rekor entry in full.*
 Take the UUID from exercise 4 and run `rekor-cli get --rekor_server $REKOR --uuid <uuid>` — read the log index, the integrated time, and the certificate the identity was issued.
+* *Signed is not enough — it must be the trusted build.*
+Your `:candidate` is Chains-signed too. Copy it into the guarded repository *with* its signature, and try to run it:
++
+[source,sh,role=execute]
+----
+D=$(oc get istag parasol-claims:candidate -n $NS -o jsonpath='{.image.metadata.name}' | tr ':' '-')
+oc tag parasol-claims:candidate parasol-claims-trusted:candidate -n $NS
+oc tag parasol-claims:$D.sig parasol-claims-trusted:$D.sig -n $NS
+oc run claims-candidate -n $NS --image=image-registry.openshift-image-registry.svc:5000/$NS/parasol-claims-trusted:candidate \
+  --image-pull-policy=Always --command -- sleep infinity
+----
++
+The node finds the signature this time, and still refuses: `Signature for identity "…/<you>-cicd/parasol-claims" is not accepted` (read it with exercise 5's `grep` against `claims-candidate`).
+A signature proves _who_ built an image; the policy decides _which_ builder it trusts — here, only the scanned build in `ogsr-supply-chain`.
 * *Prove the base image is not the gate.*
 The seeded branch also pins an older UBI OpenJDK base tag. Bump it in the `Containerfile`, rebuild the `:candidate`, and confirm the gate *still* fails on Log4Shell — the dependency, not the base image, is what the "Supply Chain Security" gate keys on.
 
-When you are done, run `ws verify {module-id}` — or `ws prep {module-id} --yes` to return `{user}-cicd` to the entry state (the signed `parasol-claims:latest` copied back in, the pipeline and trust secrets, your fork restored to its vulnerable `seed-vulnerable` state) and start fresh.
+When you are done, run `ws verify {module-id}` — or `ws prep {module-id} --yes` to return `{user}-cicd` to the entry state (the signed `parasol-claims-trusted:latest` copied back in, the pipeline and trust secrets, your fork restored to its vulnerable `seed-vulnerable` state) and start fresh.
 
 endif::demo[]

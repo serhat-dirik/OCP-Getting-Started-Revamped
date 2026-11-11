@@ -9,6 +9,8 @@
 #          image is present and the shared run passed the scan gate BEFORE the attendee starts — that
 #          signed image is what the trust lab (cosign verify → attestation → admission)
 #          reads, so it is asserted in BOTH modes (owner's 2026-07-18 pre-scanned-image rebalance).
+#          Also in BOTH modes: the install's ClusterImagePolicy ogsr-signed-parasol-claims names this
+#          attendee's parasol-claims-trusted (exercise 5 reads it; it is install state, never per-user).
 #          ONLY in --entry-only mode: the fork's seed-vulnerable branch still carries the seeded log4j-core
 #          CVE (the attendee's optional SBOM-fix beat removes it, so this entry-materialization check is
 #          NOT run in full mode — template rule 14, mode-split).
@@ -20,7 +22,8 @@
 #          ON TOP OF THAT, full mode grades what the ATTENDEE added: the seeded-branch PipelineRun the
 #          RHACS gate refused, the :candidate image it built before being refused, that image's own
 #          Chains signature pair, and — when this script runs in the attendee's own terminal — the SBOM
-#          and the keyless Rekor bundle exercises 1 and 4 leave in their home directory. Details and the
+#          and the keyless Rekor bundle exercises 1 and 4 leave in their home directory, and exercise 5's
+#          two admission pods (claims-signed admitted, claims-unsigned refused at pull). Details and the
 #          in-flight / not-my-shell / ws-solve carve-outs are at the end-state block below.
 #
 # FALSE-GREEN FIX (this file's own defect, 2026-08-05). Until this change the list above WAS the whole
@@ -120,9 +123,9 @@ signed_latest_image_present() {
 # READ-ONLY against the cluster — that is the module's design, not an oversight — so their only trace
 # is in the attendee's own terminal home directory. They are graded there when this script IS that
 # terminal and skipped with a ⚠ when it is not; see attendee_shell() below.
-# Exercise 5's ImagePolicy is [INSTRUCTOR-DEMO] (attendees cannot create the cluster-config resource,
-# `can-i create imagepolicies` = no), and its attendee-side half — chains-cosign-pub + a signed image —
-# is already asserted in both modes above. Nothing further to grade for it.
+# Exercise 5 (admission) leaves two pods in {user}-cicd, graded below: claims-signed (the trusted image,
+# admitted) and claims-unsigned (an unsigned image in the guarded repository, refused at pull). The
+# policy itself is install state, asserted in both modes; `ws prep` purges the pods with the rest.
 
 # Every PipelineRun of this Pipeline built from the SEEDED branch, as "<name>|<revision>|<Succeeded>".
 # One read, reused by three predicates — the seeded runs are the spine of the whole end state.
@@ -187,6 +190,33 @@ seed_outcome_complete() {
   candidate_image_present "$1" || return 1
   candidate_signed "$1" || return 1
 }
+# The install's signature policy guards THIS attendee's trusted repository. Exact line match on the scope:
+# a prefix match would let user1's check pass on user10's scope.
+policy_scopes_my_repo() {
+  oc_read get clusterimagepolicy ogsr-signed-parasol-claims -o jsonpath='{range .spec.scopes[*]}{@}{"\n"}{end}' || return 1
+  grep -qxF "image-registry.openshift-image-registry.svc:5000/${1}/parasol-claims-trusted" <<<"$OC_OUT"
+}
+# Exercise 5's pods, one read each: "<ready>|<waiting reason>|<waiting message>|<image>". Both must run
+# an image from the GUARDED repository — a pod named claims-signed running some other image proves
+# nothing about the policy. Read in THIS shell (OC_OUT), never `$(…)`, for the same reason as above.
+admission_pod_read() {
+  oc_read get pod "$2" -n "$1" -o jsonpath='{.status.containerStatuses[0].ready}{"|"}{.status.containerStatuses[0].state.waiting.reason}{"|"}{.status.containerStatuses[0].state.waiting.message}{"|"}{.spec.containers[0].image}' || return 1
+  local repo="image-registry.openshift-image-registry.svc:5000/${1}/parasol-claims-trusted"
+  [[ "${OC_OUT##*|}" == "${repo}:"* || "${OC_OUT##*|}" == "${repo}@"* ]]
+}
+# The signed image was admitted: its node verified the signature and the container is ready.
+admission_signed_ran() {
+  admission_pod_read "$1" claims-signed || return 1
+  [[ "${OC_OUT%%|*}" == "true" ]]
+}
+# The unsigned image was refused BY THE POLICY: kubelet reports SignatureValidationFailed, as the reason
+# while the pull fails and inside the message while it backs off (measured as user11, 2026-11-12:
+# "Back-off pulling image …: SignatureValidationFailed: … A signature was required, but no signature
+# exists"). Any other refusal — a typo'd tag, an unreachable registry — is not this lesson.
+admission_unsigned_refused() {
+  admission_pod_read "$1" claims-unsigned || return 1
+  [[ "${OC_OUT%%|*}" != "true" ]] && grep -q 'SignatureValidationFailed' <<<"$OC_OUT"
+}
 # Is THIS shell the attendee's own terminal? Exercises 2–4 write only to their home directory, so the
 # answer decides between grading them (❌ is meaningful: the files would be there) and skipping them
 # with a ⚠ (an instructor/CI run from a laptop has no business grading someone else's home dir — that
@@ -221,6 +251,7 @@ check "curated library task acs-image-check reachable"     oc get tasks.tekton.d
 check "install-time supply-chain run PASSED the scan gate (${TRUSTED_NS})" supply_chain_run_succeeded "$TRUSTED_NS" || hint "the install builds the CLEAN main branch once in ${TRUSTED_NS}; if this is red that build is still running or failed — watch: tkn pipelinerun logs --last -n ${TRUSTED_NS} (instructor: re-sync the workshop-config app to retry it)"
 check "Tekton Chains signed that build (signed TaskRun present)"   signed_taskrun_exists "$TRUSTED_NS"       || hint "Chains signs a few seconds after the build TaskRun completes — re-check in a moment"
 check "pre-scanned signed image parasol-claims-trusted:latest (+ .sig/.att)" signed_latest_image_present "$NS"         || hint "the signed image was not copied into ${NS} — re-materialize: ws prep trusted-supply-chain --user ${USER_NAME} --yes (copies it from ${TRUSTED_NS} in seconds)"
+check "cluster signature policy ogsr-signed-parasol-claims guards ${NS}/parasol-claims-trusted" policy_scopes_my_repo "$NS" || hint "the install applies this ClusterImagePolicy (workshop-config trusted-image-policy) with one scope per attendee — tell your instructor; they re-sync workshop-config (adding attendees re-renders the scopes)"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # Entry-only: the seeded flaw is asserted ONLY here. The trusted-supply-chain lab's optional SBOM-fix beat
@@ -243,7 +274,7 @@ else
     # anywhere — nothing produced this state, so there is nothing to grade. The banner stays green
     # and honest, and the line below is why. (If `ws solve` ever gains a hook that runs the seeded
     # build, delete this branch and let the checks below run — they already grade exactly that.)
-    na "the attendee-side beats (the seeded :candidate build, the SBOM, the keyless Rekor receipt) — \`ws solve\` for this module materializes the copied signed-image end state and deliberately nothing else, so they are correctly absent here"
+    na "the attendee-side beats (the seeded :candidate build, the SBOM, the keyless Rekor receipt, the two admission pods) — \`ws solve\` for this module materializes the copied signed-image end state and deliberately nothing else, so they are correctly absent here"
   else
     # Exercise 1 — the seeded build. One read, then three verdicts off it, because "you never started
     # it" (❌), "it is still building" (⚠) and "the gate answered" (graded) are three different things.
@@ -278,6 +309,12 @@ else
         fi
       fi
     fi
+
+    # Exercise 5 — admission. Two pods, graded separately so a failure names itself.
+    check "exercise 5: the node admitted your signed image (pod claims-signed is Running)" admission_signed_ran "$NS" \
+      || hint "exercise 5: oc run claims-signed -n ${NS} --image=image-registry.openshift-image-registry.svc:5000/${NS}/parasol-claims-trusted:latest --image-pull-policy=Always --command -- sleep infinity"
+    check "exercise 5: the node refused your unsigned image (claims-unsigned: SignatureValidationFailed)" admission_unsigned_refused "$NS" \
+      || hint "exercise 5: tag ubi-minimal as parasol-claims-trusted:unsigned, then oc run claims-unsigned from it with --image-pull-policy=Always. If it is Running, the policy did not apply — check: oc get clusterimagepolicy ogsr-signed-parasol-claims"
 
     # Exercises 2–4 leave nothing on the cluster BY DESIGN (cosign verify / verify-attestation read the
     # registry; sign-blob writes to Rekor and to a local bundle). Graded only from the attendee's own

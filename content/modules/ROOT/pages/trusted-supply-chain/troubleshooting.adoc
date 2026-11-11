@@ -6,6 +6,10 @@ include::partial$version-attributes.adoc[]
 // Pipelines 1.23.0 / RHTAS 1.4.2 / Tekton Chains as user3 (2026-07-18, the
 // "pre-scanned image" rebalance). Format: Symptom / Cause / Fix. Every entry was actually observed
 // on-cluster during the build.
+// 2026-11-12 (user11, cluster-5vqxc, OCP 4.22.22 / RHTAS 1.5.1): the admission entries, the client-server
+// gzip error (seen before the install served the client server), Tree Size 0 and the Rekor Search 503
+// were all observed in the attendee-admission rework; the old "ImagePolicy is forbidden" entry is gone
+// with the instructor demo it explained.
 
 Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
 Most terminal commands assume you set `NS={user}-cicd`, `CLI`, `REKOR`, and `TUF` (and downloaded `cosign`/`rekor-cli`) as in the lab's setup blocks.
@@ -111,12 +115,48 @@ Cause:: cosign v3 prefers a `--root-checksum` alongside the root URL.
 Fix:: Ignore it — it is a warning, not an error; initialization completes and the keyless beat works.
 (In a hardened setup you would pin the root checksum.)
 
-== `oc apply` of an `ImagePolicy` is forbidden
+== The unsigned pod is `Running` — nothing was refused
 
-Symptom:: You try to create an `ImagePolicy` yourself and get `Error from server (Forbidden): … imagepolicies.config.openshift.io is forbidden`.
-Cause:: `ImagePolicy` is a cluster-configuration resource (`config.openshift.io/v1`); the namespace `admin` role does not include it.
-Fix:: This is why exercise 5 (admission) is an *instructor-demo* — the instructor applies the `ImagePolicy` cluster-wide and the effect lands in your namespace.
-You verify the pieces that make it work (`chains-cosign-pub` and a signed image) with `oc`, which you _can_ do.
+Symptom:: In exercise 5, `claims-unsigned` reaches `Running` instead of `ImagePullBackOff`.
+Cause:: One of three things. The cluster's signature policy is missing or does not list your repository; the nodes are still applying it (each policy change rolls every node for about a minute); or the pod's image is outside the guarded repository — only `{user}-cicd/parasol-claims-trusted` is checked, so an unsigned image anywhere else runs.
+Fix:: Confirm your scope and the image the pod runs:
++
+[source,sh,role=execute]
+----
+oc get clusterimagepolicy ogsr-signed-parasol-claims -o jsonpath='{range .spec.scopes[*]}{@}{"\n"}{end}' | grep "/$NS/"
+oc get pod claims-unsigned -n $NS -o jsonpath='{.spec.containers[0].image}{"\n"}'
+----
++
+If the scope is missing, tell your instructor (the install applies the policy). If the image is in the guarded repository, delete the pod and start it again with `--image-pull-policy=Always`, so the node pulls — and verifies — instead of reusing a cached copy.
+
+== The signed image is refused: `Signature for identity … is not accepted`
+
+Symptom:: A pod from `parasol-claims-trusted` stays in `ImagePullBackOff`, and its message reads `SignatureValidationFailed … Source image rejected: Signature for identity "image-registry.openshift-image-registry.svc:5000/<you>-cicd/parasol-claims" is not accepted`.
+Cause:: The image *is* signed, but not by the build the policy trusts. A signature names the repository the image was built in, and the policy accepts only `ogsr-supply-chain/parasol-claims`. Your own builds — the seeded `:candidate`, or anything you rebuild — are signed as `<you>-cicd/parasol-claims`.
+Fix:: Nothing to fix if you copied your `:candidate` in on purpose (the lab's Challenge): this is the lesson. Otherwise run the trusted copy, `parasol-claims-trusted:latest`, which carries the install-time build's signature. If that one is refused too, re-materialize it: `ws prep {module-id} --yes`.
+
+== `gzip: stdin: not in gzip format` when you download `cosign`
+
+Symptom:: The `curl … | gunzip` lines in exercise 2 print `gzip: stdin: not in gzip format`, and `cosign` is empty.
+Cause:: The client server answered with an error page instead of the archive. RHTAS 1.5 no longer deploys its own client server, so the workshop install serves one on `cli-server-trusted-artifact-signer.{cluster_domain}`; if that is missing, the route answers `503`.
+Fix:: Check what the server returns, and tell your instructor if it is not `200`:
++
+[source,sh,role=execute]
+----
+curl -ksI $CLI/clients/linux/cosign-amd64.gz | head -1
+----
+
+== `rekor-cli loginfo` shows `Tree Size: 0`
+
+Symptom:: `rekor-cli loginfo` prints `Active Tree Size: 0` and `No previous log state stored, unable to prove consistency`.
+Cause:: Nobody has signed keylessly on this cluster yet; the transparency log starts empty on a fresh install.
+Fix:: Nothing is wrong. Your `cosign sign-blob` in exercise 4 adds the first entry, and the next `loginfo` shows the tree grow.
+
+== The Rekor Search UI link returns `503`
+
+Symptom:: An older link to `rekor-search-ui-trusted-artifact-signer.{cluster_domain}` returns `503`.
+Cause:: RHTAS 1.5 replaced the separate Rekor Search UI with the Trusted Artifact Signer console.
+Fix:: Use the console's search page: https://console-ui-trusted-artifact-signer.{cluster_domain}/rekor-search[Rekor Search^]. It needs no login.
 
 == A build TaskRun dies mid-`mvn`/`buildah` with `OOMKilled`
 
@@ -141,4 +181,4 @@ Fix:: Ignore it — `roxctl` authenticates to Central with the token from `rox-a
 
 '''
 
-_Last verified on OpenShift 4.21.22 / RHACS 4.11.1 / OpenShift Pipelines 1.23.0 / RHTAS 1.4.2 (Tekton Chains) — 2026-07-18._
+_Last verified on OpenShift 4.21.22 / RHACS 4.11.1 / OpenShift Pipelines 1.23.0 / RHTAS 1.4.2 (Tekton Chains) — 2026-07-18; admission, client-server and Rekor entries on OpenShift 4.22.22 / RHTAS 1.5.1 as user11 — 2026-11-12._
