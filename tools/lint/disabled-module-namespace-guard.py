@@ -141,6 +141,9 @@ CLUSTER_OWNED_NAMESPACES = {
     "ogsr-system": "bootstrap/install.sh",
     # Shipped with OpenShift; holds cluster configuration (the project-request Template lives here).
     "openshift-config": "OpenShift built-in",
+    # Created by the OpenShift Pipelines operator (its TektonConfig targetNamespace), which the
+    # always-installed core-devtools stack ships; the trusted-image ClusterImagePolicy grants land here.
+    "openshift-pipelines": "OpenShift Pipelines operator (core-devtools)",
 }
 
 
@@ -502,10 +505,11 @@ _GUARDED_TEMPLATE = (
 
 # A namespace that is INVISIBLE in the baseline render and appears only once a module is disabled —
 # the one shape the baseline classification cannot see, and the only canary that reaches check 3's
-# emission. Without it that detector would be swept as unproven.
+# emission. Without it that detector would be swept as unproven. The slug must be IN the catalogue
+# (check 3 only disables catalogued modules): it was agentic-ai until that module retired 2026-11-12.
 _LATE_TEMPLATE = (
     '{{- if not (include "workshop-config.moduleEnabled" '
-    '(dict "root" $ "slug" "agentic-ai")) }}\n'
+    '(dict "root" $ "slug" "packaging-distributing")) }}\n'
     + _NEW_TEMPLATE.format(ns="appears-only-when-disabled") + "{{- end }}\n"
 )
 
