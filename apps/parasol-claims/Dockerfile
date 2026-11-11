@@ -28,7 +28,14 @@ COPY pom.xml ./
 COPY src ./src
 
 # Produce the Quarkus fast-jar under target/quarkus-app/. Tests run in CI, not here.
-RUN mvn -B -ntp -DskipTests clean package
+# Optional Maven repository mirror (a corporate Nexus/Artifactory, or the workshop's in-cluster
+# one): --build-arg MAVEN_MIRROR_URL=<url>. Empty, the default, resolves from Maven Central.
+ARG MAVEN_MIRROR_URL=""
+RUN if [ -n "$MAVEN_MIRROR_URL" ]; then \
+      printf '<settings><mirrors><mirror><id>mirror.default</id><url>%s</url><mirrorOf>central</mirrorOf></mirror></mirrors></settings>' \
+        "$MAVEN_MIRROR_URL" > /tmp/settings.xml; \
+    else echo '<settings/>' > /tmp/settings.xml; fi && \
+    mvn -B -ntp -s /tmp/settings.xml -DskipTests clean package
 
 ## --- Runtime stage: JRE-only UBI9 image, non-root. ---
 FROM registry.access.redhat.com/ubi9/openjdk-21-runtime:1.23

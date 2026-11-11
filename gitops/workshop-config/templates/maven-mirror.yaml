@@ -1,0 +1,267 @@
+{{- /*
+  maven-mirror — an in-cluster, read-through cache of Maven Central with Red Hat GA
+  (https://maven.repository.redhat.com/ga) as the fallback, warmed at install with everything the
+  labs' Maven builds resolve. Every Maven build a lab runs points at it:
+    Tekton   maven-jdk21 / sonar-scan MAVEN_MIRROR_URL param, the Containerfile's MAVEN_MIRROR_URL
+             build arg (buildah BUILD_ARGS), the supply-chain sbom-report step — set in the
+             pipelines-fundamentals, app-security-testing and trusted-supply-chain pipelines
+    S2I      apps/parasol-claims/.s2i/environment (build-deliver, devspaces-inner-loop `java-21~` builds)
+  Without it every build downloads the whole dependency tree from the internet, and 25 attendees
+  starting the same build at once all pay that cold.
+
+  WHY NGINX AND NOT NEXUS. A Maven mirror for builds is GET-only: artifacts are immutable files at
+  fixed paths, so a caching reverse proxy is the whole job. Central answers first; on 404 the request
+  falls through to Red Hat GA (the same order a Nexus group repository would try). ~30Mi of memory
+  instead of a 2-3Gi JVM, no admin password, no REST bootstrap to create repositories, and a UBI image
+  from the unauthenticated Red Hat registry. What it does not do: merge maven-metadata.xml across the
+  two upstreams (Central's wins when both have the group) — only version ranges and LATEST/RELEASE
+  read that, and no lab build uses them.
+  ponytail: upstream hosts resolve once at nginx start and there is no egress-proxy support; on a
+  cluster with a mandatory HTTP proxy, swap this for a repository manager that speaks one.
+
+  Installed only when an enabled module runs one of those builds (workshop-config.moduleEnabled). Own
+  namespace, owner-labelled, removed by ogsr-uninstall.sh with the rest of the workshop layer.
+*/ -}}
+{{- define "workshop-config.mavenMirrorNginxConf" -}}
+worker_processes 2;
+pid /tmp/nginx.pid;
+error_log /dev/stderr error;
+events { worker_connections 1024; }
+http {
+  access_log off;
+  client_body_temp_path /tmp/client_body;
+  fastcgi_temp_path /tmp/fastcgi;
+  uwsgi_temp_path /tmp/uwsgi;
+  scgi_temp_path /tmp/scgi;
+  proxy_temp_path /var/cache/maven/tmp;
+  proxy_cache_path /var/cache/maven/data levels=1:2 keys_zone=maven:32m max_size=8g inactive=60d use_temp_path=off;
+  proxy_cache maven;
+  # Artifacts never change; metadata does. 24h then a cheap conditional GET (304) keeps both right.
+  proxy_cache_valid 200 24h;
+  proxy_cache_revalidate on;
+  # Central's CDN stamps every response with a bot-management cookie, and nginx never caches a
+  # response that sets one — measured: 0 hits until these two lines. Artifacts carry no session.
+  proxy_ignore_headers Set-Cookie Cache-Control Expires Vary;
+  proxy_hide_header Set-Cookie;
+  # 25 attendees asking for the same jar at once = one upstream download.
+  proxy_cache_lock on;
+  proxy_cache_lock_timeout 120s;
+  proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+  # A supply-chain workshop does not take its dependencies over unverified TLS.
+  proxy_ssl_server_name on;
+  proxy_ssl_verify on;
+  proxy_ssl_verify_depth 4;
+  proxy_ssl_trusted_certificate /etc/pki/tls/certs/ca-bundle.crt;
+  proxy_intercept_errors on;
+  add_header X-Cache-Status $upstream_cache_status always;
+  server {
+    listen 8080;
+    location = /healthz { return 200 "ok\n"; }
+    location / {
+      proxy_pass https://repo.maven.apache.org/maven2/;
+      error_page 404 = @redhat-ga;
+    }
+    location @redhat-ga {
+      rewrite ^ /ga$uri break;
+      proxy_pass https://maven.repository.redhat.com;
+    }
+  }
+}
+{{- end }}
+{{- $mm := .Values.mavenMirror }}
+{{- $on := false }}
+{{- range $slug := list "build-deliver" "devspaces-inner-loop" "pipelines-fundamentals" "app-security-testing" "trusted-supply-chain" }}
+{{- if include "workshop-config.moduleEnabled" (dict "root" $ "slug" $slug) }}{{ $on = true }}{{ end }}
+{{- end }}
+{{- if $on }}
+# The mirror's own namespace, so uninstall and quota never touch anything else.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $mm.namespace }}
+  labels:
+    workshop.redhat.com/shared: "true"
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+---
+# nginx config: cache Central, fall back to Red Hat GA on 404, verify both upstreams' TLS.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: maven-mirror
+  namespace: {{ $mm.namespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+data:
+  nginx.conf: |
+    {{- include "workshop-config.mavenMirrorNginxConf" . | nindent 4 }}
+---
+# The cache. Same sync wave as its Deployment: the default StorageClass binds on first consumer.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: maven-mirror-cache
+  namespace: {{ $mm.namespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ $mm.storage }}
+---
+# The mirror itself: one nginx, Recreate because the cache volume is ReadWriteOnce.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: maven-mirror
+  namespace: {{ $mm.namespace }}
+  labels:
+    app.kubernetes.io/name: maven-mirror
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: maven-mirror
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: maven-mirror
+      annotations:
+        # Roll the pod when the nginx config changes (nginx reads it only at start).
+        checksum/config: {{ include "workshop-config.mavenMirrorNginxConf" . | sha256sum | trunc 16 }}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: nginx
+          image: {{ $mm.image | quote }}
+          command: ["nginx", "-c", "/etc/maven-mirror/nginx.conf", "-g", "daemon off;"]
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: config
+              mountPath: /etc/maven-mirror
+            - name: cache
+              mountPath: /var/cache/maven
+      volumes:
+        - name: config
+          configMap:
+            name: maven-mirror
+        - name: cache
+          persistentVolumeClaim:
+            claimName: maven-mirror-cache
+---
+# The URL every lab build uses: http://maven-mirror.<ns>.svc:8080
+apiVersion: v1
+kind: Service
+metadata:
+  name: maven-mirror
+  namespace: {{ $mm.namespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: maven-mirror
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+# Install-time warm-up: resolve, through the mirror, everything the labs' Maven builds need for
+# parasol-claims (package, test, the Quarkus dev-mode set, the SBOM plugin), so the FIRST attendee
+# build is already a cache hit. Runs once; Job templates are immutable, so after editing this spec
+# `oc delete job maven-mirror-warm -n {{ $mm.namespace }}` and Argo recreates (and reruns) it.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: maven-mirror-warm
+  namespace: {{ $mm.namespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      containers:
+        - name: warm
+          # The maven-jdk21 library Task's image (same digest), so the warm-up resolves with the
+          # Maven the pipelines run.
+          image: registry.access.redhat.com/ubi9/openjdk-21@sha256:24dad82bd5d25d9b0c85f0e9c976e47ccce787cc73792355462bf54fe03d9a77
+          env:
+            - name: HOME
+              value: /tmp
+            - name: SRC
+              value: http://gitea.{{ .Values.giteaNamespace }}.svc:3000/{{ .Values.mirrorOrg }}/{{ .Values.mirrorRepo }}/archive/{{ .Values.parasolImages.build.revision }}.zip
+            - name: MIRROR
+              value: http://maven-mirror.{{ $mm.namespace }}.svc:8080
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              cd /tmp
+              # The image has no gzip/unzip; the JDK's own `jar` reads a zip.
+              curl -sfL -o src.zip "$SRC" && jar xf src.zip
+              cd ./*/apps/parasol-claims
+              printf '<settings><mirrors><mirror><id>mirror.default</id><url>%s</url><mirrorOf>*</mirrorOf></mirror></mirrors></settings>' "$MIRROR" > /tmp/settings.xml
+              mvn -B -ntp -s /tmp/settings.xml test package quarkus:go-offline \
+                org.cyclonedx:cyclonedx-maven-plugin:2.9.2:makeBom
+              # The Maven distribution ./mvnw downloads, so a wrapper pointed here starts warm too.
+              curl -sf -o /dev/null "$MIRROR/$(sed -n 's#^distributionUrl=https://repo.maven.apache.org/maven2/##p' .mvn/wrapper/maven-wrapper.properties)"
+              echo "✅ maven mirror warm"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+{{- end }}
