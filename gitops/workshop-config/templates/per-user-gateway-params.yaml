@@ -1,0 +1,47 @@
+{{- /*
+  per-user-gateway-params — a right-sized proxy for the Gateways attendees create.
+
+  A Gateway on the openshift-default class gets the ingress operator's defaults: an HPA with
+  minReplicas 2 and an Envoy proxy limited to 2 CPU / 1Gi each, i.e. 4 CPU of the namespace's 8
+  limits.cpu for one Gateway (measured on cluster-5vqxc 2026-11-12). That class default is a ConfigMap
+  the ingress operator owns in openshift-ingress, so the workshop does not edit it. Instead each
+  attendee namespace that may hold a Gateway (per-user-rbac.yaml grants it in dev/stage/prod/cicd)
+  gets this ConfigMap, and a Gateway opts in with
+
+      spec:
+        infrastructure:
+          parametersRef: {group: "", kind: ConfigMap, name: ogsr-gateway-proxy}
+
+  which Istio merges over the class defaults: 1 replica, 50m/128Mi requests, 500m/512Mi limits
+  (measured: Programmed=True with these values). tools/ws purge keeps it across ws reset.
+*/ -}}
+{{- range $i := until (int .Values.userCount) }}
+{{- $user := printf "%s%d" $.Values.userPrefix (add1 $i) }}
+{{- range $suffix := list "dev" "stage" "prod" "cicd" }}
+---
+# Small, single-replica Envoy for this attendee's own Gateways (opt-in via infrastructure.parametersRef).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ogsr-gateway-proxy
+  namespace: {{ $user }}-{{ $suffix }}
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
+data:
+  horizontalPodAutoscaler: |
+    spec:
+      minReplicas: 1
+      maxReplicas: 1
+  deployment: |
+    spec:
+      template:
+        spec:
+          containers:
+            - name: istio-proxy
+              resources:
+                requests: {cpu: 50m, memory: 128Mi}
+                limits: {cpu: 500m, memory: 512Mi}
+{{- end }}
+{{- end }}
