@@ -184,7 +184,6 @@ Both floors exist for one module, `deployment-targets-scheduling`:
    | | URL |
    |---|---|
    | Showroom (attendees) | `https://ogsr-showroom.<apps>` |
-   | SA Demos | `https://ogsr-demos.<apps>` |
    | Etherpad (shared notes) | `https://ogsr-pad.<apps>/p/workshop` |
 
    Then spot-check one module:

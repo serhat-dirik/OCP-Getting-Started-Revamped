@@ -27,8 +27,7 @@ has its own timing table, pre-flight checklist and watchouts.
 
 1. **Install and verify:** [INSTALL.md › Install](INSTALL.md#2-install), steps 1–7.
 2. **Run the pre-flight checklist** on the instructor page of every module in your agenda.
-3. **Running Application Modernization's demo, or a new AI model?** See
-   [Appendix: module preparation](#appendix-module-preparation).
+3. **Changed the AI model?** See [Appendix: module preparation](#appendix-module-preparation).
 
 ---
 
@@ -44,7 +43,6 @@ has its own timing table, pre-flight checklist and watchouts.
 3. **Share the Etherpad link:** `https://ogsr-pad.<apps>/p/workshop`. It holds the Showroom link and
    a numbered list where each attendee claims a user, so no two people take the same one.
    - Showroom: `https://ogsr-showroom.<apps>`. Log in as `userN` with the workshop password.
-   - Your demo cockpit, if you use it: `https://ogsr-demos.<apps>`.
 4. **Last check before you start:** `tools/ws/adm status` must end with
    `shared cockpit showroom-shared ✅ 1/1` and `platform all-Synced ✅`.
 
@@ -135,6 +133,5 @@ Only these modules need anything from you before the session.
 
 | Module | When | Do this |
 |---|---|---|
-| Application Modernization | You run its demo version | The evening before, stage three MTA applications: `parasol-legacy-claims-demo`, `parasol-legacy-claims-fixed-demo`, `parasol-claims-demo` (recipe: the Prep block on the module's Demo page). Allow 10–15 min of Hub time. Keep the `-demo` suffix: the Hub is shared with attendees. |
 | AI-Assisted Development | You changed the AI model | Run exercise 3 once on the new model. Models differ in whether they carry out writes. |
 | Ways to Build, Pipelines Fundamentals, Application Security Testing, Trusted Software Supply Chain, Dev Spaces | Until the install pre-warms them (in progress) | Run each once as a sample user the day before (`tools/ws/adm solve <slug> --user <u>`). The first build or workspace start is several minutes slower. |

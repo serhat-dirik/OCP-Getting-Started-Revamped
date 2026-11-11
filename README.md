@@ -52,16 +52,11 @@ The 28 modules are grouped into four blocks:
 | 2-day core | everything except M15, M17, M18, M19, M21, M22, M23, M24, M26, M27 | ~12 h |
 | **3-day full workshop** | **all 28** — Day 1 M01–M08 (block A) · Day 2 M09–M20 (B+C) · Day 3 M21–M28 (D) | ~18 h |
 
-
-**SA demo guides ship as a second showroom.**
-The same content base doubles as a **presenter-led demo kit** for Red Hat Solution Architects: every module renders as an attendee workshop guide, an SA demo guide (talk track + click path), and an instructor runbook — from one AsciiDoc source.
-Alongside the per-attendee workshop cockpits, the install deploys an **SA-Demos showroom** — a presenter cockpit that renders every module's scripted demo (Say / Show / Do talk track with timings) plus one-click launchers into the Console, Gitea, Argo CD, Dev Spaces, Developer Hub, and SonarQube. A Solution Architect can run a customer demo end-to-end from that one browser tab, reusing all the workshop's preparation without the lab framing.
-
 ## Project Content
 
 | Directory | What it is |
 |---|---|
-| `content/` | Antora/Showroom content — one source, three renderings (`site-workshop.yml`, `site-demo.yml`, `site-instructor.yml`) |
+| `content/` | Antora/Showroom content — one source for the workshop guide (`site-workshop.yml`) and the instructor guide (`site-instructor.yml`) |
 | `apps/` | Parasol Insurance sample services (Quarkus-primary, deliberate polyglot moments) |
 | `platform-portfolio/` | **Standalone GitOps installer** — operators/tools as composable Argo CD stacks, replicable on any OpenShift 4.20+ cluster. Workshop-agnostic; also usable alone for SA PoC/demo clusters. See its [README](platform-portfolio/README.md) |
 | `gitops/` | Workshop layer on top of the portfolio: users/RBAC/quotas, Gitea seeding, per-module **entry states**, promotion structures |
@@ -69,7 +64,7 @@ Alongside the per-attendee workshop cockpits, the install deploys an **SA-Demos 
 | `tools/` | `ws` attendee CLI (list/prep/verify/reset) + `adm` operator CLI (start/solve/status/...), plus per-module verify scripts |
 | `bootstrap/` | Cluster installer: portfolio stacks + workshop layer in one command |
 | `helm/bootstrap/` | The same install as a Helm chart — how the Red Hat Demo Platform deploys the workshop from its catalog, instead of you running `bootstrap/install.sh` |
-| `showroom/` | Site configs that build the attendee cockpits and the SA demo cockpit |
+| `showroom/` | Site config that builds the attendee cockpit |
 | `utilities/` | `lab-serve` — preview the content locally with live reload, no cluster needed |
 
 ## Quick Installation on OpenShift
@@ -164,8 +159,6 @@ people claim so two attendees never take the same slot:
 https://ogsr-pad.<cluster-domain>/p/workshop
 ```
 
-The SA demo cockpit is `https://ogsr-demos.<cluster-domain>`, behind the same
-login.
 
 > Earlier releases gave each attendee a personal `showroom-<user>` URL with no authentication in front
 > of it. Those are retired: enabling the shared cockpit (`showroom.shared.enabled`, the default) stops
@@ -266,7 +259,7 @@ The checker exits **0** with those still registered, saying `no UNEXPECTED lefto
 To read or edit the content without a cluster, build any of the three renderings locally:
 
 ```bash
-cd content && npx antora site-workshop.yml    # also: site-demo.yml, site-instructor.yml
+cd content && npx antora site-workshop.yml    # also: site-instructor.yml
 # or, with live reload:
 ./utilities/lab-serve
 ```
