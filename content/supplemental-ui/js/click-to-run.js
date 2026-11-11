@@ -1,18 +1,19 @@
 /*
- * click-to-run.js — click any `role=execute` code block to send its command straight into the
- * cockpit terminal, so attendees never copy-paste. Matches the RHDP guided showroom (owner,
- * 2026-11-12): no button sitting on top of the code; the block itself is the target, and the theme's
- * hover toolbar reads `kind | copy | run`. Selecting text inside the block still copies (it does not
- * run), and Tab + Enter/Space runs it from the keyboard. Adapted from the old
- * getting-started / agentops-showroom supplemental-ui buttons.js (the mechanism the project owner
- * pointed at, 2026-07-11); the nookbag + rhdp theme we run ship copy only, never a run button.
+ * click-to-run.js — routes the theme's "Run in terminal" button to the cockpit's ttyd terminals.
  *
- * How it works: this runs INSIDE the content iframe (nookbag renders content in an iframe). It makes
- * each `.listingblock.execute` clickable; on click it finds the terminal iframe in the nookbag
- * parent (same-origin — nginx proxies content + terminal under one host), postMessages the command
- * to it, and injects a one-time listener into the terminal iframe that writes the command to ttyd's
- * xterm (window.term / window.client.sendData). Default target is Terminal 1 (/tty-top); a block
- * tagged `role="execute send-to-tty-bottom"` targets Terminal 2 instead.
+ * The RHDP showroom theme (v2.0.3+, the same bundle the owner's other workshops use) builds the
+ * hover toolbar on every code block itself — `kind | copy | run` — with its own icons, "Executed!"
+ * toast and styling. Its run button looks for the terminal in RHDP's guided-showroom layout
+ * (`.tabcontent.active .main-content`), which our nookbag cockpit does not have, so on its own it
+ * would only ever say "Not executed!". This file takes the click first (capture phase, so the
+ * theme's handler never runs) and sends the command to our terminal instead. Styling stays the
+ * theme's: success and failure reuse its `clicked` / `error` classes and its toast element.
+ *
+ * Routing: this runs INSIDE the content iframe. It finds the terminal iframe in the nookbag parent
+ * (same-origin — nginx proxies content + terminal under one host), postMessages the command to it,
+ * and injects a one-time listener into that frame that writes the command to ttyd's xterm. Default
+ * target is Terminal 1 (/tty-top); a block tagged `role="execute send-to-tty-bottom"` goes to
+ * Terminal 2. With no terminal at all (the standalone Pages site) the command is copied instead.
  */
 (function () {
   'use strict';
@@ -26,53 +27,7 @@
 
   function commandText(listing) {
     var code = listing.querySelector('pre code, pre');
-    return (code ? code.textContent : listing.textContent).replace(/ /g, ' ').trim();
-  }
-
-  var RUN_ICON = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11a.5.5 0 00.77.42l8.5-5.5a.5.5 0 000-.84l-8.5-5.5A.5.5 0 004 2.5z"/></svg>';
-
-  // The theme builds its hover toolbar (.source-toolbox: language | copy) in its own script, possibly
-  // after ours, so this is retried on every scan until the toolbar exists.
-  function addToolboxRun(listing, target, path) {
-    if (listing.dataset.ctrToolbox) return;
-    var toolbox = listing.querySelector('.source-toolbox');
-    if (!toolbox) return;
-    listing.dataset.ctrToolbox = 'true';
-    var b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'ctr-run-button';
-    b.title = 'Run in terminal';
-    b.setAttribute('aria-label', 'Run in terminal');
-    b.innerHTML = RUN_ICON;
-    b.addEventListener('click', function () { sendToTerminal(commandText(listing), target, path); });
-    toolbox.appendChild(b);
-  }
-
-  function makeClickable() {
-    document.querySelectorAll('.listingblock.execute').forEach(function (listing) {
-      var pre = listing.querySelector('pre') || listing;
-      addToolboxRun(listing, pre, targetPathFor(listing));
-      if (listing.dataset.ctrReady) return;
-      listing.dataset.ctrReady = 'true';
-      var path = targetPathFor(listing);
-      var target = listing.querySelector('pre') || listing;
-      target.classList.add('ctr-run');
-      target.setAttribute('tabindex', '0');
-      target.setAttribute('role', 'button');
-      target.setAttribute('title', 'Click to run in the terminal');
-      target.setAttribute('aria-label', 'Run this command in the terminal');
-      target.addEventListener('click', function (ev) {
-        if (ev.target.closest('button, a')) return;            // the theme's copy icon, links
-        var sel = window.getSelection && window.getSelection();
-        if (sel && String(sel).length > 0) return;              // selecting text to copy, not running
-        sendToTerminal(commandText(listing), target, path);
-      });
-      target.addEventListener('keydown', function (ev) {
-        if (ev.key !== 'Enter' && ev.key !== ' ') return;
-        ev.preventDefault();
-        sendToTerminal(commandText(listing), target, path);
-      });
-    });
+    return (code ? code.textContent : listing.textContent).replace(/\u00a0/g, ' ').replace(/ +$/gm, '').trim();
   }
 
   function findTerminalFrame(targetPath) {
@@ -116,32 +71,39 @@
     } catch (e) { /* terminal not ready yet — will retry on next click */ }
   }
 
-  function sendToTerminal(command, el, targetPath) {
-    var frame = findTerminalFrame(targetPath);
+  // The theme's own toast: `clicked` shows it, `error` turns it into the failure style.
+  function toast(button, text, isError) {
+    var t = button.querySelector('.paste-toast');
+    if (t) t.textContent = text;
+    button.classList.add('clicked');
+    if (isError) button.classList.add('error');
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        button.classList.remove('clicked');
+        setTimeout(function () { button.classList.remove('error'); if (t) t.textContent = 'Executed!'; }, 1100);
+      });
+    });
+  }
+
+  document.addEventListener('click', function (ev) {
+    var button = ev.target.closest && ev.target.closest('.paste-button');
+    if (!button) return;
+    var listing = button.closest('.listingblock');
+    if (!listing) return;
+    ev.stopPropagation();          // capture phase: the theme's own handler never runs
+    ev.preventDefault();
+    var command = commandText(listing);
+    var frame = findTerminalFrame(targetPathFor(listing));
     if (!frame || !frame.contentWindow) {
-      // Terminal tab not open yet: fall back to clipboard so the attendee is never stuck.
-      if (navigator.clipboard) navigator.clipboard.writeText(command);
-      flash(el, 'Copied: no terminal here', 2600);
+      // No terminal here (standalone site): copy instead. A browser can refuse the clipboard (page
+      // not focused, no permission); say so with the theme's failure toast rather than throw.
+      if (!navigator.clipboard) { toast(button, 'Not executed!', true); return; }
+      navigator.clipboard.writeText(command).then(function () { toast(button, 'Copied!', false); },
+                                                  function () { toast(button, 'Not executed!', true); });
       return;
     }
     ensureListener(frame);
     frame.contentWindow.postMessage({ type: 'execute', data: command + '\r' }, '*');
-    flash(el, '✓ Sent to terminal', 1600);
-  }
-
-  function flash(el, text, ms) {             // a label on the block itself (CSS ::after), then gone
-    el.setAttribute('data-ctr-msg', text);
-    el.classList.add('ctr-run--sent');
-    clearTimeout(el._ctrTimer);
-    el._ctrTimer = setTimeout(function () { el.classList.remove('ctr-run--sent'); }, ms);
-  }
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', makeClickable);
-  } else {
-    makeClickable();
-  }
-  // Antora tabs / late DOM: re-scan a couple of times so blocks inside tab panels are clickable too.
-  setTimeout(makeClickable, 400);
-  setTimeout(makeClickable, 1200);
+    toast(button, 'Executed!', false);
+  }, true);
 })();
