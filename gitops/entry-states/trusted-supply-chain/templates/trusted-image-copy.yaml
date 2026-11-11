@@ -1,0 +1,72 @@
+# ENTRY STATE: the cohort's pre-scanned, Chains-signed parasol-claims:latest, COPIED into {user}-cicd.
+#
+# The clean `main` image is built ONCE at install (gitops/workshop-config/templates/trusted-image.yaml,
+# namespace {{ .Values.trustedImageNamespace }}): build → SBOM → Chains signature + SLSA attestation →
+# RHACS gate. This hook copies the image and its two Chains artifacts (sha256-<digest>.sig and .att)
+# into this attendee's registry with `oc image mirror` — same digest, so `cosign verify` and
+# `cosign verify-attestation` against {user}-cicd/parasol-claims pass exactly as they did when every
+# prep built its own (measured on cluster-5vqxc 2026-11-12: copy ~1s; a per-user build blocked prep
+# ~5 min there, ~8 min on smaller clusters). The attendee's own seeded build still runs in the lab, to
+# the throwaway :candidate tag.
+#
+# PostSync so the namespace and pipeline exist first. Right after install the shared build may still
+# be running, so the hook waits for it (ws-meta waitSeconds covers the window). Idempotent: re-running
+# re-copies the same digest.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trusted-supply-chain-copy-{{ .Values.user }}
+  namespace: {{ .Values.user }}-cicd
+  labels:
+    workshop.redhat.com/module: trusted-supply-chain
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1500
+  template:
+    metadata:
+      labels:
+        app: trusted-supply-chain-copy-{{ .Values.user }}
+    spec:
+      # The operator-provisioned pipeline SA: pushes to this namespace's registry; the workshop layer
+      # grants it image-puller on the shared namespace.
+      serviceAccountName: pipeline
+      restartPolicy: Never
+      containers:
+        - name: copy
+          # Digest-pinned; el8 `ose-cli:latest` was frozen on v4.15.0 with unapplied Critical errata.
+          image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+          env:
+            - name: HOME
+              value: /tmp
+            - name: SRC
+              value: image-registry.openshift-image-registry.svc:5000/{{ .Values.trustedImageNamespace }}/parasol-claims
+            - name: DST
+              value: image-registry.openshift-image-registry.svc:5000/{{ .Values.user }}-cicd/parasol-claims
+          resources:
+            requests: {cpu: 10m, memory: 256Mi}
+            limits: {memory: 512Mi}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              oc registry login --registry=image-registry.openshift-image-registry.svc:5000 --skip-check --to=/tmp/auth.json >/dev/null
+              m() { oc image mirror -a /tmp/auth.json --insecure=true "$@" >/dev/null 2>&1; }
+              echo "▶ copying the cohort's scanned, Chains-signed parasol-claims:latest into ${DST%/*}…"
+              for _ in $(seq 1 140); do
+                if m "${SRC}:latest=${DST}:latest"; then
+                  T="$(oc get istag parasol-claims:latest -o jsonpath='{.image.metadata.name}' | tr ':' '-')"
+                  if m "${SRC}:${T}.sig=${DST}:${T}.sig" "${SRC}:${T}.att=${DST}:${T}.att"; then
+                    echo "  ✓ parasol-claims:latest + ${T}.sig + ${T}.att (same digest as the install-time build)"
+                    exit 0
+                  fi
+                fi
+                echo "  … the install-time build is not signed yet — waiting"
+                sleep 10
+              done
+              echo "  ❌ no signed image in ${SRC%/*} after ~23 min — inspect: oc get pipelinerun -n {{ .Values.trustedImageNamespace }}"
+              exit 1

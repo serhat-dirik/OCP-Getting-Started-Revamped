@@ -11,8 +11,9 @@ include::partial$version-attributes.adoc[]
 //
 // PERFORM-FIRST provenance (owner's 2026-07-18 "pre-scanned image" rebalance): every command, output and
 // timing below was performed as user3 on OCP 4.21.22 / OpenShift Pipelines 1.23.0 /
-// RHACS 4.11.1 / RHTAS 1.4.2 on 2026-07-18. The entry state now PRE-BUILDS the clean,
-// scanned-green, Chains-signed parasol-claims:latest (warm-clean-image.yaml), so the trust story runs
+// RHACS 4.11.1 / RHTAS 1.4.2 on 2026-07-18. The clean, scanned-green, Chains-signed
+// parasol-claims:latest is built ONCE at install in ogsr-supply-chain (workshop-config trusted-image.yaml)
+// and copied with its .sig/.att into {user}-cicd at prep (since 2026-11-12), so the trust story runs
 // against a ready image and the scan step READS a verdict instead of waiting on a second build. Grounded:
 // seeded build Failed at acs-scan on Log4Shell (CVSS 10, log4j-core 2.14.1) in 7m11s to a :candidate tag;
 // CycloneDX SBOM = 239 components; cosign v3.0.4 + rekor-cli fetched from the RHTAS cli-server; cosign
@@ -42,9 +43,10 @@ Most of your time is spent on the *trust* controls — the *signature* and *SLSA
 Scanning is *one compact beat*: your environment already holds a clean, *pre-scanned* image, so you read a verdict rather than wait on a build.
 
 [NOTE]
-.Your environment came pre-warmed with a signed image
+.Your environment came with a signed image
 ====
-When your project was prepared, the pipeline already ran once on the *clean* `main` branch and left a *scanned-green, signed* `parasol-claims:latest` in your registry.
+The platform ran this same pipeline once, when the cluster was installed, on the *clean* `main` branch, in the shared project `ogsr-supply-chain`.
+Your project was prepared with a copy of the *scanned-green, signed* `parasol-claims:latest` it produced, its signature and attestation included.
 That is the image the trust exercises below verify.
 You will *also* build the *seeded* branch yourself to watch the scan gate catch a real CVE — that build goes to a separate `:candidate` tag, so it never disturbs the trusted `:latest`.
 ====
@@ -89,7 +91,7 @@ This demo starts from the finished lab state. Stage it before the session:
 adm solve trusted-supply-chain
 ----
 
-It runs the supply-chain pipeline on the clean branch and leaves a scanned, signed `parasol-claims:latest` in the registry — about *8 minutes*, and it does not return until that build is done.
+It copies the scanned, signed `parasol-claims:latest` that the install built into the registry, with its signature and attestation, and returns in about a minute.
 
 Once it returns, start step 2's build once yourself and let it finish while you set the rest up. That build goes to the throwaway `:candidate` tag and never touches the trusted `:latest`, so a second copy costs nothing but cluster time — and it means a finished verdict exists whatever the live run is doing. Step 2 starts a build that takes *6–12 minutes*, longer than the step itself; steps 3 and 4 need no build, so the demo carries on and comes back when the status line flips.
 
@@ -109,7 +111,7 @@ Have the fork open at {gitea_url}/{user}/parasol-claims[{user}/parasol-claims^].
 
 NOTE: On a freshly installed cluster the RHACS vulnerability store needs about an hour to populate before the Log4Shell policy fires; until then the seeded build passes the gate. Confirm that a seeded run prints `Block Log4Shell` before the session.
 
-CAUTION: `ws prep trusted-supply-chain` returns `{user}-cicd` to the entry state — a fresh signed `parasol-claims:latest`, the pipeline, the copied trust secrets, and the fork with its vulnerable `seed-vulnerable` branch — so the demo can be run again from the top.
+CAUTION: `ws prep trusted-supply-chain` returns `{user}-cicd` to the entry state — the signed `parasol-claims:latest` copied back in, the pipeline, the copied trust secrets, and the fork with its vulnerable `seed-vulnerable` branch — so the demo can be run again from the top.
 ====
 
 === Brief
@@ -495,7 +497,7 @@ EOF
 ====
 
 While that builds (*roughly 6–12 minutes*, longer on a cold node), read the verdict on the image you *already* have.
-Your registry holds the clean `parasol-claims:latest` the pipeline built on the `main` branch when your project was prepared — and the pipeline recorded its scan verdict as a *result*:
+Your registry holds the clean `parasol-claims:latest` this pipeline built on the `main` branch when the cluster was installed — and that run, in the shared project `ogsr-supply-chain`, recorded its scan verdict as a *result*:
 
 // Grounding note 2026-07-30: this marker's premise (a "Results" section on the PipelineRun
 // Details page) is already superseded by the note four lines below, grounded live 2026-07-26
@@ -509,25 +511,25 @@ Your registry holds the clean `parasol-claims:latest` the pipeline built on the 
 Console::
 +
 --
-Open *Pipelines* → *PipelineRuns* (project `{user}-cicd`) and click the `warm-clean-…` run (the pre-warm build).
+Open *Pipelines* → *PipelineRuns*, switch the project to `ogsr-supply-chain` (you can read it, not change it), and click the `trusted-build-…` run.
 // Grounded live on OCP 4.22.5 (2026-07-26, pipelines-fundamentals Ex 1): results are NOT on the
 // Details page — they live on the run's own Output tab.
 Open the run's *Output* tab: under *PipelineRun results*, `scan-passed` = `true` — the gate's verdict on the clean image, published as run data.
-Under *Builds* → *ImageStreams* → `parasol-claims`, the `latest` tag is that clean image.
+Back in project `{user}-cicd`, *Builds* → *ImageStreams* → `parasol-claims` shows that image as your `latest` tag.
 --
 CLI::
 +
 --
 [source,sh,role=execute]
 ----
-oc get pipelinerun -n $NS -l tekton.dev/pipeline=parasol-claims-supply-chain \
+oc get pipelinerun -n ogsr-supply-chain -l tekton.dev/pipeline=parasol-claims-supply-chain \
   -o jsonpath='{range .items[*]}{.metadata.name}{"  scan-passed="}{.status.results[?(@.name=="scan-passed")].value}{"\n"}{end}'
 ----
 
-.Expected output (the pre-warmed clean run carries the verdict; your in-flight seeded run is still blank)
+.Expected output (the install-time clean run carries the verdict)
 [source,texinfo]
 ----
-warm-clean-xxxxx  scan-passed=true
+trusted-build-xxxxx  scan-passed=true
 ----
 --
 ====
@@ -610,7 +612,7 @@ image::trusted-supply-chain/trusted-supply-chain-05-pipelineruns-list.png["OpenS
 
 [.checkpoint]
 ****
-✔ *Verify:* the pre-warmed clean run shows `scan-passed=true` (the clean `:latest` cleared the gate); your `jq` query found `log4j-core@2.14.1` in the SBOM; and your seeded `:candidate` build is `Failed` with the `acs-scan` step logging `Block Log4Shell (CVE-2021-44228) ... CRITICAL` — the gate refused a *built* image, it did not stop the build.
+✔ *Verify:* the install-time clean run in `ogsr-supply-chain` shows `scan-passed=true` (the clean `:latest` cleared the gate); your `jq` query found `log4j-core@2.14.1` in the SBOM; and your seeded `:candidate` build is `Failed` with the `acs-scan` step logging `Block Log4Shell (CVE-2021-44228) ... CRITICAL` — the gate refused a *built* image, it did not stop the build.
 ****
 
 [TIP]
@@ -634,7 +636,7 @@ The clean image you verify in the next exercises came from exactly this — the 
 
 The scan proved the clean image is _clean_.
 This is the heart of the trust module: *signing* proves the image is _yours_ — byte-for-byte the one your pipeline produced.
-*Tekton Chains* — a component of OpenShift Pipelines — watched the build TaskRun and *signed the image it produced*, with no per-build wiring, when your environment was warmed.
+*Tekton Chains* — a component of OpenShift Pipelines — watched the build TaskRun and *signed the image it produced*, with no per-build wiring, when the platform built it.
 
 `cosign` is the tool that _checks_ what Chains _produced_.
 The Showroom terminal does not ship it — but *Red Hat Trusted Artifact Signer* runs a *client-download server*, so fetch `cosign` (and `rekor-cli`, for later) straight from the cluster:
@@ -1027,6 +1029,6 @@ Take the UUID from exercise 4 and run `rekor-cli get --rekor_server $REKOR --uui
 * *Prove the base image is not the gate.*
 The seeded branch also pins an older UBI OpenJDK base tag. Bump it in the `Containerfile`, rebuild the `:candidate`, and confirm the gate *still* fails on Log4Shell — the dependency, not the base image, is what the "Supply Chain Security" gate keys on.
 
-When you are done, run `ws verify {module-id}` — or `ws prep {module-id} --yes` to re-warm `{user}-cicd` back to the entry state (a fresh signed `parasol-claims:latest`, the pipeline and trust secrets, your fork restored to its vulnerable `seed-vulnerable` state) and start fresh.
+When you are done, run `ws verify {module-id}` — or `ws prep {module-id} --yes` to return `{user}-cicd` to the entry state (the signed `parasol-claims:latest` copied back in, the pipeline and trust secrets, your fork restored to its vulnerable `seed-vulnerable` state) and start fresh.
 
 endif::demo[]

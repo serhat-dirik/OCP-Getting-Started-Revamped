@@ -9,7 +9,7 @@ include::partial$version-attributes.adoc[]
 // and the trust story (cosign verify → attestation → keyless/Rekor → admission) is the spine.
 
 This module has three facts to plan around.
-First, *the environment is pre-warmed*: at every prep, `warm-clean-image.yaml` builds the clean `main` branch, so a *scanned-green, Chains-signed* `parasol-claims:latest` is ready before the attendee starts — that adds *~8 minutes to prep* (budget it into provisioning), and the whole trust spine runs against it with no waiting.
+First, *the signed image is built once, at install*: the workshop layer runs this module's pipeline on the clean `main` branch in `ogsr-supply-chain`, and every prep copies the resulting *scanned-green, Chains-signed* `parasol-claims:latest` (with its `.sig` and `.att`) into the attendee's `{user}-cicd` in about a second. Measured on cluster-5vqxc on 2026-11-12, `adm start trusted-supply-chain` went from *5m12s* (a per-attendee build) to about a minute, and the whole trust spine runs against the copy with no waiting.
 Second, *there is exactly one attendee build* — the seeded branch, to a throwaway `:candidate` tag — and it is the single memorable beat: the build *succeeds*, then the scan turns the run *red* on a CVSS-10 vulnerability.
 Third, *the scan gate depends on the RHACS vulnerability store being warm*: on a freshly installed cluster the scanner needs *~1 hour* to populate before the Log4Shell policy will fire — pre-warm before any session (see pre-flight).
 
@@ -38,7 +38,7 @@ Every exercise was performed as `user3` on the build cluster (OCP 4.21.22, RHACS
 
 * *Warm clean build (prep)* — the `main` branch built, scanned green (`scan-passed=true`), and was Chains-signed in *~8 min* (cold node longer); this is the `parasol-claims:latest` the trust spine reads.
 * *Seeded run (exercise 1)* — `Failed` at `acs-scan` in *7m11s*; the build *Succeeded* and was even signed before the scan refused the `:candidate` image.
-* *These are warm-cache numbers.* A cold node downloads the Maven dependency tree, adding several minutes to the first build; the warm prep run pre-heats it.
+* *Maven resolves from the in-cluster mirror*, which the installer warms, so the first seeded build no longer pays a cold dependency download.
 * *Chains signing latency* — the `chains.tekton.dev/signed=true` annotation appears a *few seconds after* the build TaskRun completes, not instantly.
 ====
 
@@ -46,11 +46,12 @@ Every exercise was performed as `user3` on the build cluster (OCP 4.21.22, RHACS
 
 Run these *before the session* (as cluster admin unless noted).
 
-. *A sample user's entry state materializes and verifies (including the warm signed image).*
+. *A sample user's entry state materializes and verifies (including the copied signed image).*
 +
 [source,sh,role=execute]
 ----
-adm start trusted-supply-chain --user user1     # blocks ~8 min: it builds the warm clean image
+oc get pipelinerun -n ogsr-supply-chain        # the install-time build: expect Succeeded
+adm start trusted-supply-chain --user user1     # about a minute: copies the signed image in
 ws verify trusted-supply-chain --user user1 --entry-only
 ----
 +
@@ -134,8 +135,8 @@ You do not need a separate rubric for when the room is ready to move on: each ex
 Beyond the Say/Show/Do arc in the demo flavor:
 
 * *Pre-solve before the room.*
-`adm solve trusted-supply-chain --user {user}` lands on the same warm end state as prep (a scanned, signed `parasol-claims:latest`) and *blocks by design* (~8 min warm, ~10–12 cold).
-It leaves your "good outcome" ready and warms the Maven cache for the live seeded build.
+`adm solve trusted-supply-chain --user {user}` lands on the same end state as prep (the scanned, signed `parasol-claims:latest`, copied in) and returns in about a minute.
+It leaves your "good outcome" ready.
 
 * *cosign is now attendee-hands-on — no verification pod needed.*
 Since RHTAS recovered, `cosign` and `rekor-cli` are fetched from the cli-server (exercise 2), so verification is *hands-on for everyone* — the old "instructor runs cosign in a pod" workaround is retired.
@@ -184,8 +185,7 @@ The scan runs *after* the build (`acs-scan` has `runAfter: build-image`) because
 So the image _is_ built (and even signed), and then the scan refuses the `:candidate` — the run is `Failed` with `build-image: Succeeded, acs-scan: Failed`.
 
 *2. "Where did the clean `latest` image come from — I only built `:candidate`?"*::
-The entry state pre-built it.
-At every prep, `warm-clean-image.yaml` runs the pipeline on the clean `main` branch (no log4j) and leaves a scanned-green, Chains-signed `parasol-claims:latest`.
+The platform built it once, at install: the same pipeline ran on the clean `main` branch (no log4j) in `ogsr-supply-chain`, and the entry state copied the scanned-green, Chains-signed `parasol-claims:latest` into their project, signature and attestation included.
 That is deliberate — the owner's rebalance makes the attendee *read* the clean verdict and *verify* the clean image, instead of waiting through a second build. Their own seeded build goes to `:candidate` so it never clobbers `:latest`.
 
 *3. "What's the difference between the signature, the attestation, and the SBOM?"*::
@@ -216,9 +216,8 @@ They overlap on one mechanic: both drive an RHACS build-time image check that bl
 * *The scanner vulnerability store must be warm.*
 On a freshly installed cluster, RHACS Scanner V4 needs *~1 hour* to populate before the Log4Shell policy fires; until then the gate *passes on the seeded branch* and the lab's first beat silently no-ops.
 Always run the pre-flight seeded pipeline and confirm it prints `Block Log4Shell` before a session.
-* *Prep now blocks ~8 minutes (the warm build).*
-`adm start`/`ws prep`/`adm solve` build the clean image before returning (ws-meta `waitSeconds: 1500` covers it). Provision with that in mind; a re-prep on an already-warm namespace skips the rebuild (the hook's idempotency guard).
-For the room, that wait is now spent *under your concept talk*: the concept page opens with the `ws prep trusted-supply-chain` box, so attendees start the build before they start reading and the lab page only confirms it. Deliver the concept at its normal pace rather than rushing to the lab — on this module, finishing the talk early buys you nothing.
+* *Prep copies; it does not build.*
+`adm start`/`ws prep`/`adm solve` copy the install-time signed image in and return in about a minute. The one exception is right after install: if the shared build in `ogsr-supply-chain` is still running, prep waits for it (ws-meta `waitSeconds: 1500` covers it). Check `oc get pipelinerun -n ogsr-supply-chain` shows it `Succeeded` before the room preps.
 * *RHTAS must be Ready for exercises 2–4.*
 `cosign`/`rekor-cli` come from the RHTAS cli-server, and the keyless beat records to Rekor. If Securesign is not `Ready`, those exercises cannot run — confirm the routes serve in pre-flight.
 * *Attendees cannot create an `ImagePolicy`.*
@@ -230,11 +229,11 @@ On cosign v3.0.4, passing `--fulcio-url`/`--rekor-url` to `sign` after `cosign i
 * *Chains signs every build — including the seeded one.*
 `signed=true` appears on the build TaskRun of the _failed_ `:candidate` run too; that is correct (signing answers "who built it," a different question from "is it clean"). Do not let attendees read "signed" as "passed the scan."
 * *The `scan-passed` result is empty on a failed run.*
-A failed `acs-scan` task does not propagate the `scan-passed` result, so it is blank (not `false`) on the seeded run; it reads `true` on the pre-warmed clean run.
+A failed `acs-scan` task does not propagate the `scan-passed` result, so it is blank (not `false`) on the seeded run; it reads `true` on the install-time clean run in `ogsr-supply-chain`.
 * *Benign roxctl warning.*
 The `acs-scan` logs a `warning: unsuccessful cred copy: ".docker" ... permission denied` line — harmless; `roxctl` authenticates with the token from `rox-api-token`.
-* *`ws reset`/`ws prep` restores the vulnerable seed and re-warms the image.*
-The fork job re-injects `log4j-core` on `seed-vulnerable` idempotently, and the warm hook rebuilds the signed `:latest` — a reset returns the attendee to a fresh, warm start.
+* *`ws reset`/`ws prep` restores the vulnerable seed and the signed image.*
+The fork job re-injects `log4j-core` on `seed-vulnerable` idempotently, and the copy hook puts the signed `:latest` back — a reset returns the attendee to a fresh start.
 
 == Provenance
 

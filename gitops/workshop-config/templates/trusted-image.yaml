@@ -1,0 +1,339 @@
+{{- /*
+  trusted-image — build the trusted-supply-chain module's clean, scanned, Chains-signed
+  parasol-claims image ONCE, at install, for the whole cohort.
+
+  WHY. The module's entry state used to run the supply-chain pipeline on the clean `main` branch at
+  EVERY prep, per attendee: ~5 min blocked per prep on cluster-5vqxc (2026-11-12), ~8 min on smaller
+  clusters, and 25 concurrent builds of the same source when a room preps at once. Every one of those
+  builds produced the same thing — the attendee's fork of `main` is the upstream `main` at prep time.
+  Now this template builds it once here, and each attendee's entry state copies the image with its
+  .sig/.att tags into {user}-cicd (`oc image mirror`, ~1s; cosign verify and verify-attestation pass
+  on the copy). Attendees read this run's scan verdict here (view RoleBinding below).
+
+  The Pipeline below is the module's own Pipeline (gitops/entry-states/trusted-supply-chain/templates/
+  pipeline.yaml) with the defaults pointed at the upstream repo's `main`. KEEP THE TASKS IN STEP with
+  that file — it is the one attendees read and run.
+
+  The build runs as a PostSync hook, so it never holds workshop-config's health (the installer waits
+  on that); it waits for the trust stack's CI token, skips when a Chains-signed :latest is already
+  here, and otherwise builds and waits. A per-user prep that arrives before it finishes waits for it
+  (the copy hook polls). ponytail: a change to the upstream source is not rebuilt automatically —
+  `oc delete is parasol-claims -n <namespace>` and re-sync workshop-config.
+*/ -}}
+{{- if include "workshop-config.moduleEnabled" (dict "root" $ "slug" "trusted-supply-chain") }}
+{{- $ns := .Values.trustedImage.namespace }}
+{{- $upstream := printf "http://gitea.%s.svc:3000/%s/parasol-claims.git" .Values.giteaNamespace .Values.mirrorOrg }}
+# Shared home of the cohort's trusted parasol-claims build.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $ns }}
+  labels:
+    workshop.redhat.com/shared: "true"
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+---
+# Attendees read the shared build (its PipelineRun, TaskRuns and scan verdict) — read-only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workshop-attendees-view
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - kind: Group
+    apiGroup: rbac.authorization.k8s.io
+    name: {{ .Values.attendeeGroup | default "workshop-attendees" }}
+---
+# Each attendee's entry-state copy hook (SA `pipeline` in {user}-cicd) pulls the image from here.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workshop-cicd-image-pullers
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:image-puller
+subjects:
+{{- range $i := until (int .Values.userCount) }}
+  - kind: Group
+    apiGroup: rbac.authorization.k8s.io
+    name: system:serviceaccounts:{{ $.Values.userPrefix }}{{ add1 $i }}-cicd
+{{- end }}
+---
+# The build hook's identity: starts PipelineRuns here, reads the RHACS CI token from stackrox.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: trusted-image-build
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+---
+# edit in its own namespace: create the rox-api-token copy and the PipelineRun, read their status.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: trusted-image-build-edit
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: edit
+subjects:
+  - kind: ServiceAccount
+    name: trusted-image-build
+    namespace: {{ $ns }}
+---
+# Read exactly one Secret in stackrox: the trust stack's CI token the scan gate needs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ogsr-trusted-image-read-rox-token
+  namespace: {{ .Values.trustedImage.stackroxNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["rox-api-token"]
+    verbs: ["get"]
+---
+# Binds the build hook to that one-Secret read.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ogsr-trusted-image-read-rox-token
+  namespace: {{ .Values.trustedImage.stackroxNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ogsr-trusted-image-read-rox-token
+subjects:
+  - kind: ServiceAccount
+    name: trusted-image-build
+    namespace: {{ $ns }}
+---
+# The module's supply-chain Pipeline (build → SBOM → Chains-signed image → RHACS gate), defaulting
+# to the upstream repo's clean `main`. Tasks kept in step with the entry-state copy (see header).
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: parasol-claims-supply-chain
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/part-of: parasol-claims
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+spec:
+  params:
+    - name: git-url
+      type: string
+      default: {{ $upstream }}
+    - name: git-revision
+      type: string
+      default: main
+    - name: image
+      type: string
+      default: image-registry.openshift-image-registry.svc:5000/$(context.pipelineRun.namespace)/parasol-claims:latest
+  workspaces:
+    - name: shared-workspace
+  results:
+    - name: scan-passed
+      value: $(tasks.acs-scan.results.check-passed)
+  tasks:
+    - name: fetch-source
+      taskRef:
+        resolver: cluster
+        params:
+          - {name: kind, value: task}
+          - {name: name, value: git-clone}
+          - {name: namespace, value: openshift-pipelines}
+      params:
+        - {name: URL, value: $(params.git-url)}
+        - {name: REVISION, value: $(params.git-revision)}
+      workspaces:
+        - {name: output, workspace: shared-workspace}
+    - name: sbom-report
+      runAfter: [fetch-source]
+      workspaces:
+        - {name: source, workspace: shared-workspace}
+      taskSpec:
+        workspaces:
+          - name: source
+        steps:
+          - name: cyclonedx
+            image: registry.access.redhat.com/ubi9/openjdk-21@sha256:24dad82bd5d25d9b0c85f0e9c976e47ccce787cc73792355462bf54fe03d9a77
+            workingDir: $(workspaces.source.path)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              printf '<settings><mirrors><mirror><id>mirror.default</id><url>%s</url><mirrorOf>central</mirrorOf></mirror></mirrors></settings>' \
+                "http://maven-mirror.{{ .Values.mavenMirror.namespace }}.svc:8080" > /tmp/settings.xml
+              /usr/bin/mvn -B -ntp -s /tmp/settings.xml org.cyclonedx:cyclonedx-maven-plugin:2.9.2:makeBom
+              SBOM="$(ls -1 target/parasol-claims-sbom.json target/bom.json target/*cyclonedx.json 2>/dev/null | head -1 || true)"
+              [[ -n "$SBOM" ]] || { echo "❌ no CycloneDX SBOM produced under target/"; exit 1; }
+              if HIT="$(grep -oE 'log4j-core@[0-9][0-9.]*' "$SBOM" | head -1)"; then
+                echo "⚠️  the SBOM contains ${HIT} — CVE-2021-44228 (Log4Shell)."
+              else
+                echo "✅ no log4j-core in the SBOM (clean build)."
+              fi
+    - name: build-image
+      runAfter: [sbom-report]
+      taskRef:
+        resolver: cluster
+        params:
+          - {name: kind, value: task}
+          - {name: name, value: buildah}
+          - {name: namespace, value: openshift-pipelines}
+      params:
+        - {name: IMAGE, value: $(params.image)}
+        - {name: DOCKERFILE, value: ./Containerfile}
+        - {name: BUILD_ARGS, value: ["MAVEN_MIRROR_URL=http://maven-mirror.{{ .Values.mavenMirror.namespace }}.svc:8080"]}
+        - {name: TLS_VERIFY, value: "false"}
+      workspaces:
+        - {name: source, workspace: shared-workspace}
+    - name: acs-scan
+      runAfter: [build-image]
+      taskRef:
+        resolver: cluster
+        params:
+          - {name: kind, value: task}
+          - {name: name, value: acs-image-check}
+          - {name: namespace, value: ogsr-parasol-tasks}
+      params:
+        - {name: IMAGE, value: $(params.image)}
+---
+# The one run: clean main → scanned, Chains-signed parasol-claims:latest in this namespace.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trusted-image-run
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+data:
+  pipelinerun.yaml: |
+    apiVersion: tekton.dev/v1
+    kind: PipelineRun
+    metadata:
+      generateName: trusted-build-
+      labels:
+        app.kubernetes.io/part-of: parasol-claims
+    spec:
+      pipelineRef:
+        name: parasol-claims-supply-chain
+      taskRunTemplate:
+        serviceAccountName: pipeline
+      workspaces:
+        - name: shared-workspace
+          volumeClaimTemplate:
+            spec:
+              accessModes: [ReadWriteOnce]
+              resources:
+                requests:
+                  storage: 1Gi
+      taskRunSpecs:
+        - pipelineTaskName: sbom-report
+          computeResources:
+            requests: {memory: 1Gi}
+            limits: {memory: 1536Mi}
+        - pipelineTaskName: build-image
+          computeResources:
+            requests: {memory: 1536Mi, ephemeral-storage: 2Gi}
+            limits: {memory: 2Gi, ephemeral-storage: 4Gi}
+---
+# Build once: copy the CI token in, skip if a signed :latest exists, else run the Pipeline and wait.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trusted-image-build
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 3600
+  template:
+    spec:
+      serviceAccountName: trusted-image-build
+      restartPolicy: Never
+      volumes:
+        - name: run
+          configMap:
+            name: trusted-image-run
+      containers:
+        - name: build
+          # Same digest-pinned oc image the per-user hooks use.
+          image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+          env:
+            - name: NS
+              value: {{ $ns }}
+            - name: ROX_NS
+              value: {{ .Values.trustedImage.stackroxNamespace }}
+          volumeMounts:
+            - name: run
+              mountPath: /run-spec
+          resources:
+            requests: {cpu: 10m, memory: 256Mi}
+            limits: {memory: 512Mi}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              signed() {
+                oc get imagestream parasol-claims -n "$NS" -o jsonpath='{range .status.tags[*]}{.tag}{"\n"}{end}' 2>/dev/null \
+                  | grep -q '\.sig$' && oc get istag parasol-claims:latest -n "$NS" >/dev/null 2>&1
+              }
+              if signed; then echo "✅ a Chains-signed parasol-claims:latest is already in ${NS} — nothing to build"; exit 0; fi
+              echo "▶ waiting for the trust stack's CI token (${ROX_NS}/rox-api-token)…"
+              for _ in $(seq 1 180); do oc get secret rox-api-token -n "$ROX_NS" >/dev/null 2>&1 && break; sleep 10; done
+              T="$(oc get secret rox-api-token -n "$ROX_NS" -o jsonpath='{.data.rox-api-token}')"
+              E="$(oc get secret rox-api-token -n "$ROX_NS" -o jsonpath='{.data.rox-central-endpoint}')"
+              printf '{"apiVersion":"v1","kind":"Secret","type":"Opaque","metadata":{"name":"rox-api-token","namespace":"%s"},"data":{"rox-api-token":"%s","rox-central-endpoint":"%s"}}' \
+                "$NS" "$T" "$E" | oc apply -f - >/dev/null
+              echo "  ✓ rox-api-token copied (value not shown)"
+              # OpenShift Pipelines creates the `pipeline` SA in a new namespace a few seconds after it
+              # exists; a run started before that fails at pod creation (measured on the first install).
+              for _ in $(seq 1 60); do oc get sa pipeline -n "$NS" >/dev/null 2>&1 && break; sleep 5; done
+              for attempt in 1 2 3; do
+                PR="$(oc create -n "$NS" -o name -f /run-spec/pipelinerun.yaml)"
+                echo "▶ ${PR#*/}: build → SBOM → sign → RHACS gate on the clean main branch (attempt ${attempt})…"
+                for _ in $(seq 1 120); do
+                  s="$(oc get "$PR" -n "$NS" -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}' 2>/dev/null || true)"
+                  [[ "$s" == True || "$s" == False ]] && break
+                  sleep 10
+                done
+                if [[ "$s" == True ]]; then
+                  for _ in $(seq 1 30); do signed && break; sleep 5; done   # Chains signs a few seconds later
+                  signed && { echo "✅ ${NS}/parasol-claims:latest built, scanned clean and Chains-signed"; exit 0; }
+                fi
+                echo "  ⚠ ${PR#*/} did not finish signed (Succeeded=${s:-?}) — the RHACS scanner may still be starting; retrying in 60s"
+                sleep 60
+              done
+              echo "❌ no signed image after 3 runs — inspect: tkn pipelinerun list -n ${NS}"
+              exit 1
+{{- end }}

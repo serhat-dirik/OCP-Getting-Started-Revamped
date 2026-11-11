@@ -3,10 +3,11 @@
 #   Entry: {user}-cicd exists · entry marker CM · the parasol-claims-supply-chain Pipeline present ·
 #          the copied rox-api-token Secret (scan-gate contract) + chains-cosign-pub ConfigMap (verify
 #          contract) · Gitea fork answers with its seed-vulnerable branch · the curated parasol-tasks
-#          acs-image-check task is reachable · AND the PRE-SCANNED trust artifact: warm-clean-image.yaml
-#          builds the CLEAN main branch at every prep, so a Chains-signed parasol-claims:latest (with its
-#          .sig + .att tags) is present and a supply-chain run passed the scan gate BEFORE the attendee
-#          starts — that warm signed image is what the trust lab (cosign verify → attestation → admission)
+#          acs-image-check task is reachable · AND the PRE-SCANNED trust artifact: the install builds the
+#          CLEAN main branch ONCE in ${TRUSTED_NS} (workshop-config trusted-image.yaml) and every prep copies
+#          the Chains-signed parasol-claims:latest (with its .sig + .att tags) into {user}-cicd, so the
+#          image is present and the shared run passed the scan gate BEFORE the attendee starts — that
+#          signed image is what the trust lab (cosign verify → attestation → admission)
 #          reads, so it is asserted in BOTH modes (owner's 2026-07-18 pre-scanned-image rebalance).
 #          ONLY in --entry-only mode: the fork's seed-vulnerable branch still carries the seeded log4j-core
 #          CVE (the attendee's optional SBOM-fix beat removes it, so this entry-materialization check is
@@ -37,6 +38,9 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
 parse_verify_args "$@"
 NS="${USER_NAME}-cicd"
+# The install-time build of the clean image (gitops/workshop-config/values.yaml trustedImage.namespace);
+# attendees hold view on it.
+TRUSTED_NS="ogsr-supply-chain"
 
 # --- helpers (kept dependency-free: oc + curl only) --------------------------
 
@@ -65,21 +69,21 @@ gitea_raw_contains() {
 # Tekton Chains signed at least one TaskRun in this namespace (signature attached).
 # oc_read, not `2>/dev/null | grep -q`: a silenced read hands grep an empty stream whether the
 # namespace holds no signed TaskRun (a real ❌) or the API never answered (⚠) — and this check is
-# asserted in BOTH modes, so a blip would tell an attendee their warm prep build was never signed.
+# asserted in BOTH modes, so a blip would tell an attendee the install-time build was never signed.
 # Read in THIS shell, never `$(…)`: VERIFY_INCONCLUSIVE raised in a subshell never reaches check().
 signed_taskrun_exists() {
   oc_read get taskruns.tekton.dev -n "$1" -o jsonpath='{range .items[*]}{.metadata.annotations.chains\.tekton\.dev/signed}{"\n"}{end}' || return 1
   grep -q 'true' <<<"$OC_OUT"
 }
 # A parasol-claims-supply-chain PipelineRun reached overall Succeeded. Tekton labels every run from a
-# pipelineRef with tekton.dev/pipeline=<name>, so this catches the warm prep run AND the attendee's re-run.
+# pipelineRef with tekton.dev/pipeline=<name>, so in ${TRUSTED_NS} this catches the install-time build.
 # Overall Succeeded is the definitive clean-gate signal: the ACS gate ("Block Log4Shell at build", CVSS 10)
 # fails the WHOLE run on a vulnerable source even though build-image + Chains-signing still complete — so a
 # proxy like "image built" or "a signed TaskRun exists" greenlights a run that never passed the gate. The
-# warm-clean-image hook builds the CLEAN main branch at prep, so this passes from entry state onward.
+# install builds the CLEAN main branch once in ${TRUSTED_NS}, so this passes from entry state onward.
 # oc_read, not `2>/dev/null`: an empty answer from a silenced read cannot be told apart from an API that
-# never answered, and this check is asserted in BOTH modes — a false ❌ here tells an attendee their warm
-# prep build failed when the cluster merely blipped. rc 0 with an empty OC_OUT is still a real ❌.
+# never answered, and this check is asserted in BOTH modes — a false ❌ here tells an attendee the install-time
+# build failed when the cluster merely blipped. rc 0 with an empty OC_OUT is still a real ❌.
 supply_chain_run_succeeded() {
   oc_read get pipelineruns.tekton.dev -n "$1" -l tekton.dev/pipeline=parasol-claims-supply-chain \
     -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Succeeded")].status}{"\n"}{end}' || return 1
@@ -87,7 +91,7 @@ supply_chain_run_succeeded() {
 }
 # The pre-scanned trust artifact is present: the ImageStream carries parasol-claims:latest PLUS the two
 # Chains-emitted tags derived from its digest — sha256-<digest>.sig (signature) and .att (SLSA attestation).
-# This is what the trust lab's cosign verify / verify-attestation / admission beats read; the warm hook
+# This is what the trust lab's cosign verify / verify-attestation / admission beats read; the prep copy hook
 # produces it at prep and a completed lab leaves it intact (the attendee's red beat uses a :candidate tag).
 # Same three-outcome treatment, and for the same reason: `tags="$(oc … 2>/dev/null || true)"` makes an
 # ImageStream that could not be read indistinguishable from one carrying no signed tags.
@@ -210,10 +214,10 @@ check "chains-cosign-pub copied into ${NS} (verify key)"   oc get cm chains-cosi
 check "Gitea fork ${USER_NAME}/parasol-claims answers"     gitea_repo_exists "$USER_NAME" parasol-claims       || hint "fork missing — re-run: ws prep trusted-supply-chain (or ws start trusted-supply-chain --user ${USER_NAME}) (fork job)"
 check "fork branch seed-vulnerable exists"                 gitea_branch_exists "$USER_NAME" parasol-claims seed-vulnerable || hint "re-run the fork/seed job: ws reset trusted-supply-chain --user ${USER_NAME}"
 check "curated library task acs-image-check reachable"     oc get tasks.tekton.dev acs-image-check -n ogsr-parasol-tasks        || hint "parasol-tasks library missing — sync the workshop-config Argo app"
-# --- the pre-scanned trust artifact (warm-clean-image hook; present from prep, survives the lab) --------
-check "warm supply-chain run PASSED the scan gate (a run Succeeded)" supply_chain_run_succeeded "$NS"          || hint "the warm-clean-image hook builds the CLEAN main branch at prep; if this is red the warm build is still running or failed — watch: tkn pipelinerun logs --last -n ${NS}, or ws prep trusted-supply-chain --user ${USER_NAME} --yes"
-check "Tekton Chains signed the build (signed TaskRun present)"      signed_taskrun_exists "$NS"               || hint "Chains signs a few seconds after the build TaskRun completes — re-check, or ws prep trusted-supply-chain --user ${USER_NAME} --yes"
-check "pre-scanned signed image parasol-claims:latest (+ .sig/.att)" signed_latest_image_present "$NS"         || hint "the warm signed image is missing — re-materialize: ws prep trusted-supply-chain --user ${USER_NAME} --yes (builds+signs the clean main branch)"
+# --- the pre-scanned trust artifact (built once at install, copied in at prep; survives the lab) ---------
+check "install-time supply-chain run PASSED the scan gate (${TRUSTED_NS})" supply_chain_run_succeeded "$TRUSTED_NS" || hint "the install builds the CLEAN main branch once in ${TRUSTED_NS}; if this is red that build is still running or failed — watch: tkn pipelinerun logs --last -n ${TRUSTED_NS} (instructor: re-sync the workshop-config app to retry it)"
+check "Tekton Chains signed that build (signed TaskRun present)"   signed_taskrun_exists "$TRUSTED_NS"       || hint "Chains signs a few seconds after the build TaskRun completes — re-check in a moment"
+check "pre-scanned signed image parasol-claims:latest (+ .sig/.att)" signed_latest_image_present "$NS"         || hint "the signed image was not copied into ${NS} — re-materialize: ws prep trusted-supply-chain --user ${USER_NAME} --yes (copies it from ${TRUSTED_NS} in seconds)"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # Entry-only: the seeded flaw is asserted ONLY here. The trusted-supply-chain lab's optional SBOM-fix beat
@@ -236,7 +240,7 @@ else
     # anywhere — nothing produced this state, so there is nothing to grade. The banner stays green
     # and honest, and the line below is why. (If `ws solve` ever gains a hook that runs the seeded
     # build, delete this branch and let the checks below run — they already grade exactly that.)
-    na "the attendee-side beats (the seeded :candidate build, the SBOM, the keyless Rekor receipt) — \`ws solve\` for this module materializes the warm signed-image end state and deliberately nothing else, so they are correctly absent here"
+    na "the attendee-side beats (the seeded :candidate build, the SBOM, the keyless Rekor receipt) — \`ws solve\` for this module materializes the copied signed-image end state and deliberately nothing else, so they are correctly absent here"
   else
     # Exercise 1 — the seeded build. One read, then three verdicts off it, because "you never started
     # it" (❌), "it is still building" (⚠) and "the gate answered" (graded) are three different things.
@@ -245,7 +249,7 @@ else
       hint "not your lab, and not graded: re-run the same ws verify in a moment; if it keeps happening, check your session with 'oc whoami' and tell your instructor"
     else
       check "exercise 1: you built the seeded branch yourself (a seed-vulnerable PipelineRun)" test -n "$SEED_RUNS" \
-        || hint "exercise 1: create the PipelineRun from the lab's manifest (git-revision: seed-vulnerable → parasol-claims:candidate) — the warm prep run built main and does not count"
+        || hint "exercise 1: create the PipelineRun from the lab's manifest (git-revision: seed-vulnerable → parasol-claims:candidate) — the install-time build of main does not count"
       if [[ -n "$SEED_RUNS" ]]; then
         # GRADE OPTIMISTICALLY, DEFER PESSIMISM WHILE A BUILD IS RUNNING. All three facts below are
         # produced by the SAME run, minutes apart — build-image pushes :candidate, Chains signs it
