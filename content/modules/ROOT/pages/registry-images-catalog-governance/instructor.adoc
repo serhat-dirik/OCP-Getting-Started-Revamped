@@ -43,7 +43,7 @@ Total hands-on: *~33 min* (add ~8 min of concept up front — the two-supply-cha
 | 3 | Scheduled import + break-and-fix | ~5 min | `oc import-image --scheduled` *~1.5 s*; the bad-ref import returns its error in *~1 s*; re-import *~1.5 s*
 | 4 | Pull from a private registry | ~5 min | `oc secrets link` instant; the pull-secret Deployment rolls out in *~7 s* (public `ubi-minimal` image, first pull on the node)
 | 5 | Publish a catalog Template | ~5 min | `oc apply` the Template *~4 s*; `oc process \| oc apply` + rollout *~5 s*
-| 6 | Hit the import allowlist | ~5 min | the refused import returns at admission, instantly; the approved `nginx-124` import *~1.4 s* — the time is reading the policy and the refusal
+| 6 | Hit the import allowlist | ~5 min | the refused import *~1.0 s* (admission, no node involved); the approved `nginx-124` import *~1.4 s* — the time is reading the policy and the refusal
 | 7 | Read retention and the catalog supply | ~3 min | view-only, *~2.5 s* for the reads — the time is reading
 |===
 
@@ -53,7 +53,7 @@ Total hands-on: *~33 min* (add ~8 min of concept up front — the two-supply-cha
 On the build cluster (OCP 4.21.22, Kubernetes 1.34) on 2026-07-13, every attendee exercise was performed as `user3` and timed.
 The `oc` commands themselves return in about a second — `oc tag` in *~0.9 s*, `oc import-image` in *~1.5 s*, the pull-secret Deployment rollout in *~1.5 s* (the internal claims image is already pull-through-cached), the Template `oc apply` in *~4 s* and `oc process | oc apply` + rollout in *~5 s*.
 There are *no* long waits in this module — nothing reboots, nothing drains. *Attendee time is dominated by reading*: the digests, the import status, the governance objects. Budget the time for comprehension, not command latency.
-Re-run on 2026-11-12 as `user9` (OCP 4.22.22): `oc tag` *~1.1 s*, `oc import-image` *~1.7 s*, the pull-secret rollout *~7 s* (first pull of a public image), Template `oc apply` *~1.8 s*, `oc process | oc apply` + rollout *~5 s*, the exercise-6 approved import *~1.4 s*, the exercise-7 reads *~2.5 s*. The exercise-6 *refusal* could not be timed there — the install's allowlist had not landed yet — but it is an admission rejection with no node involved; its wording was captured on a disposable cluster (2026-07-31) and is shown below.
+Re-run on 2026-11-12 as `user9` (OCP 4.22.22): `oc tag` *~1.1 s*, `oc import-image` *~1.7 s*, the pull-secret rollout *~7 s* (first pull of a public image), Template `oc apply` *~1.8 s*, `oc process | oc apply` + rollout *~5 s*, the exercise-6 approved import *~1.4 s*, the exercise-7 reads *~2.5 s*. The exercise-6 *refusal* returns in *~1.0 s* — an admission rejection with no node involved.
 ====
 
 == How to know the room can move on
@@ -119,9 +119,14 @@ Expect `No resources found` — the lab's whole "route-free, work through the AP
 oc get image.config.openshift.io/cluster -o jsonpath='allowed: {.spec.allowedRegistriesForImport[*].domainName}{"\n"}'
 ----
 +
-// TODO(verify-on-cluster): expected output is the install's list, not a capture — the build cluster
-// printed `allowed: ` (unset) on 2026-11-12. Re-capture after the platform lane's install change.
-Expect `allowed: registry.redhat.io registry.access.redhat.com quay.io image-registry.openshift-image-registry.svc:5000`, and no `docker.io`. If it prints `allowed:` and nothing else, the allowlist is missing: every attendee's `docker.io` import will be *accepted* and exercise 6 teaches the opposite of its point. Re-apply the install's workshop configuration before the session — do not invent a shorter list by hand (see the section below for why every entry is there).
+Expect exactly this, with no `docker.io` (captured as `user9` once the install applied the list):
++
+[source,texinfo]
+----
+allowed: registry.redhat.io registry.access.redhat.com quay.io image-registry.openshift-image-registry.svc:5000
+----
++
+If it prints `allowed:` and nothing else, the allowlist is missing: every attendee's `docker.io` import will be *accepted* and exercise 6 teaches the opposite of its point. Re-apply the install's workshop configuration before the session — do not invent a shorter list by hand (see the section below for why every entry is there).
 
 == Exercises 6–7 — what attendees run into
 
@@ -131,38 +136,27 @@ Attendees read it, import from `docker.io` into their own project, and are refus
 
 === The refusal, and how to read it in front of the room
 
-// MAINTAINER NOTES on the capture rendered below. Method: `oc import-image demo-blocked -n test
-// --from=docker.io/library/nginx:latest --confirm` with `spec.allowedRegistriesForImport` set to
-// `[registry.redhat.io, registry.access.redhat.com]`, on a disposable OpenShift Local 4.22.1 cluster
-// as kubeadmin, 2026-07-31 — NOT on the shared build cluster, which is live with four attendee
-// identities and cannot take a cluster-wide image-policy mutation. Cross-checked two ways: the text
-// is identical via `oc import-image -v=6` and via a raw POST to `imagestreamimports`, which is what
-// pins the response as HTTP 422 Unprocessable Entity rather than 403.
-// The rendered block below ELIDES the repeated whitelist on the second cause. Byte-exact original,
-// for anyone re-capturing or diffing:
-//   The ImageStream "demo-blocked" is invalid:
-//   * spec.tags[latest].from.name: Forbidden: registry "docker.io" not allowed by whitelist: "image-registry.openshift-image-registry.svc:5000", "registry.redhat.io:443", "registry.access.redhat.com:443"
-//   * status.tags[latest].items[0].dockerImageReference: Forbidden: registry "docker.io" not allowed by whitelist: "image-registry.openshift-image-registry.svc:5000", "registry.redhat.io:443", "registry.access.redhat.com:443"
-// Evidence for the no-exemption claim: run as kubeadmin with `oc auth can-i '*' '*' --all-namespaces`
-// → yes, and the import was denied identically to a normal user.
-// TODO(verify-on-cluster): the install's list (four entries, incl. quay.io and the internal registry)
-// had not landed on the build cluster on 2026-11-12, so the attendee-side refusal with THAT list is not
-// captured yet. Re-capture exercise 6 as an attendee after the install change and drop this marker.
+// MAINTAINER NOTES. Captured 2026-11-12 on the build cluster as user9 (attendee identity via --as +
+// --as-group workshop-attendees), right after the install applied the four-entry allowlist: `oc import-image
+// nginx -n user9-dev --from=docker.io/library/nginx:latest --confirm`, oc 4.21 client (the cockpit
+// terminal ships 4.21.8). `-v=6` shows GET imagestreams/nginx -> 404, then POST imagestreamimports ->
+// 422 Unprocessable Entity; ~1.0 s; no ImageStream created. This REPLACES the 2026-07-31 disposable-
+// cluster capture (OpenShift Local 4.22.1, kubeadmin), which showed a two-cause `The ImageStream
+// "demo-blocked" is invalid:` form naming plain "docker.io"; that run is still the evidence for the
+// no-exemption claim (kubeadmin, `oc auth can-i '*' '*' --all-namespaces` -> yes, refused identically).
 
-What the refusal looks like — this capture is from a disposable cluster with a shorter list, so read the *shape*; your cluster's list is longer:
+What the refusal looks like, captured as an attendee on the workshop cluster:
 
 [source,texinfo]
 ----
-The ImageStream "demo-blocked" is invalid:
-* spec.tags[latest].from.name: Forbidden: registry "docker.io" not allowed by whitelist: "image-registry.openshift-image-registry.svc:5000", "registry.redhat.io:443", "registry.access.redhat.com:443"
-* status.tags[latest].items[0].dockerImageReference: Forbidden: registry "docker.io" not allowed by whitelist: <the same three entries again>
+The ImageStreamImport "nginx" is invalid: spec.images[0].from.name: Forbidden: importing images from registry "registry-1.docker.io:443" is forbidden: registry "registry-1.docker.io:443" not allowed by whitelist: "registry.redhat.io:443", "registry.access.redhat.com:443", "quay.io:443", "image-registry.openshift-image-registry.svc:5000"
 ----
 
 Three things to get right, because the screen invites the wrong reading:
 
-* *It is an `Invalid` response — HTTP `422`, a validation error — not a `403`.* The word `Forbidden` is on screen, but as the *per-field cause reason*, not as the HTTP status. No role an attendee could be granted changes it.
-* *There are two causes for one import*, the same message on `spec` and again on `status`. A multi-line wall of red is the correct result, not a second failure.
-* *There is no exemption.* The capture was taken as `kubeadmin`, and the import was refused exactly as it is for an attendee.
+* *It is an `Invalid` response — HTTP `422`, a validation error — not a `403`.* *Forbidden* and *forbidden* are both on screen, but as the field-level cause, not as the HTTP status. No role an attendee could be granted changes it.
+* *Docker Hub appears as `registry-1.docker.io:443`*, not `docker.io` — the import resolves Docker Hub's real host before the check. It is the same registry; say "Docker Hub".
+* *There is no exemption.* A separate run as `kubeadmin` on a disposable cluster was refused just as an attendee is.
 
 If an attendee's `docker.io` import is *accepted*, the allowlist is missing on this cluster — the lab tells them to say so, delete `nginx` and continue. Fix it for the room by applying the install's allowlist (pre-flight item 6), never by hand-editing a different list: the list must name every registry the cluster imports from (`registry.redhat.io`, `registry.access.redhat.com`, `quay.io`, and the internal registry), or the stock samples and OpenShift's own release image streams stop re-importing.
 
@@ -241,6 +235,6 @@ Registry, Images & Catalog Governance is a net-new module (the spec's "fresh; MA
 Everything Registry, Images & Catalog Governance teaches for the attendee is *core* OpenShift — GA on the cluster, no operator or subscription.
 Every attendee command, output, and timing — the registry hostname and route-free check, the `parasol-claims` digest resolution and `referencePolicy: Local` pull-through, the `oc tag` promote proving `prod` == `1.0` by `sha256`, the `oc import-image --scheduled` and the "name unknown: Repo not found" break-and-fix, the `oc secrets link` and pod-level `imagePullSecrets` wiring, the namespaced Template create + `oc process` deploy, and the whole governance-surface read (empty `allowedRegistriesForImport`/mirrors, the `keepTagRevisions=3` daily pruner and its `0 0 * * +++*+++` CronJob, the `Managed` samples operator with its roughly 60 image streams + 50-odd templates, and the catalog sources including the curated `redhat-rhpds-gitea` — clusters provisioned without the Red Hat Marketplace catalog (common on RHDP/bare-metal) show four sources; clusters with it show five) — was captured on OpenShift 4.21.22 as `user3` on 2026-07-13 during the build.
 Exercises 6–7 were redesigned on 2026-11-12 so that no exercise is instructor-only, and re-performed with every other exercise as `user9` on OpenShift 4.22.22: the approved `nginx-124` import, the samples / `ConsoleSample` / catalog-source reads and the pruner read are real captures from that run.
-The import allowlist is set by the workshop install, not by anyone during a session. The attendee-side *refusal* was not capturable on the build cluster that day — the install's list had not landed — so it is shown here as the `Invalid` (HTTP 422) shape captured on a disposable OpenShift Local 4.22.1 cluster on 2026-07-31 as `kubeadmin` (which also established that cluster-admin is *not* exempt). The "accepted `docker.io` import" troubleshooting entry is a real capture from that allowlist-less cluster.
+The import allowlist is set by the workshop install, not by anyone during a session. Once it was applied, the attendee-side view of it and the *refusal* were captured as `user9` the same day: a single `Invalid` (HTTP 422) `ImageStreamImport` error naming Docker Hub as `registry-1.docker.io:443`. An earlier run on a disposable OpenShift Local 4.22.1 cluster on 2026-07-31 as `kubeadmin` established that cluster-admin is *not* exempt. The "accepted `docker.io` import" troubleshooting entry is a real capture from before the allowlist was applied.
 `registrySources`/IDMS/ITMS mirroring, samples-skip and `ConsoleSample` are not performed anywhere in this module; they are explained from the object schema and OCP docs.
 IDMS/ITMS are named as the *current* mirroring APIs throughout; `ImageContentSourcePolicy` appears only as the *deprecated predecessor* (convert with `oc adm migrate icsp`), never as a recommended path.

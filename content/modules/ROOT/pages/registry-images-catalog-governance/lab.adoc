@@ -19,10 +19,10 @@ include::partial$version-attributes.adoc[]
 // platform lane's install change), and attendees read it and hit it with two imports in their own
 // namespace (exercise 6). Exercises 6-7 were re-performed as user9 on OCP 4.22.22 on 2026-11-12: the
 // approved nginx-124 import, the samples/ConsoleSample/catalog reads and the pruner read are real
-// captures. The REFUSED docker.io import could not be captured there — the allowlist was not yet applied
-// on that cluster, and a builder lane never sets cluster config — so its block carries
-// TODO(verify-on-cluster) and narrates the shape of the 2026-07-31 disposable-cluster capture recorded
-// in instructor.adoc. registrySources / IDMS-ITMS mirroring stays concept-only (it re-renders every
+// captures. The allowlist view and the REFUSED docker.io import were captured as user9 the same day,
+// after the install applied the allowlist (oc 4.21 client, same minor as the cockpit's 4.21.8): one
+// ImageStreamImport validation error (HTTP 422), naming Docker Hub as registry-1.docker.io:443 — NOT
+// the two-cause ImageStream form of the 2026-07-31 disposable-cluster capture. registrySources / IDMS-ITMS mirroring stays concept-only (it re-renders every
 // node). Console click-paths are grounded against the unified console (OCP 4.19+, no perspective
 // switch); labels a build couldn't click get CAPTURE-VERIFY + the authoritative CLI.
 
@@ -86,7 +86,7 @@ Expect a list of Red Hat registries and no `docker.io`. If it prints `allowed:` 
 
 Keep the terminal font large enough for a `sha256` digest to be readable: the two digests in step 1 and the refusal in step 2 are the evidence this demo rests on.
 
-NOTE: The refusal in step 2 is refused *at admission*, instantly, with no node reboot and no exemption, cluster-admin included. `oc` answers with a multi-line *validation* error (`Invalid`, HTTP `422`), not a tidy one-liner and not a `403`. The word *Forbidden* is on that screen more than once — as the per-field cause reason, not as the HTTP status. Call the import refused or rejected, point at the cause line naming the registry, and move on.
+NOTE: The refusal in step 2 happens *at admission*, instantly, with no node reboot and no exemption, cluster-admin included. `oc` answers with a *validation* error (`Invalid`, HTTP `422`), not a `403` — even though *Forbidden* and *forbidden* both appear in it, as the field-level cause rather than the HTTP status. It names Docker Hub by its real host, `registry-1.docker.io:443`, so say "Docker Hub" and point at the list of allowed registries at the end of the line.
 ====
 
 === Brief
@@ -153,7 +153,7 @@ oc get image.config.openshift.io/cluster -o jsonpath='{range .spec.allowedRegist
 oc import-image nginx -n $NS --from=docker.io/library/nginx:latest --confirm
 ----
 
-The import is refused and no image arrives. `oc` answers with a multi-line validation error rather than a single line; the cause line names the registry that was turned away. Nothing rebooted and no pool rolled — admission simply declined the request.
+The import is refused and no image arrives. `oc` answers with one long validation error that names Docker Hub by its real host, `registry-1.docker.io:443`, and then lists the registries that are allowed. Nothing rebooted and no pool rolled — admission simply declined the request.
 
 The same need, met from a registry on the list — a Red Hat-built nginx:
 
@@ -402,7 +402,7 @@ oc tag $NS/parasol-claims:1.0 $NS/parasol-claims:prod
 .Expected output (the promote resolves to a digest, not a tag — the `sha256` below is this capture's; yours will differ)
 [source,texinfo,subs="attributes"]
 ----
-Tag parasol-claims:prod set to {user}-dev/parasol-claims@sha256:0995ab385748d9fdcc999e394e6cc072b76cbef1136fd705864741983f7614f7.
+Tag {user}-dev/parasol-claims:prod set to {user}-dev/parasol-claims@sha256:0995ab385748d9fdcc999e394e6cc072b76cbef1136fd705864741983f7614f7.
 ----
 
 Now *prove* the promotion is honest — `prod` and `1.0` must resolve to the *same* digest:
@@ -508,14 +508,18 @@ Try an import with a deliberately wrong repository name and *read the error*:
 oc import-image ext-broken -n $NS --from=registry.access.redhat.com/ubi9/does-not-exist:latest --confirm
 ----
 
-.Expected output (the import is created but its status carries the failure; the client prints the same error twice — the per-tag block first, then a trailing `error: tag latest failed:` line right before the summary)
+.Expected output (the stream is created *with errors* — its status carries the failure, and the client prints the same error twice: an `error: tag latest failed:` line, then the per-tag `!` block)
 [source,texinfo]
 ----
-...
-  ! error: Import failed (InternalError): Internal error occurred: registry.access.redhat.com/ubi9/does-not-exist:latest: name unknown: Repo not found
-      Less than a second ago
-
 error: tag latest failed: Internal error occurred: registry.access.redhat.com/ubi9/does-not-exist:latest: name unknown: Repo not found
+imagestream.image.openshift.io/ext-broken imported with errors
+...
+latest
+  tagged from registry.access.redhat.com/ubi9/does-not-exist:latest
+
+  ! error: Import failed (InternalError): Internal error occurred: registry.access.redhat.com/ubi9/does-not-exist:latest: name unknown: Repo not found
+      1 second ago
+
 error: imported completed with errors
 ----
 
@@ -701,7 +705,7 @@ Create a Parasol claims quickstart Template — save this manifest and apply it:
 
 [source,sh,role=execute]
 ----
-cat > /tmp/parasol-claims-quickstart.yaml <<'EOF'
+cat > ~/parasol-claims-quickstart.yaml <<'EOF'
 apiVersion: template.openshift.io/v1
 kind: Template
 metadata:
@@ -761,7 +765,7 @@ objects:
       ports:
         - {name: http, port: 8080, targetPort: 8080}
 EOF
-oc apply -f /tmp/parasol-claims-quickstart.yaml -n $NS
+oc apply -f ~/parasol-claims-quickstart.yaml -n $NS
 ----
 
 .Expected output
@@ -780,8 +784,8 @@ oc get templates -n $NS
 .Expected output (your namespaced catalog entry)
 [source,texinfo]
 ----
-NAME                        DESCRIPTION                                                      PARAMETERS    OBJECTS
-parasol-claims-quickstart   A one-click Parasol claims service (Deployment + Service) ...     1 (all set)   2
+NAME                        DESCRIPTION                                                                       PARAMETERS    OBJECTS
+parasol-claims-quickstart   A one-click Parasol claims service (Deployment + Service) for this project's...   1 (all set)   2
 ----
 
 Now *deploy from it* — the whole point of a catalog entry.
@@ -809,7 +813,7 @@ Console::
 --
 Open *Ecosystem* → *Software Catalog*, filter to *Template*, and find *Parasol Claims Quickstart* — it appears because you added it to *this* project.
 Click it → *Instantiate Template*, accept the `APP_NAME` default, and *Create*.
-Switch a colleague's project and it *won't* be there — it's yours alone.
+No other project's catalog lists it — it's yours alone.
 
 image::registry-images-catalog-governance/registry-images-catalog-governance-03-developer-catalog-template.png["The Software Catalog narrowed to Templates — the breadcrumb reads Software Catalog then Templates — with the keyword box filtered to Parasol and 2 items returned: a Parasol Claims Quickstart tile (Provided by Parasol Insurance, described as a one-click Parasol claims service) and a Parasol PostgreSQL (ephemeral) tile. Both are badged Templates. They are on this page because the Template objects live in this project, not because the cluster offers them to everyone."]
 --
@@ -839,13 +843,14 @@ Confirm the Deployment and Service the template produced:
 oc get deploy,svc -n $NS -l app=claims-quickstart
 ----
 
-.Expected output
+.Expected output (your cluster IP and ages will differ)
 [source,texinfo]
 ----
-NAME                                READY   UP-TO-DATE   AVAILABLE
-deployment.apps/claims-quickstart   1/1     1            1
-NAME                        TYPE        CLUSTER-IP       PORT(S)
-service/claims-quickstart   ClusterIP   172.30.x.x       8080/TCP
+NAME                                READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/claims-quickstart   1/1     1            1           4s
+
+NAME                        TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)    AGE
+service/claims-quickstart   ClusterIP   172.231.37.237   <none>        8080/TCP   3s
 ----
 
 [.checkpoint]
@@ -867,9 +872,6 @@ Read the policy (the read-only `platform-observer` role lets you read cluster co
 oc get image.config.openshift.io cluster -o yaml
 ----
 
-// TODO(verify-on-cluster): this block is the list the platform install applies,
-// not a capture — on 2026-11-12 the build cluster still read `spec: {}`.
-// Re-capture as an attendee once the platform lane's install change has landed, and drop this marker.
 .Expected output (the part that matters — `spec` and `status`)
 [source,texinfo]
 ----
@@ -895,19 +897,13 @@ Now do what a developer in a hurry does — import `nginx` straight from Docker 
 oc import-image nginx -n $NS --from=docker.io/library/nginx:latest --confirm
 ----
 
-// TODO(verify-on-cluster): the wording below is the shape of the 2026-07-31 disposable-cluster capture
-// (instructor.adoc keeps it byte-exact), with this lab's stream name and the registry list elided. The
-// build cluster had no allowlist on 2026-11-12, so the same command was ACCEPTED there. Re-capture as
-// an attendee once the install sets the allowlist, and drop this marker.
-.Expected output (refused — a validation error with two causes; the registry list is elided here)
+.Expected output (refused — one long validation error)
 [source,texinfo]
 ----
-The ImageStream "nginx" is invalid:
-* spec.tags[latest].from.name: Forbidden: registry "docker.io" not allowed by whitelist: ...
-* status.tags[latest].items[0].dockerImageReference: Forbidden: registry "docker.io" not allowed by whitelist: ...
+The ImageStreamImport "nginx" is invalid: spec.images[0].from.name: Forbidden: importing images from registry "registry-1.docker.io:443" is forbidden: registry "registry-1.docker.io:443" not allowed by whitelist: "registry.redhat.io:443", "registry.access.redhat.com:443", "quay.io:443", "image-registry.openshift-image-registry.svc:5000"
 ----
 
-Read it like any failed import: the cause line names the registry that was turned away.
+Read it like any failed import: it names the registry that was turned away — Docker Hub under its real host name, `registry-1.docker.io:443` — and then the registries that *are* allowed.
 It is *Invalid* — the request was refused at admission, instantly, with no node involved — so nothing was created:
 
 [source,sh,role=execute]
@@ -1021,7 +1017,7 @@ Your own lever on the catalog is the Template you published in exercise 5: the s
 You have the mechanics.
 Try these on your own:
 
-* *Promote a different version.* The shared build carries more than one tag. Run `oc tag $NS/parasol-claims:1.0 $NS/parasol-claims:stable`, then reason about why `stable`, `prod`, and `1.0` can all point at the *same* digest — and what actually changes if you promote a *different* source tag to `prod`.
+* *Promote under another name.* Run `oc tag $NS/parasol-claims:1.0 $NS/parasol-claims:stable`, then reason about why `stable`, `prod`, and `1.0` can all point at the *same* digest — and what would actually change if a new `1.1` were imported later and promoted to `prod`.
 * *Trace the pruner's effect.* From `keepTagRevisions=3`, predict what happens to a tag's *4th* revision overnight, and explain why keeping an image *referenced* by a running Deployment protects it. What would you change on `ImagePruner/cluster` to suspend pruning for a multi-day event?
 * *Reason about blast radius.* You read that `allowedRegistriesForImport` is instant but `registrySources` reboots every node. Explain *why* — what does each one actually change on a node? — and which you'd reach for to (a) stop developers importing from `docker.io` today, versus (b) run a fully disconnected cluster.
 
