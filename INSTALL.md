@@ -150,7 +150,7 @@ Both floors exist for one module, `deployment-targets-scheduling`:
    | `users` | Attendee count (`user1`…`userN`). Change later with `adm scale-users N`. |
    | `cluster_domain` | `""` to auto-detect |
    | `workshop_user_password` | Shared attendee password. Memorable on purpose; not a secret. |
-   | `maas.endpoint` / `.model` / `.api_key` | The AI endpoint. **Keys are model-scoped**: a key for one model returns 401 on another. |
+   | `maas.endpoint` / `.model` / `.api_key` | The AI endpoint, model and key |
    | `lightspeed` | `true` installs OpenShift Lightspeed on your model. Skipped automatically without a MaaS key, or when the cluster already has Lightspeed. |
    | `modules_disabled` | Modules to leave out, e.g. `[m13, m22]`. Hidden from the cockpit, and their components are not installed. |
    | `modules_enabled` | The opposite, e.g. `[m1, m2, m3, m4, m5]`. Empty means the whole catalog. Use one key or the other, not both. |

@@ -56,9 +56,7 @@ Before you order anything, settle three things — they drive the sizing math be
    - If any AI module is in scope (jobs-batch-kueue's batch inference, agentic-ai,
      ai-assisted-development, app-modernization's MTA Lightspeed step), you need an OpenAI-compatible
      model endpoint decided *now* — MaaS, an on-cluster vLLM runtime, or a public provider — since
-     it's a `vars.yaml` input at install time, not something you bolt on live. Note MaaS keys are
-     **model-scoped**: the key you get has to match the model you configure, or every AI-module call
-     fails with a generic auth error ([INSTALL.md › Install, step 5](INSTALL.md#2-install)).
+     it's a `vars.yaml` input at install time, not something you bolt on live.
 
 ### Order the cluster
 
