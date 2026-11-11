@@ -1,0 +1,163 @@
+{{- /*
+  trusted-image-policy — ONE ClusterImagePolicy, applied at install: the node verifies the Tekton Chains
+  signature before it pulls any image under an attendee's parasol-claims-trusted repository
+  (image-registry.openshift-image-registry.svc:5000/userN-cicd/parasol-claims-trusted, N = 1..userCount),
+  where the trusted-supply-chain entry state copies the install-time signed image. Its own repository,
+  not userN-cicd/parasol-claims: pipelines-fundamentals and app-security-testing build and deploy that
+  one (Chains-signed as userN-cicd), and this policy must not touch them.
+
+  WHY ONE, AT INSTALL (measured on cluster-5vqxc 2026-11-12): every ImagePolicy/ClusterImagePolicy
+  create, change or delete re-renders the MachineConfigs and rolls every node (~70s; CRI-O reload, no
+  drain, no reboot). Per-attendee namespaced policies created at prep would roll the cluster on every
+  prep and reset. One cluster policy listing every attendee's repo rolls once at install and once per
+  `adm scale-users` (userCount changes the rendered scope list), never per prep.
+
+  WHY A HOOK JOB: the public key is the trust stack's Chains cosign key, generated on the cluster
+  (openshift-pipelines/chains-cosign-pub), so it cannot be a value in git. The job re-applies the same
+  object on every workshop-config sync; an unchanged spec is a no-op for the MCO.
+  The policy is cluster config on a dedicated cluster (INSTALL.md §6); attendees read it through
+  platform-observer.
+*/ -}}
+{{- if include "workshop-config.moduleEnabled" (dict "root" $ "slug" "trusted-supply-chain") }}
+{{- $ns := .Values.trustedImage.namespace }}
+# Identity of the policy job.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: trusted-image-policy
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+---
+# Manage exactly one ClusterImagePolicy.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ogsr-trusted-image-policy
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+rules:
+  - apiGroups: ["config.openshift.io"]
+    resources: ["clusterimagepolicies"]
+    verbs: ["create"]
+  - apiGroups: ["config.openshift.io"]
+    resources: ["clusterimagepolicies"]
+    resourceNames: ["ogsr-signed-parasol-claims"]
+    verbs: ["get", "patch", "update"]
+---
+# Binds the policy job to that one object.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ogsr-trusted-image-policy
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ogsr-trusted-image-policy
+subjects:
+  - kind: ServiceAccount
+    name: trusted-image-policy
+    namespace: {{ $ns }}
+---
+# Read the Chains public key (a public key; the private half never leaves openshift-pipelines).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ogsr-trusted-image-policy-read-key
+  namespace: {{ .Values.trustedImage.pipelinesNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["chains-cosign-pub"]
+    verbs: ["get"]
+---
+# Binds the key read to the policy job.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ogsr-trusted-image-policy-read-key
+  namespace: {{ .Values.trustedImage.pipelinesNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ogsr-trusted-image-policy-read-key
+subjects:
+  - kind: ServiceAccount
+    name: trusted-image-policy
+    namespace: {{ $ns }}
+---
+# Apply the one ClusterImagePolicy for the current cohort (idempotent; unchanged spec = no node roll).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trusted-image-policy
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 3600
+  template:
+    spec:
+      serviceAccountName: trusted-image-policy
+      restartPolicy: Never
+      containers:
+        - name: apply
+          image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+          resources:
+            requests: {cpu: 10m, memory: 128Mi}
+            limits: {memory: 256Mi}
+          env:
+            - name: PIPE_NS
+              value: {{ .Values.trustedImage.pipelinesNamespace }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              echo "▶ waiting for the Chains public key (${PIPE_NS}/chains-cosign-pub)…"
+              for _ in $(seq 1 180); do oc get cm chains-cosign-pub -n "$PIPE_NS" >/dev/null 2>&1 && break; sleep 10; done
+              KEY="$(oc get cm chains-cosign-pub -n "$PIPE_NS" -o jsonpath='{.data.cosign\.pub}' | base64 | tr -d '\n')"
+              [[ -n "$KEY" ]] || { echo "❌ ${PIPE_NS}/chains-cosign-pub has no cosign.pub — is trust-signing installed?"; exit 1; }
+              cat <<EOF | oc apply -f -
+              apiVersion: config.openshift.io/v1
+              kind: ClusterImagePolicy
+              metadata:
+                name: ogsr-signed-parasol-claims
+                labels:
+                  workshop.redhat.com/owner: ogsr
+              spec:
+                scopes:
+              {{- range $i := until (int .Values.userCount) }}
+                  - image-registry.openshift-image-registry.svc:5000/{{ $.Values.userPrefix }}{{ add1 $i }}-cicd/parasol-claims-trusted
+              {{- end }}
+                policy:
+                  rootOfTrust:
+                    policyType: PublicKey
+                    publicKey:
+                      keyData: ${KEY}
+                  # The image is built and Chains-signed ONCE in {{ $ns }} and copied into each
+                  # userN-cicd/parasol-claims-trusted, so the signature names THAT repository. Exact, not
+                  # MatchRepository (which would compare it with the pulled userN-cicd repo and refuse
+                  # it). An attendee's own :candidate build, signed as userN-cicd, is refused too.
+                  signedIdentity:
+                    matchPolicy: ExactRepository
+                    exactRepository:
+                      repository: image-registry.openshift-image-registry.svc:5000/{{ $ns }}/parasol-claims
+              EOF
+              echo "✅ ClusterImagePolicy ogsr-signed-parasol-claims covers {{ .Values.userCount }} attendee repositories"
+{{- end }}
