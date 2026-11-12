@@ -65,7 +65,9 @@ One thing to know up front: alert *rules you author* are read in the *project-sc
 Exercise 2 links straight to the right view.
 ====
 
-Set two shell variables once so the later command blocks stay copy-paste clean:
+Set two shell variables so the command blocks stay copy-paste clean.
+Every exercise opens with the block that sets them — for exercise 1 it is this one.
+*If your terminal reconnects, run the exercise's first block again*: a fresh shell has no `$NS` or `$CLAIMS`, and a check that needs one says so instead of quietly printing nothing.
 
 [source,sh,role=execute,subs="attributes"]
 ----
@@ -86,7 +88,7 @@ The raw endpoint is the ground truth every other view is built from.
 
 [source,sh,role=execute]
 ----
-curl -s "$CLAIMS/q/metrics" | grep -E '^claims_created_total|http_server_requests_seconds_count' | head
+curl -s "${CLAIMS:?is empty - run the first block of this exercise again}/q/metrics" | grep -E '^claims_created_total|http_server_requests_seconds_count' | head
 ----
 
 .Expected output (values differ; each line ends with a trace exemplar — that is Ex4's hook)
@@ -153,7 +155,7 @@ From the terminal you read the same raw counters at the source with `curl` — t
 [source,sh,role=execute]
 ----
 # request rate is derivable, but the raw counts are the ground truth the platform aggregates:
-curl -s "$CLAIMS/q/metrics" | grep 'http_server_requests_seconds_count{' | sort
+curl -s "${CLAIMS:?is empty - run the first block of this exercise again}/q/metrics" | grep 'http_server_requests_seconds_count{' | sort
 echo '--- claims filed (custom business counter) ---'
 curl -s "$CLAIMS/q/metrics" | grep '^claims_created_total'
 ----
@@ -181,7 +183,7 @@ Run the console's first query from here:
 ----
 curl -sk -G -H "Authorization: Bearer $(oc whoami -t)" \
   https://thanos-querier.openshift-monitoring.svc:9092/api/v1/query \
-  --data-urlencode "namespace=$NS" \
+  --data-urlencode "namespace=${NS:?is empty - run the first block of this exercise again}" \
   --data-urlencode 'query=sum(rate(http_server_requests_seconds_count{uri="/api/claims"}[5m]))' \
   | jq -r '.data.result[0].value[1]'
 ----
@@ -204,7 +206,7 @@ See how the app's metrics reach the platform — the one piece of wiring that ma
 
 [source,sh,role=execute]
 ----
-oc get servicemonitor parasol-claims -n $NS -o yaml | grep -A6 'endpoints:'
+oc get servicemonitor parasol-claims -n "${NS:?is empty - run the first block of this exercise again}" -o yaml | grep -A6 'endpoints:'
 ----
 
 .Expected output
@@ -238,6 +240,14 @@ You also saw the *ServiceMonitor* that scrapes `/q/metrics` every 10s — the si
 A dashboard only helps when someone is looking at it.
 An *alert* watches a metric for you and fires when it crosses a line.
 You author it as a *PrometheusRule* in your own namespace — user-workload monitoring scopes it to `{user}-dev`, so it is *your* alert, invisible to other tenants.
+
+Set this exercise's shortcuts (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+CLAIMS=http://parasol-claims-{user}-dev.{cluster_domain}
+----
 
 The rule below fires when the claims API's *server-error* (5xx) rate stays above 0.1/s for two minutes.
 At the healthy baseline the load generator produces only 404s (client errors), so the rule loads *armed but inactive* — exactly what you want.
@@ -342,7 +352,7 @@ Ask the engine through its tenancy rules port (`9093`), with your own token:
 ----
 curl -sk -G -H "Authorization: Bearer $(oc whoami -t)" \
   https://thanos-querier.openshift-monitoring.svc:9093/api/v1/rules \
-  --data-urlencode "namespace=$NS" \
+  --data-urlencode "namespace=${NS:?is empty - run the first block of this exercise again}" \
   | jq -r '.data.groups[].rules[] | "\(.name)  \(.state)  \(.health)"'
 ----
 
@@ -387,6 +397,14 @@ The link already pins *Source* to *User*; if the list ever looks empty, that fil
 Now earn the alert.
 The claims service depends on its database; take the database away and the API starts returning 500s.
 You will watch the alert climb out of that idle `-` — through *Pending* to *Firing* — and see how each of the three signals reads during a real fault.
+
+Set this exercise's shortcuts (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+CLAIMS=http://parasol-claims-{user}-dev.{cluster_domain}
+----
 
 Break it — scale the database to zero:
 
@@ -433,11 +451,11 @@ Run it from the terminal (it works whichever lane you picked) and watch the samp
 # often enough by the 10s scrape, to push rate(...[5m]) past 0.1/s:
 end=$(( $(date +%s) + 90 ))
 for w in $(seq 1 20); do
-  ( while [ "$(date +%s)" -lt "$end" ]; do curl -s -o /dev/null "$CLAIMS/api/claims"; done ) &
+  ( while [ "$(date +%s)" -lt "$end" ]; do curl -s -o /dev/null "${CLAIMS:?is empty - run the first block of this exercise again}/api/claims"; done ) &
 done
 # meanwhile, sample the status once a second so you can watch 200 -> 500:
 while [ "$(date +%s)" -lt "$end" ]; do
-  curl -s -o /dev/null -w 'GET /api/claims -> HTTP %{http_code}\n' "$CLAIMS/api/claims"
+  curl -s -o /dev/null -w 'GET /api/claims -> HTTP %{http_code}\n' "${CLAIMS:?is empty - run the first block of this exercise again}/api/claims"
   sleep 1
 done
 wait
@@ -521,17 +539,20 @@ oc scale deploy/claims-db -n $NS --replicas=1
 oc rollout status deploy/claims-db -n $NS
 oc rollout restart deploy/parasol-claims -n $NS
 oc rollout status deploy/parasol-claims -n $NS
+until [ -z "$(oc get pods -n $NS -l app=parasol-claims -o jsonpath='{.items[?(@.metadata.deletionTimestamp)].metadata.name}')" ]; do sleep 2; done
+sleep 10
 ----
 
-Give it a moment, then confirm the service is healthy again — *HTTP 200*.
+`rollout status` returns as soon as the new pod is ready, while the old one is still shutting down; the `until` line waits until it is gone, and `sleep 10` gives the router time to drop its address, so the next request reaches the new pod instead of returning a `503`.
+Now confirm the service is healthy again — *HTTP 200*.
 The alert does not clear the instant you recover: the 5-minute rate keeps counting the burst's 5xx until they age out of the window, so `ParasolClaimsErrorRateHigh` lingers in *Firing* for a few minutes after the fix — roughly five minutes past the spike — before it stands down and the row goes idle again.
 
 [source,sh,role=execute]
 ----
-curl -s -o /dev/null -w 'GET /api/claims -> HTTP %{http_code}\n' "$CLAIMS/api/claims"
+curl -s -o /dev/null -w 'GET /api/claims -> HTTP %{http_code}\n' "${CLAIMS:?is empty - run the first block of this exercise again}/api/claims"
 curl -sk -G -H "Authorization: Bearer $(oc whoami -t)" \
   https://thanos-querier.openshift-monitoring.svc:9093/api/v1/rules \
-  --data-urlencode "namespace=$NS" \
+  --data-urlencode "namespace=${NS:?is empty - run the first block of this exercise again}" \
   | jq -r '.data.groups[].rules[] | "\(.name)  \(.state)  \(.health)"'
 ----
 
@@ -606,9 +627,9 @@ Look again at `/q/metrics` from exercise 1: each counter line ends with an *exem
 That is a direct link from an aggregate metric to *one exact trace* that contributed to it.
 It is how you get from "the latency graph has a spike" to "*this* request is why" in one click, and it is the modern glue between the metrics and traces signals.
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
-curl -s "$CLAIMS/q/metrics" | grep -m1 'trace_id'
+curl -s http://parasol-claims-{user}-dev.{cluster_domain}/q/metrics | grep -m1 'trace_id'
 ----
 ====
 
@@ -637,6 +658,14 @@ You can explain, in one sentence, what a trace tells you that a metric cannot �
 The claims service runs at a fixed replica count.
 A *HorizontalPodAutoscaler (HPA)* changes that: it watches CPU utilization against the container's CPU *request* and adds replicas when the app is busy, removing them when it is idle.
 The entry state already set a CPU request (200m) on the app — that is the denominator the HPA needs.
+
+Set this exercise's shortcuts (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+CLAIMS=http://parasol-claims-{user}-dev.{cluster_domain}
+----
 
 Create an HPA that targets *60% CPU utilization*, floor *2* replicas, ceiling *4*:
 
@@ -707,7 +736,7 @@ The steady trickle from the built-in generator is not enough to move CPU, so add
 // gitops/entry-states/observability-health-scale/templates/load-generator.yaml.
 [source,sh,role=execute]
 ----
-oc -n $NS run claims-burst --restart=Never \
+oc -n "${NS:?is empty - run the first block of this exercise again}" run claims-burst --restart=Never \
   --image=registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19 \
   -- /bin/bash -c 'for i in $(seq 1 20); do ( while true; do \
     curl -s -o /dev/null http://parasol-claims:8080/api/claims/CLM-1001/history; \
@@ -866,6 +895,14 @@ Autoscaling handles load.
 Node *maintenance* is the other thing that moves your pods: every patch cycle, nodes are cordoned and drained.
 A *PodDisruptionBudget (PDB)* is the contract that stops a drain from taking your service down — "you may evict my pods, but never leave me fewer than one healthy."
 
+Set this exercise's shortcuts (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+CLAIMS=http://parasol-claims-{user}-dev.{cluster_domain}
+----
+
 Create the budget:
 
 [tabs]
@@ -896,7 +933,7 @@ CLI::
 // (only `ws reset`/`ws prep` do) — clear it first, safe even on a first run (no-op if absent):
 [source,sh,role=execute]
 ----
-oc delete pdb parasol-claims -n $NS --ignore-not-found=true
+oc delete pdb parasol-claims -n "${NS:?is empty - run the first block of this exercise again}" --ignore-not-found=true
 oc create pdb parasol-claims --selector=app=parasol-claims --min-available=1 -n $NS
 oc get pdb parasol-claims -n $NS
 ----
@@ -964,8 +1001,8 @@ Do the same, and time how long the wait is:
 
 [source,sh,role=execute]
 ----
-s=$SECONDS; until evict "$REFUSED" >/dev/null 2>&1; do sleep 2; [ $((SECONDS-s)) -lt 120 ] || break; done
-echo "$REFUSED admitted after $((SECONDS-s))s"
+s=$SECONDS; until evict "${REFUSED:?is empty - run the eviction block above again}" >/dev/null 2>&1; do sleep 2; [ $((SECONDS-s)) -lt 120 ] || break; done
+echo "${REFUSED:?is empty - run the eviction block above again} admitted after $((SECONDS-s))s"
 oc get deploy parasol-claims -n $NS
 oc get pdb parasol-claims -n $NS
 ----
