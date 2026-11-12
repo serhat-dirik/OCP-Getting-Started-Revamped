@@ -32,7 +32,16 @@ content/, the `asciidoc.attributes` of antora.yml and the three site playbooks, 
 and Antora's own intrinsics — and a name in that set is left alone. The correct escapes `%\\{name}`
 and `\\{name}` are never flagged either: the detector refuses a brace preceded by a backslash.
 
-FIXING A HIT. Escape it (`%\\{http_code}`, `\\{end}`), or — usually better for a jsonpath-heavy
+3. A REPLACEMENT subs list on the opener itself — `subs="attributes"` with no `+`. Found 2026-11-13
+     by the final content audit: a bare list REPLACES a listing block's default substitutions
+     (specialcharacters, callouts) instead of adding to them, so `<`, `>` and `&` reach the page
+     unescaped and the browser parses them as markup. `<none>` vanished, and a `<<EOF` heredoc
+     swallowed everything up to the next `>`: the whole values.yaml in packaging-distributing was
+     invisible, and click-to-run sent the attendee a truncated command. 415 openers carried it and
+     no guard noticed, because the build is rc=0 and the source reads correctly. `attributes+` keeps
+     the defaults and adds attribute substitution, which is what every one of them meant.
+
+FIXING A HIT. Write `subs="attributes+"` for a detector-3 hit. For the other two, escape it (`%\\{http_code}`, `\\{end}`), or — usually better for a jsonpath-heavy
 block — drop `subs="attributes"` from that block and use a shell variable instead of `{user}`.
 
 USAGE
@@ -222,6 +231,25 @@ def collect_defined_attributes(root: pathlib.Path) -> frozenset:
     return frozenset(names)
 
 
+SUBS_VALUE_RE = _compile("SUBS_VALUE_RE", r"""\bsubs\s*=\s*(?:"([^"]*)"|'([^']*)'|([^,\]]*))""")
+KEEPS_ESCAPING = frozenset({"specialchars", "specialcharacters", "verbatim", "normal"})
+
+
+def replaces_default_subs(opener: str) -> bool:
+    """True when the opener's subs list REPLACES the defaults and drops special-character escaping.
+
+    Asciidoctor applies a list incrementally as soon as ANY entry carries a + or - modifier; a list
+    with none replaces the defaults outright, so it escapes < > & only if it names them itself.
+    """
+    m = SUBS_VALUE_RE.search(opener)
+    if not m:
+        return False
+    items = [x.strip() for x in next(g for g in m.groups() if g is not None).split(",") if x.strip()]
+    if any(x[0] in "+-" or x[-1] in "+-" for x in items):
+        return False
+    return not (KEEPS_ESCAPING & set(items))
+
+
 def find_offenders(path: pathlib.Path, defined: frozenset):
     """Return (offenders, scope counters) for one file.
 
@@ -249,6 +277,8 @@ def find_offenders(path: pathlib.Path, defined: frozenset):
                 delim = lines[j].rstrip()
                 k = j + 1
                 counts["attribute-substitution blocks"] += 1
+                if replaces_default_subs(line):
+                    offenders.append((i + 1, "replace", "attributes"))
                 while k < n and lines[k].rstrip() != delim:
                     counts["block body lines inspected"] += 1
                     for m in REFERENCE_RE.finditer(lines[k]):
@@ -305,9 +335,9 @@ def scope_for_self_test() -> Scope:
     the walk reached inside the blocks."""
     scope = Scope("curl-format-guard --self-test")
     scope.require("files scanned", 1, "the canary fixture.")
-    scope.require("attribute-substitution blocks", 5,
-                  "the fixture declares five blocks (raised from four on 2026-08-01 with the "
-                  "INTRINSIC_ATTRIBUTES counter-case). The fixture is a DECLARED set, so the floor "
+    scope.require("attribute-substitution blocks", 6,
+                  "the fixture declares six blocks (five on 2026-08-01 with the INTRINSIC_ATTRIBUTES "
+                  "counter-case; six on 2026-11-13 with the replacement-subs case). The fixture is a DECLARED set, so the floor "
                   "is its exact size: shrinking it is an editorial act that must re-state itself.")
     scope.require("block body lines inspected", 9,
                   "the fixture's blocks are deliberately multi-line so a first-line-only scan is "
@@ -356,7 +386,11 @@ def main(argv=None):
             offenders += 1
             kinds_seen.add(kind)
             fired_lines.add(line_no)
-            if kind == "curl":
+            if kind == "replace":
+                print(f'{f}:{line_no}: subs="attributes" REPLACES the block\'s default substitutions, '
+                      f'so < > & are no longer escaped and the browser hides text such as <none> or '
+                      f'a <<EOF heredoc — write subs="attributes+"')
+            elif kind == "curl":
                 print(f'{f}:{line_no}: %{{{name}}} is inside a subs="attributes" block — '
                       f'escape as %\\{{{name}}}')
             else:
@@ -372,7 +406,7 @@ def main(argv=None):
 
     if args.self_test:
         failures = []
-        missing = {"curl", "attr"} - kinds_seen
+        missing = {"curl", "attr", "replace"} - kinds_seen
         if missing:
             failures.append(f"the canary fixture did not trigger the {sorted(missing)} detector(s).")
         failures += fixture_expectation_failures(files[0], fired_lines)
