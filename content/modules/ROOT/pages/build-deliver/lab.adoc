@@ -294,9 +294,10 @@ Push successful
 ====
 
 [TIP]
-.Why the first build is slow — and how real orgs speed it up
+.Where a Java build's time goes — and how real orgs keep it short
 ====
-Almost all of that wait is *Maven downloading the dependency tree from the public internet* (`repo1.maven.org`), not compiling — a cold build with an empty cache fetches hundreds of jars.
+Your build read every dependency from the workshop's in-cluster Maven mirror, which is why it finished in about a minute.
+On a cluster *without* a mirror, almost all of a first build's wait is *Maven downloading the dependency tree from the public internet* (`repo1.maven.org`), not compiling — a cold build with an empty cache fetches hundreds of jars.
 Two techniques an organization uses to make this fast, neither of which changes your code:
 
 * *An internal artifact repository (Maven mirror).*
@@ -443,11 +444,12 @@ S2I needed *nothing* from you but the source; the Docker path needed a hand-writ
 For most services, that is the whole argument for S2I — and the wrap-up returns to when the Docker path genuinely earns its keep.
 ====
 
-You do not need `claims-docker` past this comparison — clean it up so it does not clutter your project:
+You do not need `claims-docker` past this comparison — clean it up so it does not clutter your project.
+Naming the four kinds `oc new-app` created is more precise than the `all` shorthand, which also sweeps in the deprecated `DeploymentConfig` type and prints a deprecation warning for it:
 
 [source,sh,role=execute]
 ----
-oc delete all -l app=claims-docker
+oc delete deployment,service,buildconfig,imagestream -l app=claims-docker
 ----
 
 [.checkpoint]
@@ -489,7 +491,7 @@ else
 fi
 ----
 
-Watch it build — this one is quick, because the Node app uses only the standard library (no `npm install`):
+Watch it build — this one is quick: the builder still runs `npm install`, but the Node app uses only the standard library, so there is nothing for it to download:
 
 [source,sh,role=execute]
 ----
@@ -508,9 +510,12 @@ oc delete route parasol-notifications --ignore-not-found=true
 oc create route edge parasol-notifications --service=parasol-notifications --insecure-policy=Allow
 ----
 
+A Route the router has only just admitted answers `503 Application is not available` for a few seconds.
+`-f` makes curl treat that as a failure and keep it off your screen, and `--retry-all-errors` keeps retrying until the real answer arrives:
+
 [source,sh,role=execute,subs="attributes"]
 ----
-curl -s --retry 8 --retry-connrefused --retry-delay 2 http://parasol-notifications-{user}-dev.{cluster_domain}/health
+curl -sf --retry 30 --retry-all-errors --retry-delay 2 http://parasol-notifications-{user}-dev.{cluster_domain}/health
 ----
 
 .Expected output
@@ -520,7 +525,7 @@ curl -s --retry 8 --retry-connrefused --retry-delay 2 http://parasol-notificatio
 ----
 
 That is the polyglot point: *one build strategy* (S2I), *one workflow*, whatever the language.
-The platform picked the Node.js builder from the source, exactly as it picked Java for the claims service.
+You named the Node.js builder (`nodejs:22-ubi9~`) exactly as you named Java for the claims service (`java-21~`); everything after that choice — clone, assemble, push, deploy — was the same.
 
 [NOTE]
 .Prefer Python?
@@ -628,7 +633,7 @@ That match is the whole reason wiring is a single command in the next exercise: 
 
 [.checkpoint]
 ****
-✔ *Verify:* `oc get deployment claims-db` is Ready `1/1`, `oc get secret claims-db` exists, and `oc get deploymentconfig` reports *no resources* (Parasol uses Deployments only). That last command prints a deprecation notice about DeploymentConfig before its answer — that is the `oc` client's own output, not a sign you created one. *No resources found* is the result you want.
+✔ *Verify:* `oc get deployment claims-db` is Ready `1/1`, `oc get secret claims-db` exists, and `oc get deploymentconfig` reports *no resources* (Parasol uses Deployments only). That last command prints a deprecation notice about `DeploymentConfig` before its answer — that is the `oc` client's own output, not a sign you created one. *No resources found* is the result you want.
 ****
 
 == 5. Wire the claims service to its database
@@ -708,10 +713,11 @@ Click the Route's *Open URL* arrow in Topology — or curl its root — and you 
 
 [source,sh,role=execute,subs="attributes"]
 ----
-# no readiness probe yet (that's the next module) — retry while Quarkus finishes starting
+# -f + --retry-all-errors: retry quietly while the new Route is admitted and Quarkus
+# finishes starting (no readiness probe yet — that's the next module)
 # | jq -Sc . sorts keys: the JSON is correct either way, but the JVM does not
 # guarantee this object's own key order, so sorting is what makes it reproducible here
-curl -s --retry 10 --retry-connrefused --retry-delay 2 --retry-all-errors http://parasol-claims-{user}-dev.{cluster_domain}/ | jq -Sc .
+curl -sf --retry 30 --retry-all-errors --retry-delay 2 http://parasol-claims-{user}-dev.{cluster_domain}/ | jq -Sc .
 ----
 
 .Expected output
@@ -725,7 +731,7 @@ Follow the `claims` link to the data itself:
 
 [source,sh,role=execute,subs="attributes"]
 ----
-curl -s http://parasol-claims-{user}-dev.{cluster_domain}/api/claims | jq -c '.[0]'
+curl -sf --retry 30 --retry-all-errors --retry-delay 2 http://parasol-claims-{user}-dev.{cluster_domain}/api/claims | jq -c '.[0]'
 ----
 
 .Expected output

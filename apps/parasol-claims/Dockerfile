@@ -13,14 +13,14 @@
 # shipped image (fat builder in, lean runtime out).
 #
 # Base images pinned to the highest tag present in BOTH the builder and runtime
-# streams (1.23) so the two stages stay matched and the build is reproducible.
+# streams (1.24) so the two stages stay matched and the build is reproducible.
 #
 # The runtime stage runs as numeric non-root UID 185 under OpenShift's
 # restricted-v2 SCC (arbitrary UID, GID 0): the app writes nothing outside /tmp,
 # and /deployments is owned by group 0 so an injected random UID can still read it.
 
 ## --- Build stage: JDK 21 + Maven (UBI9 builder image). Runs as root; discarded. ---
-FROM registry.access.redhat.com/ubi9/openjdk-21:1.23 AS build
+FROM registry.access.redhat.com/ubi9/openjdk-21:1.24 AS build
 USER root
 WORKDIR /build
 
@@ -38,7 +38,7 @@ RUN if [ -n "$MAVEN_MIRROR_URL" ]; then \
     mvn -B -ntp -s /tmp/settings.xml -DskipTests clean package
 
 ## --- Runtime stage: JRE-only UBI9 image, non-root. ---
-FROM registry.access.redhat.com/ubi9/openjdk-21-runtime:1.23
+FROM registry.access.redhat.com/ubi9/openjdk-21-runtime:1.24
 ENV LANGUAGE='en_US:en'
 
 # Copy the fast-jar layout in cache-friendly order (libs change least, app most).
