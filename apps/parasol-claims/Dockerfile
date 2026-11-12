@@ -30,6 +30,8 @@ COPY src ./src
 # Produce the Quarkus fast-jar under target/quarkus-app/. Tests run in CI, not here.
 # Optional Maven repository mirror (a corporate Nexus/Artifactory, or the workshop's in-cluster
 # one): --build-arg MAVEN_MIRROR_URL=<url>. Empty, the default, resolves from Maven Central.
+# An OpenShift Docker-strategy build env var (oc new-app --build-env MAVEN_MIRROR_URL=<url>) works
+# too: the builder injects it as ENV after every FROM, and ENV wins over this ARG.
 ARG MAVEN_MIRROR_URL=""
 RUN if [ -n "$MAVEN_MIRROR_URL" ]; then \
       printf '<settings><mirrors><mirror><id>mirror.default</id><url>%s</url><mirrorOf>central</mirrorOf></mirror></mirrors></settings>' \
