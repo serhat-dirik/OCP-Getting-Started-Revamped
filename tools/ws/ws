@@ -755,6 +755,17 @@ purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve s
   # the next module's image pulls in this namespace, so purge it too.
   oc delete devworkspaces.workspace.devfile.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
   oc delete pipelineruns.tekton.dev --all -n "$ns" --wait=false >/dev/null 2>&1 || true
+  # Pipelines too: `kn func deploy --remote` (serverless-zero-to-hero) leaves its generated
+  # <fn>-s2i-upload-pipeline behind. Chart-owned Pipelines (pipelines-fundamentals,
+  # app-security-testing, trusted-supply-chain) come back when the entry state re-materializes.
+  oc delete pipelines.tekton.dev --all -n "$ns" --wait=false >/dev/null 2>&1 || true
+  # PAC Repositories are purged HERE, by the caller, never left to the entry app's cascade: Argo
+  # deletes with foreground propagation, and the Pipelines-as-Code webhook then refuses the garbage
+  # collector's finalizer removal ("generic-garbage-collector does not have permission to create
+  # PipelineRuns"), so the Repository sits in deletion forever and the re-materialized app waits on
+  # it until timeout (pipelines-fundamentals reset, measured 2026-11-12). A plain delete adds no
+  # finalizer. The chart's Repository comes back with the entry state.
+  oc delete repositories.pipelinesascode.tekton.dev --all -n "$ns" --wait=false >/dev/null 2>&1 || true
   oc delete imagepolicies.config.openshift.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
   # PodDisruptionBudgets aren't in `oc delete all`; an attendee's leftover observability-health-scale PDB
   # survives reset and then trips the next start's entry verify (found at M12 G1, 2026-07-11).
@@ -1059,6 +1070,11 @@ gc_conflicts_evict() {  # user module → rc 0 if anything was evicted or orphan
     app="$(app_name "$c" "$user")"
     if oc get application "$app" -n "$ARGO_NS" >/dev/null 2>&1; then
       info "evicting conflicting entry app ${app} (shares workloads with ${module})…"
+      # gc_conflicts reaches here BEFORE any purge, so take the PAC Repositories out first: left to
+      # the app's foreground cascade they wedge in deletion (see purge_ns).
+      for ns in $(meta_namespaces "$c" "$user"); do
+        oc delete repositories.pipelinesascode.tekton.dev --all -n "$ns" --wait=false >/dev/null 2>&1 || true
+      done
       oc delete application "$app" -n "$ARGO_NS" --wait=true --timeout=180s || true
       evicted=0
     else
