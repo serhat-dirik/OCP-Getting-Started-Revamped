@@ -31,6 +31,9 @@ include::partial$version-attributes.adoc[]
 // Source-block rule: subs="attributes" ONLY where {user}/{cluster_domain} must interpolate; blocks
 // using $NS / $CLAIMS shell vars or jsonpath {..} braces omit subs. Console labels I could not ground
 // from a screenshot in the build env are marked // CAPTURE-VERIFY for the media pass.
+// 2026-11-12, as user13 on OCP 4.22.22: exercise 6's instructor-run node drain is gone. Attendees evict
+// their own parasol-claims pods through the Eviction API under the PDB (4 replicas: 201, 201, 201,
+// then 429; the retry admitted after 13s, once a replacement was Ready). Captures in ex 6 are that run.
 // CORRECTION 2026-07-28 (grounded as user1 in an authenticated console): the alerting beat used to send
 // the reader to the CLUSTER-scoped Observe -> Alerting page (/monitoring/alertrules). That page reads a
 // cluster-scoped monitoring API an attendee is not granted — it answers 403 (verb=get,
@@ -857,7 +860,7 @@ That is correct behavior, not a stuck autoscaler.
 ****
 
 == 6. Survive a node drain with a PodDisruptionBudget
-⏱ *~6 min* · guarantee a minimum of healthy pods through voluntary disruption
+⏱ *~8 min* · put a floor under voluntary disruption, then drain your own pods through it
 
 Autoscaling handles load.
 Node *maintenance* is the other thing that moves your pods: every patch cycle, nodes are cordoned and drained.
@@ -915,19 +918,79 @@ parasol-claims   1               N/A               3                     1s
 The HorizontalPodAutoscaler from the previous exercise is likely still holding *four* replicas (the 5-minute scale-down window), so with `minAvailable: 1` the platform will let *three* be evicted at a time — never the last one.
 As the HPA settles back to the floor of *two*, that number falls to *one*: the budget is a live promise, not a fixed count.
 
-[IMPORTANT]
-.The node drain is an instructor-run demonstration
+Now test the budget the way a drain does.
+A drain never deletes pods outright: for each pod on the node it asks the *Eviction API*, and the API checks the pod's budget before it agrees.
+You can send that same request for your own pods, and nothing outside `{user}-dev` moves.
+Draining a real node would move every tenant's pods on it, which is why the node itself stays with the platform team.
+
+The block defines an `evict` helper that posts one `Eviction` (the request `oc adm drain` sends), then evicts every `parasol-claims` pod back to back, the worst case, as if all of them sat on the node being drained:
+
+[source,sh,role=execute]
+----
+evict() { echo '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"'"$1"'"}}' | oc create --raw /api/v1/namespaces/$NS/pods/$1/eviction -f -; local rc=$?; echo; return $rc; }
+REFUSED=""
+for P in $(oc get pod -n $NS -l app=parasol-claims -o jsonpath='{.items[*].metadata.name}'); do
+  echo "── evict $P"; evict $P || REFUSED=$P
+done
+oc get pdb parasol-claims -n $NS
+----
+
+.Expected output (four replicas here; with two, the first is admitted and the second refused)
+[%collapsible]
 ====
-Draining a real node moves *every* tenant's pods on it, so it is run once by the instructor against the shared cluster — do not drain a node yourself.
-Watch what happens to *your* service while they do: `oc get pods -n {user}-dev -w`.
-As the node drains, one `parasol-claims` pod is evicted and a replacement schedules elsewhere, but a second pod is *held* until the first replacement is healthy — the budget paces the drain so your claims API never drops below one serving pod.
-The mechanism is the eviction API refusing the disruptive request: on the build run, evicting past the budget returned `Cannot evict pod as it would violate the pod's disruption budget`.
+[source,texinfo]
+----
+── evict parasol-claims-5789dc744b-4g6cf
+{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Success","code":201}
+
+── evict parasol-claims-5789dc744b-b22jj
+{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Success","code":201}
+
+── evict parasol-claims-5789dc744b-c7wvt
+{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Success","code":201}
+
+── evict parasol-claims-5789dc744b-jg6dh
+Error from server (TooManyRequests): Cannot evict pod as it would violate the pod's disruption budget.
+
+NAME             MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+parasol-claims   1               N/A               0                     5s
+----
 ====
+
+Every pod but the last was admitted (`201`).
+Evicting the last one would have left no healthy pod, so the API refused it with `429 TooManyRequests`, and `ALLOWED DISRUPTIONS` fell to `0`.
+A drain that gets this answer does not fail: it waits and asks again.
+Do the same, and time how long the wait is:
+
+[source,sh,role=execute]
+----
+s=$SECONDS; until evict "$REFUSED" >/dev/null 2>&1; do sleep 2; [ $((SECONDS-s)) -lt 120 ] || break; done
+echo "$REFUSED admitted after $((SECONDS-s))s"
+oc get deploy parasol-claims -n $NS
+oc get pdb parasol-claims -n $NS
+----
+
+.Expected output (the wait is how long one replacement takes to become Ready)
+[%collapsible]
+====
+[source,texinfo]
+----
+parasol-claims-5789dc744b-jg6dh admitted after 13s
+NAME             READY   UP-TO-DATE   AVAILABLE   AGE
+parasol-claims   3/4     4            3           3m20s
+NAME             MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+parasol-claims   1               N/A               2                     19s
+----
+====
+
+An eviction removes a pod but leaves the Deployment's desired count where the autoscaler holds it, so the ReplicaSet replaced every evicted pod at once.
+The refused pod was admitted as soon as a replacement was Ready: the budget paced the drain to the speed your service recovers, and at no moment did it run with zero healthy pods.
 
 [.checkpoint]
 ****
-✔ *Verify:* `oc get pdb parasol-claims -n {user}-dev` shows `MIN AVAILABLE 1` and a non-zero `ALLOWED DISRUPTIONS`.
-You can state what the platform does when a drain would breach that budget — it *waits* rather than evicting the last healthy pod — and why that turns node maintenance from an outage risk into a routine operation.
+✔ *Verify:* `oc get pdb parasol-claims -n {user}-dev` shows `MIN AVAILABLE 1`.
+You evicted your own pods through the Eviction API: every one but the last was admitted (`201`), the last was refused (`429`) until a replacement was Ready, then admitted.
+You can say why that turns node maintenance from an outage risk into a routine operation: the drain *waits* rather than taking the last healthy pod.
 ****
 
 == Recap

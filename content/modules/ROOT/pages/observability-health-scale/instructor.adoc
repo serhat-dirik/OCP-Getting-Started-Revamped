@@ -28,7 +28,7 @@ The two long poles are the alert's fire delay (mostly waiting, filled with the l
 | 3 | Break it, watch the alert catch it | ~6 min | DB scale-to-0 *plus a 20-worker concurrent burst* → 5-min 5xx rate peaks ~*1.1/s* → alert *Pending* at *~50s*, *Firing* at *~170s* (~3 min total); deterministic with the *10s* scrape (the ~30s 5xx window spans ≥3 scrapes, so `rate()` sees a rising counter) — a gentle trickle or an edited-down serial loop banks too few 5xx to cross the line; recovery needs DB back *plus* an app restart (poisoned connection pool)
 | 4 | Follow a request with a trace | ~7 min | traces present in *Observe → Traces* within seconds of a request; steady-state request durations are single-digit ms (the N+1 cost is structural, not wall-clock — see Q4)
 | 5 | Autoscale under load with an HPA | ~7 min | burst drove CPU past *100%* every run (peaks *132–250%*); HPA reached the ceiling of *4* in *5 of 5* runs but took *42–115s* from `oc run` (42/47/70/83/115), often stepping *2 → 3 → 4*; the burst image does *not* pull — every node already has it, so the container is up *3–4s* — and the wait is the metrics path, *24–40s* before CPU first reads over 60% (re-measured 2026-08-14 as user5 on 4.22.8); settles *62–81%* at 4 replicas; scale-down held for the *5-min* stabilization window
-| 6 | Survive a node drain with a PodDisruptionBudget (PDB) | ~6 min | PDB create instant; `ALLOWED DISRUPTIONS` reflects `healthy − minAvailable`; the drain itself is your demo
+| 6 | Survive a node drain with a PodDisruptionBudget (PDB) | ~8 min | PDB create instant; `ALLOWED DISRUPTIONS` reflects `healthy − minAvailable`; evicting every claims pod back to back admits all but the last (`201`) and refuses the last (`429`); the retry is admitted after *~13s*, once one replacement is Ready (measured 2026-11-12 as user13 on 4.22.22, HPA still at 4)
 |===
 
 [NOTE]
@@ -243,6 +243,11 @@ Tell the room they are waiting on a scrape, or the pause reads as a broken exerc
 // gentle baseline by design and is not what drives this beat. The load comes from `claims-burst`,
 // which the attendee creates with a bare `oc run` and which therefore inherits the NAMESPACE
 // LimitRange default: recorded at limits.cpu 1500m and observed pegged at 1498-1507m.
+
+*6. "Why do I evict my own pods instead of draining a node — and did it break my service?"*::
+A drain is just a loop of Eviction requests, one per pod on the node, so evicting your own pods exercises exactly the check a drain relies on; draining a real node would move every tenant's pods, which is the platform team's call, not an exercise.
+The service was never left with zero healthy pods, but `minAvailable: 1` is a floor, not a zero-error promise: with all but one pod evicted at once, a caller going through the Route saw *4 failed of 60* requests on the build run while the router caught up.
+A real drain only evicts the pods on that one node, and a higher `minAvailable` (or more replicas) buys more headroom.
 
 == Watchouts
 
