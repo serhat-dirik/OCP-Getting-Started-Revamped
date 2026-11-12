@@ -15,7 +15,6 @@ Consumed by the workshop layer (`gitops/workshop-config`), not the portfolio —
 
 | Contract | Consumed by | Provided how |
 |---|---|---|
-| `htpasswd-workshop-users` Secret (ns `openshift-config`, key `htpasswd`) — bcrypt htpasswd file for the attendee identity provider | workshop-config `OAuth` CR (htpasswd IdP `workshop-users`) | `bootstrap/install.sh` (`htpasswd -B` for `user1..userN`) |
-| `workshop-user-creds` Secret (ns `ogsr-gitea`, key `password`) — shared attendee password for Gitea account seeding | workshop-config Gitea user-seed Job | `bootstrap/install.sh` |
+| `workshop-user-creds` Secret (ns `ogsr-gitea`, key `password`) — shared attendee password | workshop-config seed Jobs (Gitea, cluster sign-in in Keycloak) | `bootstrap/install.sh` |
 
 Sizing tiers and optional per-stack values land here as stacks grow. Rule: **no secrets in this directory, ever** — git holds shapes (`*.example.yaml`), consumers hold values.

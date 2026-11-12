@@ -12,8 +12,9 @@
 # `ws prep` detects leftovers and offers to WIPE them, so the silent order destroyed the wrong
 # attendee's world — and afterwards the wipe is indistinguishable from a normal prep, so there is no
 # way to tell it happened. The same last-wins shape was live in rebuild-images, maas show and maas
-# set in BOTH orders, and as a repeated `--user U --user V` in git-refresh, session-refresh and
-# passwd. Every one of those combinations is asserted below.
+# set in BOTH orders, and as a repeated `--user U --user V` in git-refresh and session-refresh
+# (passwd took --user too until it became cohort-wide only, 2026-11-12). Every one of those
+# combinations is asserted below.
 #
 #   bash tools/ws/ws-argparse-selftest.sh              → the shipped tools/ws/ws
 #                                                        (rc 0 contract holds · 1 broken · 2 could not inspect)
@@ -129,8 +130,6 @@ _run() {
       rebuild-images)
         need_oc() { :; }
         rebuild_begin() { echo "PARSE-OK user=${scope:-}"; exit 0; } ;;
-      passwd)
-        need_oc() { echo "PARSE-OK user=${target_user:-}"; exit 0; } ;;
       maas)
         need_oc() { echo "PARSE-OK user=${scope_user:-}"; exit 0; } ;;
     esac
@@ -295,7 +294,7 @@ run_suite() {
   expect_refusal conflict "maas set: --user then positional" \
     "two different attendees" "'user3'" "'user4'" -- maas set --user user4 user3
 
-  # 4. Repeated --user. Same shape, one spelling: git-refresh/session-refresh/passwd take no
+  # 4. Repeated --user. Same shape, one spelling: git-refresh/session-refresh take no
   #    positional user at all, so this is the only way to give them two disagreeing identities.
   expect_refusal conflict "prep: --user user3 --user user4" \
     "two different attendees" "'user3'" "'user4'" -- prep m07 --user user3 --user user4
@@ -303,15 +302,12 @@ run_suite() {
     "two different attendees" "'user3'" "'user4'" -- git-refresh --user user3 --user user4
   expect_refusal conflict "session-refresh: --user user3 --user user4" \
     "two different attendees" "'user3'" "'user4'" -- session-refresh --user user3 --user user4
-  expect_refusal conflict "passwd: --user user3 --user user4" \
-    "two different attendees" "'user3'" "'user4'" -- passwd --user user3 --user user4
   expect_refusal conflict "rebuild-images: --user user3 --user user4" \
     "two different attendees" "'user3'" "'user4'" -- rebuild-images --user user3 --user user4
   expect_accepted control "git-refresh: repeated --user AGREES" user3 \
     -- git-refresh --restart-terminals --user user3 --user user3
   expect_accepted control "session-refresh: repeated --user AGREES" user3 \
     -- session-refresh --user user3 --user user3
-  expect_accepted control "passwd: repeated --user AGREES" user3 -- passwd --user user3 --user user3
 
   # 5. --all-users is a SCOPE, and mixing it with a named attendee silently widened `ws start` from
   #    one attendee to the whole cohort. Its own message, because "two different attendees" is not
@@ -384,7 +380,7 @@ run_real() {  # → 0 contract holds, 1 broken, 2 nothing inspected
   fi
   pass "ws refuses two disagreeing attendee spellings on every verb that takes one (${R_OK} assertions):"
   echo "   both orders of positional-vs---user across prep/start/verify/smoke/reset/solve/doctor/status/diag,"
-  echo "   rebuild-images and maas show|set; repeated --user on git-refresh/session-refresh/passwd; --all-users"
+  echo "   rebuild-images and maas show|set; repeated --user on git-refresh/session-refresh; --all-users"
   echo "   mixed with a named attendee; a mistyped attendee token is named instead of dropped; and agreeing"
   echo "   spellings, --yes, --entry-only and the existing shape checks all still behave exactly as before."
   return 0

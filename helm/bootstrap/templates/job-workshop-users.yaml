@@ -1,15 +1,11 @@
-{{- if .Values.multi_user.manageHtpasswd }}
 # =============================================================================
-# Workshop users (Sync hook, wave -8) — the declarative twin of
-# bootstrap/install.sh's [2/6] steps 2a + 2a'. An htpasswd init container (ships
-# /usr/bin/htpasswd) builds the file into a MEMORY-backed emptyDir; the oc main container
-# creates the openshift-config htpasswd Secret from it and appends the `workshop-users`
-# HTPasswd IdP to oauth/cluster ONLY IF ABSENT (never a full-list server-side apply, which
-# would wipe a cluster's pre-existing IdPs). Records oauth_idp_ownedbyus so the uninstall
-# removes exactly the entry we added. # TODO(verify-on-cluster): htpasswd present on the
-# httpd image; OAuth JSON-patch indexes behave on the live singleton.
-# Disable (multi_user.manageHtpasswd=false) when the platform base CI already provisions the
-# userN htpasswd identities from the FSC multi_user roster.
+# Cluster sign-in + cluster config (Sync hook, wave -8) — the declarative twin of
+# bootstrap/install.sh's [2/6] cluster steps and its ogsr-idp-migrate.sh. Attendees sign in
+# through RHDP's Keycloak IdP (`rhbk`); workshop-config's cluster-idp-users hook keeps
+# user1..N in its realm. This Job only retires an older deploy's `workshop-users` HTPasswd
+# IdP (test+remove, never a full-list apply) and its Identities, so oauth-openshift has ONE
+# redirect-type IdP and every cockpit tab signs in inside its frame. A cluster with no
+# OpenID IdP is not an FSC target: use bootstrap/install.sh (it provisions one).
 # =============================================================================
 apiVersion: batch/v1
 kind: Job
@@ -32,95 +28,52 @@ spec:
     spec:
       serviceAccountName: ogsr-bootstrap
       restartPolicy: Never
-      volumes:
-        - name: handoff
-          emptyDir:
-            medium: Memory   # credential handoff between init + main, never on disk
-      initContainers:
-        - name: htpasswd-gen
-          image: {{ .Values.images.htpasswd }}
-          command: ["/bin/bash", "-c"]
-          env:
-            - name: USERS
-              value: {{ include "ogsr-bootstrap.userList" . | quote }}
-            # Non-secret shared workshop password by design (throwaway attendee logins).
-            - name: WS_PASS
-              value: {{ .Values.workshop_user_password | quote }}
-          args:
-            - |
-              set -euo pipefail
-              read -ra U <<< "$USERS"
-              first=1
-              for u in "${U[@]}"; do
-                if [[ "$first" == "1" ]]; then
-                  htpasswd -B -b -c /handoff/htpasswd "$u" "$WS_PASS" >/dev/null 2>&1
-                  first=0
-                else
-                  htpasswd -B -b /handoff/htpasswd "$u" "$WS_PASS" >/dev/null 2>&1
-                fi
-              done
-              echo "✅ built htpasswd for: $USERS"
-          volumeMounts:
-            - name: handoff
-              mountPath: /handoff
-          resources:
-            requests:
-              cpu: 100m
-              memory: 512Mi
-            limits:
-              memory: 512Mi
       containers:
         - name: apply
           image: {{ .Values.images.cli }}
           command: ["/bin/bash", "-c"]
           env:
-            - name: STATE_NS
-              value: {{ .Values.namespaces.system | quote }}
             - name: CONFIG_NS
               value: {{ .Values.namespaces.config | quote }}
-            - name: OWNER
-              value: {{ .Values.owner | quote }}
           args:
             - |
               set -euo pipefail
-              CM="ogsr-uninstall-state"
-              ok(){ echo "✅ $*"; }; info(){ echo "▶ $*"; }
-              record_once(){
-                local k="$1" v="$2" cur
-                cur="$(oc get configmap "$CM" -n "$STATE_NS" -o jsonpath="{.data['$k']}" 2>/dev/null || true)"
-                [[ -n "$cur" ]] && return 0
-                oc patch configmap "$CM" -n "$STATE_NS" --type merge -p "{\"data\":{\"$k\":\"$v\"}}" >/dev/null 2>&1 || true
-              }
+              ok(){ echo "✅ $*"; }
 
-              info "creating/updating htpasswd-workshop-users Secret (key must be 'htpasswd')"
-              oc create secret generic htpasswd-workshop-users \
-                --from-file=htpasswd=/handoff/htpasswd -n "$CONFIG_NS" \
-                --dry-run=client -o yaml \
-                | oc label --local -f - "workshop.redhat.com/owner=${OWNER}" --overwrite -o yaml \
-                | oc apply -f - >/dev/null
-              ok "htpasswd-workshop-users applied in ${CONFIG_NS}"
-
-              info "merging the 'workshop-users' IdP into oauth/cluster (append-if-absent)"
-              # Captured first, then matched via HERE-STRING — never `oc get … | grep -qw`. Under
-              # `set -o pipefail` a grep -q that matches early exits before the producer finishes;
-              # the producer dies of SIGPIPE and the pipeline reports 141, so a genuine match reads
-              # as a non-match. Here that would mean appending a SECOND workshop-users IdP to the
-              # OAuth singleton and recording oauth_idp_ownedbyus for an entry we did not create.
-              # Same class fixed across bootstrap/install.sh in c500a84.
-              _idp_names="$(oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}' 2>/dev/null || true)"
-              if grep -qw workshop-users <<< "$_idp_names"; then
-                record_once oauth_idp_ownedbyus false
-                ok "OAuth IdP 'workshop-users' already present — preserved"
-              else
-                IDP='{"name":"workshop-users","mappingMethod":"claim","type":"HTPasswd","htpasswd":{"fileData":{"name":"htpasswd-workshop-users"}}}'
-                if [[ -z "$(oc get oauth cluster -o jsonpath='{.spec.identityProviders}')" ]]; then
-                  oc patch oauth cluster --type=json -p "[{\"op\":\"add\",\"path\":\"/spec/identityProviders\",\"value\":[${IDP}]}]" >/dev/null
-                else
-                  oc patch oauth cluster --type=json -p "[{\"op\":\"add\",\"path\":\"/spec/identityProviders/-\",\"value\":${IDP}}]" >/dev/null
-                fi
-                record_once oauth_idp_ownedbyus true
-                ok "OAuth IdP 'workshop-users' appended (existing IdPs preserved)"
+              # Retire a legacy `workshop-users` HTPasswd IdP (same steps as bootstrap/ogsr-idp-migrate.sh):
+              # entry removed by test+remove, its Identities deleted and dropped from their Users (the
+              # next Keycloak sign-in claims the same User), its Secret deleted. Refuses to remove it
+              # when no OpenID IdP would remain.
+              names="$(oc get oauth cluster -o jsonpath='{range .spec.identityProviders[*]}{.name}{"\t"}{.type}{"\n"}{end}')"
+              idx=-1; i=0; openid=0
+              while IFS=$'\t' read -r n t; do
+                [[ -n "$n" ]] || continue
+                [[ "$n" == workshop-users && "$idx" -lt 0 ]] && idx="$i"
+                [[ "$t" == OpenID ]] && openid=$((openid + 1))
+                i=$((i + 1))
+              done <<< "$names"
+              if [[ "$idx" -ge 0 && "$openid" -ge 1 ]]; then
+                oc patch oauth cluster --type=json -p "[{\"op\":\"test\",\"path\":\"/spec/identityProviders/${idx}/name\",\"value\":\"workshop-users\"},{\"op\":\"remove\",\"path\":\"/spec/identityProviders/${idx}\"}]" >/dev/null
+                ok "removed legacy OAuth IdP 'workshop-users' (other IdPs untouched)"
+              elif [[ "$idx" -ge 0 ]]; then
+                echo "❌ legacy IdP 'workshop-users' kept: no OpenID IdP would remain (not an RHDP cluster?)"; exit 1
               fi
+              ids="$(oc get identities -o jsonpath='{range .items[?(@.providerName=="workshop-users")]}{.metadata.name}{"\t"}{.user.name}{"\n"}{end}')"
+              while IFS=$'\t' read -r id u; do
+                [[ -n "$id" ]] || continue
+                oc delete identity "$id" >/dev/null
+                if [[ -n "$u" ]] && oc get user "$u" >/dev/null 2>&1; then
+                  keep=""
+                  for x in $(oc get user "$u" -o jsonpath='{.identities[*]}'); do
+                    [[ "$x" == "$id" ]] || keep="${keep:+${keep},}\"${x}\""
+                  done
+                  oc patch user "$u" --type=merge -p "{\"identities\":[${keep}]}" >/dev/null
+                fi
+                ok "identity ${id} removed; user/${u} kept"
+              done <<< "$ids"
+              oc delete secret htpasswd-workshop-users -n "$CONFIG_NS" --ignore-not-found >/dev/null
+              _idps="$(oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}')"
+              ok "cluster sign-in providers: ${_idps:-none}"
 
               # ImageStream imports only from the workshop's registries (dedicated cluster). Same list
               # and reasoning as bootstrap/install.sh step 2a''; never registrySources.
@@ -142,13 +95,9 @@ spec:
               # at N-1 (bootstrap/install.sh step 2a'''' has the full reasoning).
               oc patch ingresscontroller/default -n openshift-ingress-operator --type=merge -p '{"spec":{"nodePlacement":{"tolerations":[{"key":"workshop.redhat.com/pool","operator":"Equal","value":"batch","effect":"NoSchedule"}]}}}' >/dev/null
               ok "router tolerates the batch-pool taint"
-          volumeMounts:
-            - name: handoff
-              mountPath: /handoff
           resources:
             requests:
               cpu: 100m
               memory: 512Mi
             limits:
               memory: 512Mi
-{{- end }}

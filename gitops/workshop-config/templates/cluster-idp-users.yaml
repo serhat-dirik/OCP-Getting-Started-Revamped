@@ -1,0 +1,218 @@
+{{- /*
+  cluster-idp-users — the attendees' cluster sign-in accounts, in the Keycloak realm behind the
+  cluster's ONE OpenID identity provider (owner decision 2026-11-12).
+
+  WHY KEYCLOAK AND ONLY KEYCLOAK. oauth-openshift is a passthrough route, so every page it renders
+  (the provider chooser, the HTPasswd form) is refused inside an iframe and the cockpit's Console,
+  Dev Spaces and Argo CD tabs go blank. With a single redirect-type IdP it only ever redirects; the
+  Keycloak login page sits behind the router's frame-header rewrite and renders in the frame, and its
+  SSO session signs every other tool in silently.
+
+  WHAT THIS JOB DOES, every sync (Sync hook, wave 2: before the wave-3 cockpits, like gitea-user-seed):
+    • reads the IdP entry `clusterIdp.idpName` from oauth/cluster → realm (issuer path) and clientID;
+    • provision=true only (a cluster with no Keycloak IdP, bootstrap/install.sh): creates that realm and
+      its confidential client from the openshift-config Secret install.sh minted;
+    • turns on direct access grants on that client if off (the cockpit terminal's `oc login -u -p` is a
+      password grant through this IdP) and records the original value as a client attribute, so
+      bootstrap/ogsr-uninstall.sh can put it back;
+    • user1..userN: created if absent (enabled, no required actions, names/email set so no profile page
+      appears), password = the shared workshop password (not temporary). Users it CREATES join group
+      ogsr-attendees; a user that already existed (RHDP ships user1) is used as is and never joins it,
+      so uninstall and shrink remove only what this Job made;
+    • members of ogsr-attendees no longer in the roster (scale-users shrink) are deleted.
+  Never deletes and recreates a user: the OpenShift Identity is rhbk:<keycloak user id>, so a new id
+  would no longer match the attendee's User.
+*/ -}}
+{{- if .Values.clusterIdp.enabled }}
+{{- $c := .Values.clusterIdp }}
+{{- $secrets := list $c.adminSecret "workshop-user-creds" }}
+{{- if $c.provision }}{{- $secrets = append $secrets $c.clientSecretName }}{{- end }}
+# Identity of the attendee-account seed job.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-idp-users
+  namespace: {{ .Values.systemNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+---
+# why: read the OAuth singleton and three Secrets BY NAME (Keycloak admin, workshop password, client).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ogsr-cluster-idp-users
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+rules:
+  - apiGroups: ["config.openshift.io"]
+    resources: ["oauths"]
+    resourceNames: ["cluster"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: {{ $secrets | toJson }}
+    verbs: ["get"]
+---
+# why: cluster-wide binding because the Secrets live in namespaces this app cannot deploy into (keycloak).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ogsr-cluster-idp-users
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ogsr-cluster-idp-users
+subjects:
+  - kind: ServiceAccount
+    name: cluster-idp-users
+    namespace: {{ .Values.systemNamespace }}
+---
+# Idempotent: every attendee has a cluster sign-in account with the workshop password.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cluster-idp-users
+  namespace: {{ .Values.systemNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 1200
+  template:
+    spec:
+      serviceAccountName: cluster-idp-users
+      restartPolicy: Never
+      containers:
+        - name: seed
+          image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+          resources:
+            # oc needs headroom: 256Mi OOMKilled sso-realm-admin-seed on cluster-5vqxc (2026-11-12).
+            requests: {cpu: 10m, memory: 256Mi}
+            limits: {memory: 512Mi}
+          env:
+            - name: IDP_NAME
+              value: {{ $c.idpName | quote }}
+            - name: ADMIN_SECRET
+              value: {{ $c.adminSecret | quote }}
+            - name: ADMIN_NS
+              value: {{ $c.adminSecretNamespace | quote }}
+            - name: KC
+              value: {{ $c.url | quote }}
+            - name: PROVISION
+              value: {{ $c.provision | toString | quote }}
+            - name: CLIENT_SECRET_NAME
+              value: {{ $c.clientSecretName | quote }}
+            - name: CALLBACK
+              value: "https://oauth-openshift.{{ .Values.clusterDomain }}/oauth2callback/{{ $c.idpName }}"
+            - name: USERS
+              value: "{{ range $i := until (int .Values.userCount) }}{{ $.Values.userPrefix }}{{ add1 $i }} {{ end }}"
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              IDP="$(oc get oauth cluster -o jsonpath="{.spec.identityProviders[?(@.name==\"${IDP_NAME}\")].openID}")"
+              [[ -n "$IDP" ]] || { echo "❌ oauth/cluster has no OpenID IdP named ${IDP_NAME} — re-run bootstrap/install.sh"; exit 1; }
+              KC_ADMIN="$(oc get secret "$ADMIN_SECRET" -n "$ADMIN_NS" -o jsonpath='{.data.username}' | base64 -d)"
+              KC_PASS="$(oc get secret "$ADMIN_SECRET" -n "$ADMIN_NS" -o jsonpath='{.data.password}' | base64 -d)"
+              WS_PASS="$(oc get secret workshop-user-creds -n {{ .Values.giteaNamespace }} -o jsonpath='{.data.password}' | base64 -d)"
+              CLIENT_SECRET=""
+              if [[ "$PROVISION" == "true" ]]; then
+                CLIENT_SECRET="$(oc get secret "$CLIENT_SECRET_NAME" -n openshift-config -o jsonpath='{.data.clientSecret}' | base64 -d)"
+              fi
+              export IDP KC_ADMIN KC_PASS WS_PASS CLIENT_SECRET
+              exec python3 - <<'PY'
+              import json, os, time, urllib.error, urllib.parse, urllib.request
+              idp = json.loads(os.environ["IDP"])
+              issuer, client_id = idp["issuer"].rstrip("/"), idp["clientID"]
+              KC, realm = issuer.split("/realms/")[0], issuer.split("/realms/")[1]
+              KC = os.environ["KC"] or KC
+              R = f"/admin/realms/{realm}"
+              def call(method, path, token=None, body=None, form=None):
+                  data, headers = None, {}
+                  if form is not None:
+                      data = urllib.parse.urlencode(form).encode()
+                      headers["Content-Type"] = "application/x-www-form-urlencoded"
+                  elif body is not None:
+                      data = json.dumps(body).encode()
+                      headers["Content-Type"] = "application/json"
+                  if token:
+                      headers["Authorization"] = "Bearer " + token
+                  req = urllib.request.Request(KC + path, data=data, headers=headers, method=method)
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      raw = r.read()
+                      return json.loads(raw) if raw else None
+              def token():
+                  return call("POST", "/realms/master/protocol/openid-connect/token", form={
+                      "grant_type": "password", "client_id": "admin-cli",
+                      "username": os.environ["KC_ADMIN"], "password": os.environ["KC_PASS"]})["access_token"]
+              for attempt in range(60):  # a freshly installed Keycloak may still be starting
+                  try:
+                      tok = token(); break
+                  except Exception as e:
+                      print(f"… waiting for Keycloak admin API at {KC} ({e.__class__.__name__})"); time.sleep(10)
+              else:
+                  raise SystemExit(f"❌ Keycloak admin API at {KC} never answered")
+              if os.environ["PROVISION"] == "true":
+                  try:
+                      call("GET", R, tok)
+                  except urllib.error.HTTPError as e:
+                      if e.code != 404: raise
+                      call("POST", "/admin/realms", tok, {"realm": realm, "enabled": True})
+                      print(f"  ✓ realm {realm} created")
+                  if not call("GET", f"{R}/clients?clientId={urllib.parse.quote(client_id)}", tok):
+                      call("POST", f"{R}/clients", tok, {
+                          "clientId": client_id, "enabled": True, "publicClient": False,
+                          "secret": os.environ["CLIENT_SECRET"], "standardFlowEnabled": True,
+                          "directAccessGrantsEnabled": True, "redirectUris": [os.environ["CALLBACK"]]})
+                      print(f"  ✓ client {client_id} created in {realm}")
+              clients = call("GET", f"{R}/clients?clientId={urllib.parse.quote(client_id)}", tok)
+              if not clients:
+                  raise SystemExit(f"❌ realm {realm} has no client {client_id} (the IdP {os.environ['IDP_NAME']} points at it)")
+              client = clients[0]
+              if not client.get("directAccessGrantsEnabled"):
+                  client.setdefault("attributes", {}).setdefault("ogsr.directAccessGrantsEnabled.original", "false")
+                  client["directAccessGrantsEnabled"] = True
+                  call("PUT", f"{R}/clients/{client['id']}", tok, client)
+                  print(f"  ✓ {client_id}: direct access grants ON (was off; recorded for uninstall)")
+              groups = call("GET", f"{R}/groups?search=ogsr-attendees&exact=true", tok) or []
+              if not [g for g in groups if g["name"] == "ogsr-attendees"]:
+                  call("POST", f"{R}/groups", tok, {"name": "ogsr-attendees"})
+                  groups = call("GET", f"{R}/groups?search=ogsr-attendees&exact=true", tok)
+              gid = [g for g in groups if g["name"] == "ogsr-attendees"][0]["id"]
+              roster = os.environ["USERS"].split()
+              for user in roster:
+                  q = urllib.parse.quote(user)
+                  found = call("GET", f"{R}/users?username={q}&exact=true", tok)
+                  if not found:
+                      call("POST", f"{R}/users", tok, {
+                          "username": user, "enabled": True, "emailVerified": True, "requiredActions": [],
+                          "email": f"{user}@parasol.example", "firstName": user, "lastName": "Attendee"})
+                      found = call("GET", f"{R}/users?username={q}&exact=true", tok)
+                      call("PUT", f"{R}/users/{found[0]['id']}/groups/{gid}", tok)
+                      state = "created"
+                  else:
+                      u = found[0]
+                      if not u.get("enabled") or u.get("requiredActions"):
+                          u["enabled"], u["requiredActions"] = True, []
+                          call("PUT", f"{R}/users/{u['id']}", tok, u)
+                      state = "present"
+                  call("PUT", f"{R}/users/{found[0]['id']}/reset-password", tok,
+                       {"type": "password", "value": os.environ["WS_PASS"], "temporary": False})
+                  print(f"  ✓ {realm}/{user} {state} (password = workshop password, not shown)")
+              for m in call("GET", f"{R}/groups/{gid}/members?max=1000", tok) or []:
+                  if m["username"] not in roster:
+                      call("DELETE", f"{R}/users/{m['id']}", tok)
+                      print(f"  ✓ {realm}/{m['username']} deleted (no longer in the roster)")
+              print(f"✅ {len(roster)} attendee(s) can sign in through {os.environ['IDP_NAME']} (realm {realm})")
+              PY
+{{- end }}

@@ -2,7 +2,7 @@
 # Workshop bootstrap — the thin layer ON TOP of the workshop-agnostic platform portfolio.
 # It does the imperative, workshop-specific things the portfolio must never know about:
 #   1. install the mapped portfolio stacks (core-devtools [+ ai-assist])
-#   2. create the secret CONTRACTS (htpasswd users, MaaS token, shared Gitea password)
+#   2. create the secret CONTRACTS (cluster sign-in IdP, MaaS token, shared Gitea password)
 #   3. wait for the in-cluster Gitea mirror (git-localize, D15) to be ready
 #   4. materialize the workshop layer (users, RBAC, quotas, AppProject, IdP, Gitea seeding)
 #      as ONE Argo CD Application sourced from the LOCAL mirror — the git-localize payoff
@@ -32,7 +32,6 @@ die()  { err "$*"; exit 1; }
 # ── preflight: tooling + vars file ────────────────────────────────────────────
 command -v oc >/dev/null || die "oc not found in PATH"
 command -v yq >/dev/null || die "yq not found — install it (brew install yq / dnf install yq); mikefarah/go yq v4 syntax expected"
-command -v htpasswd >/dev/null || die "htpasswd not found — install it (brew install httpd / dnf install httpd-tools)"
 command -v openssl >/dev/null || die "openssl not found — needed to generate/handle passwords"
 [[ -f "$VARS" ]] || die "missing ${VARS} — copy vars.example.yaml to vars.yaml and fill it in"
 [[ -x "$PORTFOLIO_INSTALL" ]] || die "portfolio installer not found/executable: ${PORTFOLIO_INSTALL}"
@@ -1050,11 +1049,36 @@ record_once nodes_zoned "${SHAPE_NODES[*]:-}"
 # dead without the controller. The Rollouts CRDs ship with GitOps, which HID the gap — the CR
 # applies cleanly and then nothing reconciles it (QA gate, 2026-07-18: greenfield installs
 # shipped a dead M11 on both install paths).
+# Cluster sign-in (owner decision 2026-11-12): attendees sign in through the cluster's ONE Keycloak
+# OpenID IdP, so oauth-openshift only ever redirects and every cockpit tab signs in inside its frame
+# (its own pages — chooser, HTPasswd form — are refused in a frame). Found = an OpenID IdP whose issuer
+# host is a Route in front of a Keycloak CR with a readable <name>-initial-admin Secret (RHDP: `rhbk`,
+# realm sso). None found → the workshop provisions its own (IdP ogsr-sso, realm ogsr in sso-workshop),
+# which needs the auth stack. workshop-config's cluster-idp-users hook keeps user1..N in that realm.
+CIDP_NAME=""; CIDP_SECRET=""; CIDP_SECRET_NS=""; CIDP_URL=""; CIDP_PROVISION="false"
+while IFS=$'\t' read -r _n _iss; do
+  [[ -n "$_n" ]] || continue
+  _host="${_iss#https://}"; _host="${_host%%/*}"
+  _ns="$(oc get route -A -o jsonpath="{range .items[?(@.spec.host==\"${_host}\")]}{.metadata.namespace}{\"\n\"}{end}" 2>/dev/null | head -1)"
+  [[ -n "$_ns" ]] || continue
+  _kc="$(oc get keycloaks.k8s.keycloak.org -n "$_ns" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  { [[ -n "$_kc" ]] && oc get secret "${_kc}-initial-admin" -n "$_ns" >/dev/null 2>&1; } || continue
+  CIDP_NAME="$_n"; CIDP_SECRET="${_kc}-initial-admin"; CIDP_SECRET_NS="$_ns"
+  break
+done < <(oc get oauth cluster -o jsonpath='{range .spec.identityProviders[?(@.type=="OpenID")]}{.name}{"\t"}{.openID.issuer}{"\n"}{end}' 2>/dev/null || true)
+if [[ -z "$CIDP_NAME" || "$CIDP_NAME" == "ogsr-sso" ]]; then
+  CIDP_NAME="ogsr-sso"; CIDP_SECRET="sso-workshop-initial-admin"; CIDP_SECRET_NS="sso-workshop"
+  CIDP_URL="http://sso-workshop-service.sso-workshop.svc:8080"; CIDP_PROVISION="true"
+  ok "cluster sign-in: no Keycloak IdP found — the workshop provisions its own (IdP ogsr-sso, realm ogsr; auth stack)"
+else
+  ok "cluster sign-in: attendees join IdP '${CIDP_NAME}' (Keycloak in ${CIDP_SECRET_NS})"
+fi
+
 STACKS="core-devtools,batch,progressive-delivery"
 [[ "$LIGHTSPEED" == "true" && "$LIGHTSPEED_PREINSTALLED" == "false" ]] && STACKS="${STACKS},ai-assist"
 # auth stack (Red Hat build of Keycloak) for securing-apps-keycloak. Workshop-agnostic; per-user realms are seeded by the
 # workshop layer below (sso.enabled). Its own OwnNamespace operator never touches a cluster login IdP.
-[[ "$AUTH" == "true" ]] && STACKS="${STACKS},auth"
+[[ "$AUTH" == "true" || "$CIDP_PROVISION" == "true" ]] && STACKS="${STACKS},auth"
 # resilience stack (OADP/Velero + in-cluster NooBaa S3) for resilience-multicluster-dr. Opt-in; PREREQ ODF/MCG for the S3 target.
 # The RHSI (Skupper v2) add-on stays commented out in the stack unless the catalog offers channel stable-2.
 [[ "$RESILIENCE" == "true" ]] && STACKS="${STACKS},resilience"
@@ -1150,42 +1174,39 @@ PORTFOLIO_DESTS=(--allow-destination 'user*' --allow-destination openshift)
 # ── 2. secret contracts (imperative by design; never in git) ──────────────────
 info "[2/6] creating secret contracts"
 
-# 2a. htpasswd secret for the console/CLI IdP. Secret key MUST be 'htpasswd' (OpenShift contract).
-HTP_FILE="$(mktemp)"; trap 'rm -f "$HTP_FILE"' EXIT
-htpasswd -B -b -c "$HTP_FILE" "${USER_PREFIX}1" "$WS_PASS" >/dev/null 2>&1
-i=2
-while [[ "$i" -le "$USERS" ]]; do
-  htpasswd -B -b "$HTP_FILE" "${USER_PREFIX}${i}" "$WS_PASS" >/dev/null 2>&1
-  i=$((i + 1))
-done
-oc create secret generic htpasswd-workshop-users \
-  --from-file=htpasswd="$HTP_FILE" -n openshift-config \
-  --dry-run=client -o yaml | owner_stamp | oc apply -f - >/dev/null
-ok "htpasswd-workshop-users (openshift-config) — ${USERS} users"
-
-# 2a'. Merge the workshop IdP into the OAuth SINGLETON imperatively (append-if-absent).
-# Deliberately NOT GitOps-managed: clusters arrive with pre-existing IdPs (this RHDP cluster
-# has an 'rhbk' OpenID provider backing the admin login) and a forced server-side apply from
-# Argo would replace the atomic identityProviders list — locking everyone out.
-# Captured first, then matched via here-string — never `oc get ... | grep -qw`: with more than one
-# existing IdP this list is not guaranteed to be one short line forever, and the same
-# SIGPIPE-under-pipefail trap documented in resolve_slug() applies to any producer piped into an
-# early-exiting grep -q.
-_idp_names="$(oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}' 2>/dev/null || true)"
-if grep -qw "workshop-users" <<< "$_idp_names"; then
-  # first-write-wins: only records false if WE did not already claim ownership on an earlier run.
-  record_once oauth_idp_ownedbyus false
-  ok "OAuth IdP 'workshop-users' already present"
-else
-  IDP_JSON='{"name":"workshop-users","mappingMethod":"claim","type":"HTPasswd","htpasswd":{"fileData":{"name":"htpasswd-workshop-users"}}}'
-  if [[ -z "$(oc get oauth cluster -o jsonpath='{.spec.identityProviders}')" ]]; then
-    oc patch oauth cluster --type=json -p "[{\"op\":\"add\",\"path\":\"/spec/identityProviders\",\"value\":[${IDP_JSON}]}]" >/dev/null
-  else
-    oc patch oauth cluster --type=json -p "[{\"op\":\"add\",\"path\":\"/spec/identityProviders/-\",\"value\":${IDP_JSON}}]" >/dev/null
+# 2a. The workshop's own Keycloak IdP — only on a cluster that has none (CIDP_PROVISION, decided above).
+# Appended to the OAuth SINGLETON imperatively (append-if-absent), never a GitOps apply: clusters arrive
+# with pre-existing IdPs and a forced apply would replace the atomic identityProviders list. The client
+# secret is minted once and reused; the realm and client are created by the cluster-idp-users hook.
+# The IdP points at keycloak-sso-workshop.<domain> (the auth stack's host-less Route). If that host's
+# certificate is the operator's self-signed ingress cert, the IdP carries the ingress CA so
+# oauth-openshift trusts it.
+if [[ "$CIDP_PROVISION" == "true" ]]; then
+  if ! oc get secret ogsr-sso-client -n openshift-config >/dev/null 2>&1; then
+    oc create secret generic ogsr-sso-client -n openshift-config \
+      --from-literal=clientSecret="$(openssl rand -hex 24)" --dry-run=client -o yaml | owner_stamp | oc apply -f - >/dev/null
   fi
-  # WE appended it — uninstall removes exactly this entry (preserving any other IdPs).
-  record_once oauth_idp_ownedbyus true
-  ok "OAuth IdP 'workshop-users' appended (existing IdPs preserved)"
+  _idp_names="$(oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}' 2>/dev/null || true)"
+  if grep -qw "ogsr-sso" <<< "$_idp_names"; then
+    ok "OAuth IdP 'ogsr-sso' already present"
+  else
+    _ca=""
+    if [[ -z "$(oc get ingresscontroller default -n openshift-ingress-operator -o jsonpath='{.spec.defaultCertificate.name}' 2>/dev/null)" ]]; then
+      oc create configmap ogsr-sso-ca -n openshift-config \
+        --from-literal=ca.crt="$(oc get configmap default-ingress-cert -n openshift-config-managed -o jsonpath='{.data.ca-bundle\.crt}')" \
+        --dry-run=client -o yaml | owner_stamp | oc apply -f - >/dev/null
+      _ca=',"ca":{"name":"ogsr-sso-ca"}'
+    fi
+    IDP_JSON="{\"name\":\"ogsr-sso\",\"mappingMethod\":\"claim\",\"type\":\"OpenID\",\"openID\":{\"clientID\":\"openshift\",\"clientSecret\":{\"name\":\"ogsr-sso-client\"},\"issuer\":\"https://keycloak-sso-workshop.${DOMAIN}/realms/ogsr\",\"claims\":{\"preferredUsername\":[\"preferred_username\"],\"name\":[\"name\"],\"email\":[\"email\"]}${_ca}}}"
+    if [[ -z "$(oc get oauth cluster -o jsonpath='{.spec.identityProviders}')" ]]; then
+      oc patch oauth cluster --type=json -p "[{\"op\":\"add\",\"path\":\"/spec/identityProviders\",\"value\":[${IDP_JSON}]}]" >/dev/null
+    else
+      oc patch oauth cluster --type=json -p "[{\"op\":\"add\",\"path\":\"/spec/identityProviders/-\",\"value\":${IDP_JSON}}]" >/dev/null
+    fi
+    # WE appended it — uninstall removes exactly this entry (preserving any other IdPs).
+    record_once oauth_cidp_ownedbyus true
+    ok "OAuth IdP 'ogsr-sso' appended (existing IdPs preserved; realm + attendees come with the workshop layer)"
+  fi
 fi
 
 # 2a''. ImageStream imports only from the registries the workshop uses (dedicated cluster, INSTALL.md §6).
@@ -1529,6 +1550,17 @@ spec:
         # Seed per-user realm-{user} imports only when the auth stack is installed (securing-apps-keycloak).
         - name: sso.enabled
           value: "${AUTH}"
+        # Cluster sign-in realm the cluster-idp-users hook keeps user1..N in (discovered above).
+        - name: clusterIdp.idpName
+          value: "${CIDP_NAME}"
+        - name: clusterIdp.adminSecret
+          value: "${CIDP_SECRET}"
+        - name: clusterIdp.adminSecretNamespace
+          value: "${CIDP_SECRET_NS}"
+        - name: clusterIdp.url
+          value: "${CIDP_URL}"
+        - name: clusterIdp.provision
+          value: "${CIDP_PROVISION}"
         # Console plugins (backlog #24) — ON by default; vars.yaml console_plugins: false opts out.
         - name: consolePlugins.enabled
           value: "${CONSOLE_PLUGINS}"
@@ -1622,6 +1654,19 @@ wait_for_workshop_layer_healthy() {
 
 info "[6/6] waiting for workshop-config to become Healthy (up to 10m)…"
 wait_for_workshop_layer_healthy || true
+
+# ── 6b. one sign-in option only ───────────────────────────────────────────────
+# Attendees exist in the Keycloak realm now (cluster-idp-users ran in that sync), so an older install's
+# HTPasswd IdP can go without a gap. Anything ELSE left beside the Keycloak IdP brings back
+# oauth-openshift's chooser page, which no cockpit frame can show.
+if [[ "${WORKSHOP_LAYER_OK:-true}" == "true" ]]; then
+  "${SCRIPT_DIR}/ogsr-idp-migrate.sh" || WORKSHOP_LAYER_OK=false
+fi
+_other_idps="$(oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}' 2>/dev/null | tr ' ' '\n' | grep -vx "$CIDP_NAME" | grep -vx workshop-users | xargs || true)"
+oc get secret kubeadmin -n kube-system >/dev/null 2>&1 && _other_idps="${_other_idps:+${_other_idps} }kube:admin"
+if [[ -n "$_other_idps" ]]; then
+  warn "other sign-in options remain beside '${CIDP_NAME}': ${_other_idps} — oauth-openshift shows a chooser page and the cockpit's Console/Dev Spaces/Argo CD tabs cannot sign in inside their frame. On a cluster dedicated to the workshop, remove them (INSTALL.md §6)."
+fi
 
 # ── credentials summary + next steps ──────────────────────────────────────────
 CONSOLE_URL="$(oc whoami --show-console 2>/dev/null || true)"

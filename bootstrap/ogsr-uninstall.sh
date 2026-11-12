@@ -609,6 +609,22 @@ capture_attendee_users() {  # main calls this ONCE, before step 1 — same reaso
   return 0
 }
 
+# ── cluster sign-in realm, captured before step 3's cascade removes workshop-config ───────────────
+# Attendees sign in through the cluster's Keycloak IdP; workshop-config's cluster-idp-users hook put
+# user1..N in its realm (members of group ogsr-attendees = the ones IT created) and may have turned on
+# direct access grants on the IdP's client (original value kept as a client attribute). The realm is
+# named by workshop-config's clusterIdp.* parameters, read here while the Application still exists.
+CIDP_NAME="rhbk"; CIDP_SECRET="keycloak-initial-admin"; CIDP_SECRET_NS="keycloak"; CIDP_URL=""
+capture_cluster_idp() {
+  local p v
+  p="$(oc get application workshop-config -n "$ARGO_NS" -o jsonpath='{range .spec.source.helm.parameters[*]}{.name}={.value}{"\n"}{end}' 2>/dev/null || true)"
+  v="$(sed -n 's/^clusterIdp\.idpName=//p' <<< "$p")"; [[ -n "$v" ]] && CIDP_NAME="$v"
+  v="$(sed -n 's/^clusterIdp\.adminSecret=//p' <<< "$p")"; [[ -n "$v" ]] && CIDP_SECRET="$v"
+  v="$(sed -n 's/^clusterIdp\.adminSecretNamespace=//p' <<< "$p")"; [[ -n "$v" ]] && CIDP_SECRET_NS="$v"
+  CIDP_URL="$(sed -n 's/^clusterIdp\.url=//p' <<< "$p")"
+  return 0
+}
+
 operator_package() {  # <subname> <ns> → its OLM package from the component manifests
   # Falls back to the Subscription name, which is what every subscription*.yaml in this portfolio
   # uses. Exists so callers that only have (name, namespace) — assert_adopted_protection reads the
@@ -1936,6 +1952,70 @@ del_ns_fast() {  # ns — delete a namespace classify already confirmed exists (
 }
 
 # ── reverse the imperative bootstrap mutations ────────────────────────────────
+remove_keycloak_attendees() {  # delete the realm users cluster-idp-users CREATED; restore the client setting it changed
+  # Only group ogsr-attendees members (users that existed before, e.g. RHDP's user1, never joined it) and
+  # only the attribute-recorded client change: nothing else of the cluster's Keycloak is touched.
+  if [[ -n "$CIDP_URL" ]]; then
+    echo "   • skip Keycloak attendees: realm lives in the workshop's own Keycloak (removed with the auth stack)"; return 0
+  fi
+  local issuer kc realm cid u p tok gid ids id client orig
+  issuer="$(oc get oauth cluster -o jsonpath="{.spec.identityProviders[?(@.name==\"${CIDP_NAME}\")].openID.issuer}" 2>/dev/null || true)"
+  cid="$(oc get oauth cluster -o jsonpath="{.spec.identityProviders[?(@.name==\"${CIDP_NAME}\")].openID.clientID}" 2>/dev/null || true)"
+  if [[ -z "$issuer" ]]; then echo "   • skip Keycloak attendees: no OpenID IdP '${CIDP_NAME}' on oauth/cluster"; return 0; fi
+  kc="${issuer%%/realms/*}"; realm="${issuer##*/realms/}"; realm="${realm%/}"
+  u="$(oc get secret "$CIDP_SECRET" -n "$CIDP_SECRET_NS" -o jsonpath='{.data.username}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+  p="$(oc get secret "$CIDP_SECRET" -n "$CIDP_SECRET_NS" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+  if [[ -z "$u" || -z "$p" ]]; then
+    err "Keycloak admin Secret ${CIDP_SECRET_NS}/${CIDP_SECRET} unreadable — attendees stay in realm ${realm}; delete group ogsr-attendees' members there by hand"; return 1
+  fi
+  # Credentials travel through process substitution, never argv or the screen.
+  tok="$(curl -sS --fail "${kc}/realms/master/protocol/openid-connect/token" --data grant_type=password --data client_id=admin-cli \
+    --data-urlencode username@<(printf '%s' "$u") --data-urlencode password@<(printf '%s' "$p") 2>/dev/null | yq -p json '.access_token' 2>/dev/null || true)"
+  unset p
+  if [[ -z "$tok" || "$tok" == "null" ]]; then err "Keycloak admin API at ${kc} refused the admin login — attendees stay in realm ${realm}"; return 1; fi
+  kcapi() { curl -sS --fail -H @<(printf 'Authorization: Bearer %s' "$tok") "$@"; }
+  gid="$(kcapi "${kc}/admin/realms/${realm}/groups?search=ogsr-attendees&exact=true" 2>/dev/null | yq -p json '.[] | select(.name == "ogsr-attendees") | .id' 2>/dev/null || true)"
+  if [[ -n "$gid" ]]; then
+    ids="$(kcapi "${kc}/admin/realms/${realm}/groups/${gid}/members?max=1000" 2>/dev/null | yq -p json '.[] | .id + " " + .username' 2>/dev/null || true)"
+    while read -r id un; do
+      [[ -n "$id" ]] || continue
+      if [[ "$DRY_RUN" == "true" ]]; then echo "   • WOULD delete ${realm}/${un}"; continue; fi
+      kcapi -X DELETE "${kc}/admin/realms/${realm}/users/${id}" >/dev/null && ok "deleted ${realm}/${un} (created by the workshop)"
+    done <<< "$ids"
+    [[ "$DRY_RUN" == "true" ]] || kcapi -X DELETE "${kc}/admin/realms/${realm}/groups/${gid}" >/dev/null
+  else
+    echo "   • no group ogsr-attendees in realm ${realm} — no workshop-created accounts"
+  fi
+  client="$(kcapi "${kc}/admin/realms/${realm}/clients?clientId=${cid}" 2>/dev/null | yq -p json -o json '.[0]' 2>/dev/null || true)"
+  orig=""
+  [[ -n "$client" ]] && orig="$(yq -p json '.attributes["ogsr.directAccessGrantsEnabled.original"] // ""' <<< "$client" 2>/dev/null || true)"
+  if [[ -n "$orig" ]]; then
+    if [[ "$DRY_RUN" == "true" ]]; then echo "   • WOULD restore ${cid}: directAccessGrantsEnabled=${orig}"; return 0; fi
+    yq -p json -o json ".directAccessGrantsEnabled = ${orig} | del(.attributes[\"ogsr.directAccessGrantsEnabled.original\"])" <<< "$client" \
+      | kcapi -X PUT -H 'Content-Type: application/json' --data-binary @- "${kc}/admin/realms/${realm}/clients/$(yq -p json '.id' <<< "$client")" >/dev/null \
+      && ok "restored ${cid}: directAccessGrantsEnabled=${orig}"
+  fi
+  return 0
+}
+
+remove_ogsr_sso_idp() {  # the workshop's own Keycloak IdP (clusters that had none): entry + its Secret/CA
+  [[ "$(state oauth_cidp_ownedbyus)" == "true" ]] || return 0
+  local names n idx=-1 i=0
+  names="$(oc get oauth cluster -o jsonpath='{range .spec.identityProviders[*]}{.name}{"\n"}{end}' 2>/dev/null || true)"
+  while IFS= read -r n; do
+    if [[ "$n" == "ogsr-sso" ]]; then idx="$i"; break; fi
+    i=$((i + 1))
+  done <<< "$names"
+  if [[ "$DRY_RUN" == "true" ]]; then echo "   • WOULD remove OAuth IdP 'ogsr-sso' (index ${idx}) + openshift-config/ogsr-sso-client, ogsr-sso-ca"; return 0; fi
+  if [[ "$idx" -ge 0 ]]; then
+    oc patch oauth cluster --type=json -p "[{\"op\":\"test\",\"path\":\"/spec/identityProviders/${idx}/name\",\"value\":\"ogsr-sso\"},{\"op\":\"remove\",\"path\":\"/spec/identityProviders/${idx}\"}]" >/dev/null
+    ok "removed OAuth IdP 'ogsr-sso' (other IdPs preserved)"
+  fi
+  oc delete secret ogsr-sso-client -n openshift-config --ignore-not-found >/dev/null
+  oc delete configmap ogsr-sso-ca -n openshift-config --ignore-not-found >/dev/null
+  return 0
+}
+
 remove_oauth_idp() {  # remove ONLY the workshop-users IdP entry, preserving every other identity provider
   local owned names n idx i backing
   owned="$(state oauth_idp_ownedbyus)"
@@ -2531,7 +2611,7 @@ print_plan() {
   echo "    — most are pruned by the cascade; step 10 deletes any Argo did not manage, and waits."
   echo "  • Dev Spaces namespaces auto-provisioned for our attendees (<username>-devspaces, step 4) —"
   if [[ -n "${ATTENDEE_USERS// /}" ]]; then
-    echo "    matched against $(printf '%s' "${ATTENDEE_USERS}" | wc -w | tr -d ' ') usernames this install created (Group/workshop-attendees + htpasswd-workshop-users);"
+    echo "    matched against $(printf '%s' "${ATTENDEE_USERS}" | wc -w | tr -d ' ') usernames this install created (Group/workshop-attendees, + a legacy htpasswd secret);"
     echo "    a Dev Spaces namespace belonging to anyone else is the org's and is never touched"
   else
     echo "    no attendee usernames captured — nothing here is authorized for removal"
@@ -2550,7 +2630,9 @@ print_plan() {
     echo "      - <the owned-CRD capture did not run; step 2 will delete nothing>"
   fi
   echo "  • the argo controller ClusterRoleBinding + ClusterRoles (applied imperatively by argocd-bootstrap)"
-  echo "  • imperative bootstrap objects: htpasswd-workshop-users, workshop-users OAuth IdP entry, node labels/taint"
+  echo "  • attendee sign-in accounts the workshop created in Keycloak realm behind IdP '${CIDP_NAME}' (group ogsr-attendees),"
+  echo "    and that realm client's direct-access-grants setting if the workshop changed it; the workshop's own"
+  echo "    IdP 'ogsr-sso' if it added one; a legacy workshop-users IdP + htpasswd secret; node labels/taint"
   echo "  • console plugins WE added to consoles.operator.openshift.io (backlog #24): $(state console_plugins_added '<none recorded>')"
   echo "  • operators WE created:${created:-<none recorded>}"
   echo "  • their ClusterServiceVersions — OLM creates a CSV from a Subscription and Argo never manages"
@@ -2991,6 +3073,8 @@ restore_argocd_controller_resources() {
 
 step_reverse_cluster_mutations() {  # 5 — the imperative, cluster-global changes install.sh made
   sub remove_oauth_idp
+  sub remove_keycloak_attendees
+  sub remove_ogsr_sso_idp
   sub remove_console_plugins
   sub del_obj secret htpasswd-workshop-users openshift-config
   sub handle_lightspeed
@@ -3318,6 +3402,7 @@ capture_installed_csvs
 # namespace as ours. Read-only, so it also runs in --dry-run.
 info "capturing attendee usernames before the cascade can remove Group/workshop-attendees"
 capture_attendee_users
+capture_cluster_idp
 
 info "verifying adopted-resource protection (the cascade's one safety assumption)"
 assert_adopted_protection
@@ -3373,7 +3458,7 @@ run_step "[4/10] removing Dev Spaces namespaces auto-provisioned for our attende
 run_step "[5/10] removing CSVs for operators we created (adopted operators preserved)" \
   cleanup_created_operators
 
-run_step "[6/10] reversing imperative cluster mutations (OAuth IdP, console plugins, monitoring, nodes, htpasswd)" \
+run_step "[6/10] reversing imperative cluster mutations (sign-in, console plugins, monitoring, nodes)" \
   step_reverse_cluster_mutations
 
 run_step "[7/10] Gateway API" step_gateway_api
@@ -3409,7 +3494,7 @@ cat <<'VERIFY'
      # can remove them, and a leftover here is a whole product still running with nothing managing it
      # (measured: TektonConfig alive with 18 pods and a bound 1Gi PVC after a "successful" teardown):
      oc get tektonconfig 2>/dev/null   # expect: no resources — unless the org installed Pipelines themselves
-     oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}'; echo       # expect: workshop-users absent
+     oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}'; echo       # expect: workshop-users, ogsr-sso absent
      oc get consoles.operator.openshift.io cluster -o jsonpath='{.spec.plugins}'; echo  # expect: names WE added absent, everything else preserved
      # Adopted operators must still be Present/Succeeded:
      oc get csv -A | grep -Ev 'ogsr'                             # org operators intact

@@ -43,7 +43,7 @@
 #     Job, its ServiceAccount and its Role behind.
 #
 # ── WHAT IS NEVER TOUCHED ────────────────────────────────────────────────────────────────────────
-# Nobody is removed and nothing is uninstalled. Logins, htpasswd, the OAuth IdP, User/Identity
+# Nobody is removed and nothing is uninstalled. Logins, Keycloak sign-in accounts, the OAuth IdP, User/Identity
 # objects, the workshop-attendees group, userCount, Keycloak and its per-user realms, every operator
 # and platform-portfolio stack, the shared ogsr-* layer, and every admin-supplied credential (MaaS
 # key, shared workshop password, Gitea/Keycloak admin credentials) are all left exactly as they are.
@@ -233,7 +233,7 @@ echo "  • per-user entry-hook leftovers (Jobs/SA/Role/RoleBinding) in ${GITEA_
 echo "  • each attendee's terminal HOME (ogsr-term-<user>): the pod restarts, then the home is emptied"
 echo
 echo "WILL KEEP — untouched:"
-echo "  • every attendee: login, htpasswd entry, User/Identity, workshop-attendees membership"
+echo "  • every attendee: login, Keycloak sign-in account, User/Identity, workshop-attendees membership"
 echo "  • every per-user namespace SHELL, with its quota, LimitRange and workshop-owned RBAC"
 echo "  • Gitea itself and every attendee ACCOUNT; the canonical parasol/* repos and the git mirror"
 echo "  • Keycloak and every per-user realm (realm-<user> in ${SSO_NS})"

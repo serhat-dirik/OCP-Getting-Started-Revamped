@@ -208,7 +208,7 @@ this exact regex against the live cluster and reports the mismatch with the real
 {{/*
 Space-separated attendee usernames. Uses the explicit FSC roster
 (multi_user.users[].username) when provided, else userPrefix1..num_users.
-Consumed by the workshop-users Job to build the htpasswd file.
+Published in the userinfo ConfigMap (workshop_users).
 */}}
 {{- define "ogsr-bootstrap.userList" -}}
 {{- $names := list -}}

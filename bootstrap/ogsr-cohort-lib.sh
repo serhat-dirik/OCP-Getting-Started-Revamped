@@ -358,7 +358,7 @@ sweep_gitea_hook_leftovers() {  # <user…> — clear per-user entry-hook object
 # rather than `-u user:pass`, so it never appears in the process table of a shared bastion.
 #
 # WHY THIS MATTERS MORE THAN IT LOOKS. A SonarQube attendee account is `local: true`: it authenticates
-# against SonarQube's own user table and needs no OpenShift identity, no htpasswd line and no Gitea
+# against SonarQube's own user table and needs no OpenShift identity, no Keycloak account and no Gitea
 # account behind it. Removing every cluster-side trace of an attendee therefore does NOT disarm their
 # SonarQube login — it is the one working credential a wiped attendee keeps.
 SONAR_HOST=""

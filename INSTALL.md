@@ -98,8 +98,8 @@ Both floors exist for one module, `deployment-targets-scheduling`:
    cd OCP-Getting-Started-Revamped
    ```
 
-2. **Check your tools:** `oc`, `git`, `yq` (mikefarah v4), `htpasswd` (`httpd-tools`, or
-   `brew install httpd`), `openssl`. The installer stops with a clear message if one is missing.
+2. **Check your tools:** `oc`, `git`, `yq` (mikefarah v4), `openssl`. The installer stops with a clear
+   message if one is missing.
 
 3. **Log in as cluster-admin.** Use a kubeconfig file of its own, so other terminals and tools keep
    pointing where they were:
@@ -393,11 +393,12 @@ oc get ns <name> -o jsonpath='{range .status.conditions[*]}{.type}={.status}: {.
 
 | Tool | Login |
 |---|---|
-| OpenShift console | `userN` + workshop password, **workshop-users** provider |
+| OpenShift console, Dev Spaces, Argo CD | `userN` + workshop password on the Keycloak sign-in page |
 | Gitea, SonarQube | Same pair (SonarQube is readable without login) |
 | Argo CD (attendee) | Through the cockpit link |
 
 SonarQube rejects the login → its seed job did not run: `oc logs job/sonarqube-user-seed -n sonarqube --tail=20`.
+Keycloak rejects the login → `oc logs job/cluster-idp-users -n ogsr-system --tail=20`.
 Re-syncing `workshop-config` re-runs it.
 
 ### AI steps fail with auth errors
@@ -458,7 +459,10 @@ Expected. There is no MetalLB, on purpose. Everything is exposed through Routes.
 The workshop installs only on a dedicated, fresh cluster (`dedicated_cluster: true`). Besides the
 operators and the workshop's own namespaces, it changes these cluster-wide settings:
 
-- **Identity:** adds an htpasswd identity provider with the attendee accounts to `oauth/cluster`.
+- **Identity:** attendees sign in through the cluster's Keycloak identity provider (RHDP: `rhbk`); the
+  install adds `user1..userN` to its realm. A cluster without one gets the workshop's own (`ogsr-sso`,
+  auth stack). Keep no other identity provider and no `kubeadmin`: OpenShift then shows a chooser page,
+  and the cockpit's Console, Dev Spaces and Argo CD tabs cannot sign in inside their frame.
 - **Nodes:** labels every node with a synthetic zone (`workshop.redhat.com/zone`) and labels and taints
   one worker as the batch pool (`workshop.redhat.com/pool=batch:NoSchedule`).
 - **Console:** enables the operators' console plugins.

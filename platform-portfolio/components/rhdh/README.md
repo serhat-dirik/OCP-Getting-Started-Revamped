@@ -24,11 +24,9 @@ attendees read the shared catalog and run the template. It needs
 `NODE_ENV=production` (the guest provider refuses to start otherwise). Verified live 2026-07-11: guest
 token issues, catalog + scaffolder APIs work.
 
-**Hardening path (documented, not wired):** OpenShift OAuth sign-in — attendees are OpenShift HTPasswd
-users, so `auth.providers.<oidc/oauth2Proxy>` against the cluster OAuth server maps them to Backstage
-identities. Deferred: guest is sufficient for the catalog-browse + scaffold flow and far more robust for
-a short workshop. Do **not** reuse the cluster's `rhbk` `sso` realm (attendees aren't in it; it backs
-cluster login).
+**Hardening path (documented, not wired):** OpenShift OAuth sign-in — `auth.providers.<oidc/oauth2Proxy>`
+against the cluster OAuth server maps OpenShift users to Backstage identities. Deferred: guest is
+sufficient for the catalog-browse + scaffold flow and far more robust for a short workshop.
 
 ## Gitea: in-cluster service address (no host injection)
 

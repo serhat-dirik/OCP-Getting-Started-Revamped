@@ -66,7 +66,7 @@ Sizing, every option and troubleshooting: **[INSTALL.md](INSTALL.md)**.
 * OpenShift **4.20+**, `cluster-admin`, a default StorageClass, `linux/amd64` workers.
   Red Hat SAs: order [**Field Sourced Content - OpenShift Base**](https://catalog.demo.redhat.com/catalog/babylon-catalog-prod?item=babylon-catalog-prod/published.ocp-field-asset.prod)
   with **3 workers or more** ([how many](INSTALL.md#sizing)).
-* On your machine: `oc`, `git`, `yq`, `htpasswd`, `openssl`.
+* On your machine: `oc`, `git`, `yq`, `openssl`.
 * Optional, for OpenShift Lightspeed and M06's AI batch-inference step: an OpenAI-compatible model endpoint and key.
 
 **1. Clone**

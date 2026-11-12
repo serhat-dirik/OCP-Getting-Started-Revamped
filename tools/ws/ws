@@ -15,7 +15,7 @@
 #   adm session-refresh --all|--user U SA/admin: re-mint attendee logins before a session (no restart)
 #   adm doctor [--user U]            environment sanity: login, argo, gitea, operators, image drift
 #                                    (--user narrows the cohort-wide rows to one attendee)
-#   adm passwd [--user U] [NEWPASS]  SA/admin: rotate the shared workshop login password (cohort-wide)
+#   adm passwd [NEWPASS]          SA/admin: rotate the shared workshop login password (cohort-wide)
 #   adm cohort-reset [--yes] [--restart-terminals]  SA/admin: wipe ALL per-user state (keeps platform)
 #   adm scale-users N [--yes]        SA/admin: grow/shrink the workshop cohort to N users
 #   adm preflight                    SA/admin: pre-install readiness + adoption forecast (run before install)
@@ -3581,14 +3581,20 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
   #
   # rc≠0 without "Forbidden" (no OAuth CR at all) still reads as missing, so cluster-admin — the identity
   # that can actually answer this — grades ✅/❌ exactly as before.
+  # ONE OpenID (Keycloak) IdP and nothing else: a second IdP brings back oauth-openshift's chooser page,
+  # which no cockpit frame can show (Console/Dev Spaces/Argo CD tabs go blank).
   local idp_out idp_rc=0
-  idp_out="$(oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}' 2>&1)" || idp_rc=$?
+  idp_out="$(oc get oauth cluster -o jsonpath='{range .spec.identityProviders[*]}{.name}:{.type} {end}' 2>&1)" || idp_rc=$?
   if [[ "$idp_rc" -ne 0 ]] && printf '%s' "$idp_out" | grep -qi forbidden; then
     unknown "not checked (needs cluster-admin; you logged in, so it works)"
-  elif [[ "$idp_rc" -eq 0 ]] && printf '%s' "$idp_out" | grep -qw workshop-users; then
-    ok "workshop-users present"
+  elif [[ "$idp_rc" -ne 0 ]] || ! grep -q ':OpenID' <<< "$idp_out"; then
+    nok "no Keycloak (OpenID) IdP — re-run bootstrap/install.sh"; fail=1
+  elif grep -qw 'workshop-users:HTPasswd' <<< "$idp_out"; then
+    nok "legacy workshop-users IdP still present — run bootstrap/ogsr-idp-migrate.sh"; fail=1
+  elif [[ "$(wc -w <<< "$idp_out" | tr -d ' ')" -gt 1 ]]; then
+    nok "several sign-in options (${idp_out% }) — a chooser page breaks the cockpit's embedded tabs; keep only the Keycloak one"; fail=1
   else
-    nok "IdP missing — bootstrap adds it"; fail=1
+    ok "single sign-in: ${idp_out%%:*} (Keycloak)"
   fi
   printf "  %-28s" "image import allowlist"
   # bootstrap/install.sh step 2a'' limits ImageStream imports to the workshop's registries; without it
@@ -3776,144 +3782,53 @@ live_user_count() {  # → workshop-config Application's LIVE userCount helm par
     -o jsonpath='{.spec.source.helm.parameters[?(@.name=="userCount")].value}' 2>/dev/null || true
 }
 
-cmd_passwd() {  # SA/admin: rotate the shared workshop login password. Whole-cohort by default; --user U
-  # rotates ONLY that user's OpenShift console/CLI (OAuth) login. Grounded mechanism (2026-07-17): the
-  # shared password lives in the htpasswd-workshop-users secret (openshift-config, key 'htpasswd', bcrypt)
-  # that the 'workshop-users' OAuth IdP already references, AND the gitea workshop-user-creds secret (key
-  # 'password', used for Gitea seeding + student-Argo login). We rewrite the secrets with the SAME
-  # idempotent create|apply pattern bootstrap uses and leave the IdP wiring intact (bootstrap owns it).
-  # The workshop password is NON-SECRET by policy, so we print the new value once — NEVER the bcrypt hash.
-  local target_user="" newpass="" generated="false"
+cmd_passwd() {  # SA/admin: rotate the shared workshop login password for the whole cohort. The password
+  # lives in ONE place, the workshop-user-creds secret (Gitea ns, key 'password'); every account that uses
+  # it is re-seeded from there by workshop-config's Sync hooks: cluster-idp-users (the cluster sign-in, in
+  # Keycloak), gitea-user-seed, sso-realm-admin-seed. So: rewrite the secret, run a workshop-config sync
+  # operation, and confirm the cluster-idp-users Job finished. Per-user passwords do not exist any more —
+  # the next sync would reset one. NON-SECRET by policy, so the new value is printed once.
+  local newpass="" generated="false"
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --user)
-        [[ $# -ge 2 ]] || die "passwd: --user needs a value (e.g. user3)"
-        require_user_token "$2" "passwd --user"
-        # passwd's bare positional is NEWPASS, not a user, so this gate is about the REPEATED flag.
-        user_conflict_guard "$target_user" "$2" "passwd"
-        target_user="$2"; shift 2 ;;
-      -*) die "passwd: unknown option '$1' — usage: ${WS_CMD} passwd [--user userN] [NEWPASS]" ;;
+      -*) die "passwd: unknown option '$1' — usage: ${WS_CMD} passwd [NEWPASS] (cohort-wide; per-user passwords are not supported)" ;;
       *)
         if [[ -z "$newpass" ]]; then newpass="$1"; shift
-        else die "passwd: unexpected extra argument '$1' — usage: ${WS_CMD} passwd [--user userN] [NEWPASS]"; fi ;;
+        else die "passwd: unexpected extra argument '$1' — usage: ${WS_CMD} passwd [NEWPASS]"; fi ;;
     esac
   done
   need_oc
-  command -v htpasswd >/dev/null || die "htpasswd not found — install httpd-tools (brew install httpd / dnf install httpd-tools)"
   command -v openssl  >/dev/null || die "openssl not found — needed to generate/handle passwords"
+  oc get application workshop-config -n "$ARGO_NS" >/dev/null 2>&1 \
+    || die "workshop-config Application not found in ${ARGO_NS} — is the workshop layer installed? (${WS_CMD} doctor)"
 
-  local users_str users_arr
-  users_str="$(workshop_users)"
-  read -ra users_arr <<< "$users_str"
-
-  # Validate --user against the authoritative group before mutating anything.
-  if [[ -n "$target_user" ]]; then
-    local found="false" gu
-    for gu in "${users_arr[@]}"; do [[ "$gu" == "$target_user" ]] && found="true"; done
-    [[ "$found" == "true" ]] || die "passwd: ${target_user} is not in the workshop-attendees group (${users_str})"
-  fi
-
-  # Soft cross-check group size vs workshop-config's LIVE userCount helm parameter (the authoritative
-  # "what Argo will render" value — the repo's values.yaml default goes stale the moment anyone runs
-  # `ws scale-users`, which never touches that file). Falls back to the repo default only if the
-  # Application itself can't be read. The live GROUP remains what actually governs this command below.
-  local want_n; want_n="$(live_user_count || true)"
-  [[ -n "$want_n" ]] || want_n="$(repo_user_count || true)"
-  [[ -n "$want_n" && "$want_n" != "${#users_arr[@]}" ]] \
-    && info "note: group has ${#users_arr[@]} user(s) but workshop-config's userCount=${want_n} (group wins) — see: ${WS_CMD} status"
-
-  # Resolve the new password (generate a strong random one, bootstrap-style, when none was given). The
-  # tr/cut pipeline yields up-to-16 JSON-safe alnum chars — identical to bootstrap's generator.
+  # A strong random one, bootstrap-style, when none was given: up-to-16 JSON-safe alnum chars.
   if [[ -z "$newpass" ]]; then
     newpass="$(openssl rand -base64 12 | tr -dc 'A-Za-z0-9' | cut -c1-16)"
     [[ -n "$newpass" ]] || die "failed to generate a random password (openssl)"
     generated="true"
   fi
 
-  # Build the bcrypt htpasswd file. Whole-cohort: regenerate every user's line with the new password.
-  # --user: preserve every OTHER user's EXISTING line verbatim (no plaintext needed) and re-issue ONLY
-  # the target's — so a single-user rotate never disturbs the rest of the cohort's console logins.
-  local htp; htp="$(mktemp)"; trap 'rm -f "$htp"' EXIT
-  if [[ -z "$target_user" ]]; then
-    info "rotating the shared workshop password for all ${#users_arr[@]} user(s)…"
-    htpasswd -B -b -c "$htp" "${users_arr[0]}" "$newpass" >/dev/null 2>&1 || die "htpasswd failed for ${users_arr[0]}"
-    local u
-    for u in "${users_arr[@]:1}"; do
-      htpasswd -B -b "$htp" "$u" "$newpass" >/dev/null 2>&1 || die "htpasswd failed for $u"
-    done
-  else
-    info "rotating ONLY ${target_user}'s console login (preserving the other users' entries)…"
-    local cur line
-    cur="$(oc get secret htpasswd-workshop-users -n openshift-config -o jsonpath='{.data.htpasswd}' 2>/dev/null | base64 -d || true)"
-    [[ -n "$cur" ]] || die "htpasswd-workshop-users secret not found/empty in openshift-config — run bootstrap first"
-    : > "$htp"
-    while IFS= read -r line; do
-      [[ -n "$line" ]] || continue
-      [[ "$line" == "${target_user}:"* ]] && continue
-      printf '%s\n' "$line" >> "$htp"
-    done <<< "$cur"
-    htpasswd -B -b "$htp" "$target_user" "$newpass" >/dev/null 2>&1 || die "htpasswd failed for $target_user"
-  fi
-
-  # Replace the secrets (idempotent create|apply — the exact bootstrap pattern). The OAuth IdP already
-  # references htpasswd-workshop-users, so it is deliberately NOT re-patched. Gitea's shared password is
-  # updated ONLY on a whole-cohort rotate: a single-user console change must not move the cohort-shared
-  # Gitea/student-Argo secret (which has one value for everyone).
-  oc create secret generic htpasswd-workshop-users \
-    --from-file=htpasswd="$htp" -n openshift-config \
+  info "rotating the shared workshop password for the whole cohort…"
+  oc create secret generic workshop-user-creds \
+    --from-literal=password="$newpass" -n "${GITEA_NS}" \
     --dry-run=client -o yaml | oc apply -f - >/dev/null
-  ok "htpasswd-workshop-users (openshift-config) updated"
-  if [[ -z "$target_user" ]]; then
-    oc create secret generic workshop-user-creds \
-      --from-literal=password="$newpass" -n "${GITEA_NS}" \
-      --dry-run=client -o yaml | oc apply -f - >/dev/null
-    ok "workshop-user-creds (ogsr-gitea/password) updated"
-  fi
+  ok "workshop-user-creds (${GITEA_NS}/password) updated"
+  sync_app_operation workshop-config
+  wait_healthy workshop-config 600 true
 
-  # Verify wiring (never print hashes): every user present in the secret + the IdP still points at it.
-  # We CANNOT test the console login itself — the OAuth browser flow is not scriptable — so this checks
-  # the secret contents + IdP reference only, which is what actually gates a successful attendee login.
+  # The hook Job is the proof: it reset every attendee's Keycloak password and printed one line each.
+  local jst
+  jst="$(oc get job cluster-idp-users -n ogsr-system -o jsonpath='{.status.succeeded}' 2>/dev/null || true)"
   echo
-  info "verifying…"
-  local dec missing="" present=0 vu passwd_verify_bad=0
-  dec="$(oc get secret htpasswd-workshop-users -n openshift-config -o jsonpath='{.data.htpasswd}' 2>/dev/null | base64 -d || true)"
-  for vu in "${users_arr[@]}"; do
-    if grep -q "^${vu}:" <<< "$dec"; then present=$((present+1)); else missing="${missing} ${vu}"; fi
-  done
-  if [[ -z "$missing" ]]; then ok "htpasswd secret carries all ${present}/${#users_arr[@]} users"; else err "htpasswd secret MISSING:${missing}"; passwd_verify_bad=1; fi
-  if oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}' 2>/dev/null | grep -qw workshop-users; then
-    ok "OAuth IdP 'workshop-users' still wired to the secret"
+  if [[ "$jst" == "1" ]]; then
+    ok "workshop login password rotated (cluster sign-in, Gitea, per-attendee realms)."
   else
-    err "OAuth IdP 'workshop-users' NOT present — attendees cannot log in (bootstrap adds it)"; passwd_verify_bad=1
+    err "password written, but the cluster-idp-users Job did not report success — do NOT assume every attendee can sign in. Inspect: oc logs job/cluster-idp-users -n ogsr-system"
   fi
-
-  # Report: surface the oauth-pod roll delay, the verification caveat, and the new (non-secret) password.
-  # The banner must not claim more than the checks above proved (the class of bug 'ws solve' had: a
-  # success message printing after a step it never confirmed) — a missing user or a detached IdP means
-  # some attendees CANNOT log in with this password, so say that instead of "rotated."
-  echo
-  if [[ "$passwd_verify_bad" == 0 ]]; then
-    ok "workshop login password rotated."
-  else
-    err "password written, but verification above found a problem — do NOT assume every attendee can log in."
-  fi
-  info "the oauth-openshift pods roll (~1 min) before the new password takes effect (the console login"
-  echo "   itself is not scriptable, so only the secret + IdP wiring are verified above)."
-  echo "   watch the roll: oc rollout status deploy/oauth-openshift -n openshift-authentication"
-  if [[ -n "$target_user" ]]; then
-    echo
-    info "scope: ONLY ${target_user}'s OpenShift console/CLI (OAuth) login changed."
-    echo "   The shared Gitea/student-Argo password (ogsr-gitea/workshop-user-creds) is UNCHANGED — ${target_user}"
-    echo "   still uses the shared password there. For a full cohort rotation, run: ${WS_CMD} passwd [NEWPASS]"
-  fi
-  echo
   echo "   new password: ${newpass}"
   [[ "$generated" == "true" ]] && echo "   (randomly generated — record it; the shared workshop password is non-secret by policy)"
-  # Clean up + DISARM the EXIT trap: local $htp is out of scope by the time an EXIT trap fires at process
-  # exit, so leaving it armed tripped `set -u` ("htp: unbound variable") → ws passwd returned rc 1 on
-  # success. die() paths still fire the trap in-scope; this covers the normal return.
-  rm -f "$htp"; trap - EXIT
-  [[ "$passwd_verify_bad" == 0 ]] || return 1
+  [[ "$jst" == "1" ]] || return 1
 }
 
 delete_app_with_finalizer() {  # app — delete an entry Argo app in ARGO_NS, stripping a stuck finalizer as
@@ -4086,34 +4001,6 @@ _gitea_admin_creds() {  # → "host admin-user admin-pass" via oc/the Gitea CR, 
   echo "${host} ${user} ${pass}"
 }
 
-regen_htpasswd() {  # target_n → rebuild htpasswd-workshop-users to cover EXACTLY user1..user<target_n>.
-  # Existing users keep their CURRENT bcrypt line VERBATIM — no rotation; `ws passwd` is the only verb
-  # that changes the password. A user newly IN range (grow) gets a fresh line with the CURRENT shared
-  # password (_shared_password, read from the gitea secret — never a newly generated one). A user no
-  # longer in range (shrink) is simply not written back out. One routine serves both directions, the
-  # same idiomatic mktemp+trap+htpasswd -b build cmd_passwd uses.
-  local target_n="$1" htp cur pass i u line
-  htp="$(mktemp)"; trap 'rm -f "$htp"' EXIT
-  cur="$(oc get secret htpasswd-workshop-users -n openshift-config -o jsonpath='{.data.htpasswd}' 2>/dev/null | base64 -d || true)"
-  [[ -n "$cur" ]] || die "htpasswd-workshop-users secret not found/empty in openshift-config — run bootstrap first"
-  pass="$(_shared_password)"
-  [[ -n "$pass" ]] || die "could not read the shared workshop password (ogsr-gitea/workshop-user-creds) — run bootstrap first"
-  : > "$htp"
-  for (( i = 1; i <= target_n; i++ )); do
-    u="user${i}"
-    line="$(grep "^${u}:" <<< "$cur" || true)"
-    if [[ -n "$line" ]]; then
-      printf '%s\n' "$line" >> "$htp"
-    else
-      htpasswd -B -b "$htp" "$u" "$pass" >/dev/null 2>&1 || die "htpasswd failed for ${u}"
-    fi
-  done
-  oc create secret generic htpasswd-workshop-users \
-    --from-file=htpasswd="$htp" -n openshift-config \
-    --dry-run=client -o yaml | oc apply -f - >/dev/null
-  rm -f "$htp"; trap - EXIT
-}
-
 wait_gitea_seed() {  # target_n [timeout] → confirm Gitea has an account for user<target_n>. The
   # gitea-user-seed Sync hook (chart wave 2) is what actually creates it; this just gives scale-users a
   # specific, visible proof point instead of trusting Argo Health alone. Best-effort: an unreachable
@@ -4204,8 +4091,9 @@ confirm_cockpit() {  # user grow|shrink [timeout] → confirm the cockpit matche
 
 cmd_scale_users() {  # SA/admin: grow or shrink the workshop cohort. ${WS_CMD} scale-users N [--yes]
   # Mechanism: patch workshop-config's userCount helm parameter (a scalar JSON-patch replace — leaves
-  # clusterDomain/sso.enabled/consolePlugins.enabled untouched) → hard refresh → sync → wait Healthy →
-  # regenerate htpasswd → confirm the gitea-user-seed hook + cockpits for the new count. SHRINK
+  # clusterDomain/sso.enabled/consolePlugins.enabled untouched) → hard refresh → sync (its cluster-idp-users
+  # hook adds/removes the Keycloak sign-in accounts) → wait Healthy → confirm the gitea-user-seed hook +
+  # cockpits for the new count. SHRINK
   # additionally cleans the removed users' world FIRST, in cohort-reset's exact SEV1 order (student-
   # gitops apps → namespace CONTENTS purge → entry-*-<user> apps deleted) — all BEFORE the userCount
   # patch, so the sync's namespace prune never races a still-tracked entry Application or an attendee-
@@ -4225,7 +4113,6 @@ cmd_scale_users() {  # SA/admin: grow or shrink the workshop cohort. ${WS_CMD} s
   [[ -n "$target" ]] || die "scale-users: N required — usage: ${WS_CMD} scale-users N [--yes]"
   [[ "$target" =~ ^[0-9]+$ && "$target" -ge 1 ]] || die "scale-users: N must be a positive integer, got '${target}'"
   need_oc
-  command -v htpasswd >/dev/null || die "htpasswd not found — install httpd-tools (brew install httpd / dnf install httpd-tools)"
 
   oc get application workshop-config -n "$ARGO_NS" >/dev/null 2>&1 \
     || die "workshop-config Application not found in ${ARGO_NS} — is the workshop layer installed? (${WS_CMD} doctor)"
@@ -4260,7 +4147,7 @@ cmd_scale_users() {  # SA/admin: grow or shrink the workshop cohort. ${WS_CMD} s
     echo "  • Kueue ClusterQueue cq-user<N>, student-gitops AppProject + Argo RBAC"
     echo "  • Gitea account (gitea-user-seed hook) — SAME shared workshop password"
     echo "  • Showroom cockpit (Deployment/Route showroom-user<N>)"
-    echo "  • htpasswd login for the new user(s) — SAME shared workshop password (not rotated)"
+    echo "  • cluster sign-in account in Keycloak (cluster-idp-users hook) — SAME shared workshop password"
     echo
     echo "PRESERVED: all of user1..user${current}, and the platform (pp-*) — untouched."
   else
@@ -4271,7 +4158,7 @@ cmd_scale_users() {  # SA/admin: grow or shrink the workshop cohort. ${WS_CMD} s
     echo "  • CONTENTS of every one of their workshop namespaces purged, THEN the namespace"
     echo "    SHELLS themselves pruned (the chart stops rendering them once userCount drops)"
     echo "  • their Showroom cockpit + Kueue ClusterQueue cq-<user> + student AppProject (pruned by sync)"
-    echo "  • their htpasswd login entry removed"
+    echo "  • their cluster sign-in account in Keycloak (cluster-idp-users hook deletes it)"
     echo "  • NOT removed by ${WS_CMD} scale-users ITSELF: their Gitea account, and their student-Argo"
     echo "    local-account password hash in argocd-secret — gitea-user-seed/student-argo-accounts"
     echo "    only ADD, never delete, and this command never calls their delete APIs"
@@ -4330,20 +4217,8 @@ cmd_scale_users() {  # SA/admin: grow or shrink the workshop cohort. ${WS_CMD} s
   info "hard-refreshing + syncing workshop-config…"
   sync_app_operation workshop-config
 
-  # htpasswd is regenerated BEFORE waiting for workshop-config to go Healthy — deliberately ahead of
-  # where a surface reading of "sync -> wait Healthy -> regenerate htpasswd" would put it. On GROW, the
-  # new user's Showroom cockpit is rendered by THIS SAME Application, and its terminal-prep init
-  # container must `oc login` as that user during pod startup; the overall Application can never read
-  # Healthy while that Deployment isn't Ready. Regenerating htpasswd only after "wait Healthy" is a
-  # deadlock — live-reproduced on C1 2026-07-18 (grow 8->9: the cockpit's login retried 20x/6s, exhausted,
-  # crash-looped, and wait_healthy ran out its full 600s with no way to ever succeed). Moving it here is
-  # safe in both directions: regen_htpasswd only rewrites the openshift-config secret directly and has no
-  # dependency on the Argo sync having completed.
-  info "regenerating htpasswd for user1..user${target} (existing hashes kept; new lines use the current shared password)…"
-  regen_htpasswd "$target"
-  ok "htpasswd-workshop-users (openshift-config) updated for ${target} user(s)"
-  info "the oauth-openshift pods roll (~1 min) before login changes take effect: oc rollout status deploy/oauth-openshift -n openshift-authentication"
-
+  # The cluster-idp-users Sync hook (wave 2) creates the new users' Keycloak accounts before the wave-3
+  # cockpits roll, so a new cockpit's terminal can sign in; on shrink it deletes the removed ones.
   wait_healthy workshop-config 600 true
 
   wait_gitea_seed "$target" || confirm_failed=1
@@ -4404,7 +4279,7 @@ cmd_preflight() {  # SA pre-install readiness check — run BEFORE bootstrap/ins
 
   info "Local tooling (bootstrap/install.sh prereqs)"
   local t
-  for t in oc yq htpasswd openssl git; do
+  for t in oc yq openssl git; do
     if command -v "$t" >/dev/null 2>&1; then
       pf_row PASS "$t" "$(command -v "$t")"
     else
@@ -4535,10 +4410,16 @@ cmd_preflight() {  # SA pre-install readiness check — run BEFORE bootstrap/ins
     else
       pf_row INFO "GatewayClass openshift-default" "CREATE — added by the mesh stack; uninstall removes it only if ours"
     fi
-    if oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}' 2>/dev/null | grep -qw workshop-users; then
-      pf_row INFO "OAuth IdP workshop-users" "PRESENT — install reuses it (prior install or a name clash — review)"
+    # Attendees sign in through ONE Keycloak OpenID IdP; any other IdP (or kubeadmin) brings back the
+    # oauth-openshift chooser page, which the cockpit's embedded tabs cannot show.
+    local pf_idps; pf_idps="$(oc get oauth cluster -o jsonpath='{range .spec.identityProviders[*]}{.name}:{.type} {end}' 2>/dev/null || true)"
+    if grep -q ':OpenID' <<< "$pf_idps"; then
+      pf_row INFO "cluster sign-in" "ADOPT — attendees are added to the Keycloak realm behind the OpenID IdP (${pf_idps% })"
     else
-      pf_row INFO "OAuth IdP workshop-users" "CREATE — appended to oauth/cluster; all existing IdPs preserved"
+      pf_row INFO "cluster sign-in" "CREATE — install adds IdP ogsr-sso (realm ogsr in the workshop Keycloak; auth stack)"
+    fi
+    if [[ "$(wc -w <<< "$pf_idps" | tr -d ' ')" -gt 1 ]] || oc get secret kubeadmin -n kube-system >/dev/null 2>&1; then
+      pf_row WARN "other sign-in options" "${pf_idps% }$(oc get secret kubeadmin -n kube-system >/dev/null 2>&1 && echo ' + kube:admin') — a chooser page blanks the cockpit's Console/Dev Spaces/Argo CD tabs; keep only the Keycloak IdP on a dedicated cluster"
     fi
     if oc get configmap ogsr-uninstall-state -n ogsr-system >/dev/null 2>&1; then
       pf_row WARN "prior install detected" "ogsr-system/ogsr-uninstall-state exists — this cluster already ran install (re-run is idempotent; or ./bootstrap/ogsr-uninstall.sh first)"

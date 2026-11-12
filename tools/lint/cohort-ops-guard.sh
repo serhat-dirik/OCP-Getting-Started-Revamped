@@ -95,7 +95,7 @@ check_ws_delegation() {  # → 1 when a script stopped delegating its engine hal
   # guard's own (empty) variable.
   if ! grep -qE '\$WS_BIN"?[[:space:]]+scale-users[[:space:]]' "$WIPE_SH"; then
     fail "$(basename "$WIPE_SH"): no 'ws scale-users <n>' invocation — grepped the file for the WS_BIN variable followed by 'scale-users' and an argument, zero matches."
-    note "Lowering userCount, the SEV1-safe purge ordering and the htpasswd rewrite all live in cmd_scale_users."
+    note "Lowering userCount, the SEV1-safe purge ordering and the sign-in account sync all live in cmd_scale_users."
     rc=1
   fi
   # shellcheck disable=SC2016  # grep PATTERN, see above.

@@ -42,7 +42,8 @@ has its own timing table, pre-flight checklist and watchouts.
 2. **Check the cluster:** `tools/ws/adm doctor`
 3. **Share the Etherpad link:** `https://ogsr-pad.<apps>/p/workshop`. It holds the Showroom link and
    a numbered list where each attendee claims a user, so no two people take the same one.
-   - Showroom: `https://ogsr-showroom.<apps>`. Log in as `userN` with the workshop password.
+   - Showroom: `https://ogsr-showroom.<apps>`. Log in as `userN` with the workshop password on the
+     Keycloak sign-in page. That one sign-in covers the Console, Dev Spaces and Argo CD tabs.
 4. **Last check before you start:** `tools/ws/adm status` must end with
    `shared cockpit showroom-shared ✅ 1/1 · terminal pods ✅ N/N` and `platform all-Synced ✅`.
 
@@ -80,6 +81,7 @@ module back clean.
 |---|---|
 | Terminal says `Unauthorized` on the first command | The attendee's browser sign-in expired. They reload the cockpit page, sign in, and reopen the terminal. |
 | `ws prep` refused: "attendees may only use their own AppProject" | The cockpit runs an old `ws`. Run `tools/ws/adm git-refresh --restart-terminals --all`. |
+| A Console, Dev Spaces or Argo CD tab stays blank | `tools/ws/adm doctor`, row `workshop IdP`: more than one sign-in option is configured. Keep only the Keycloak one ([INSTALL.md › Dedicated cluster](INSTALL.md#6-dedicated-cluster)). |
 | An AI step returns an authentication error | Run `tools/ws/adm maas show`, then fix with `tools/ws/adm maas set`. No reinstall. |
 
 Anything else: collect this, then check the module's `troubleshooting.adoc` and

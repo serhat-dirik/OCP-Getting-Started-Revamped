@@ -30,7 +30,8 @@
 # manifest render to bust and no chart version to bump.
 #
 # That whole mechanism — purge the users' worlds in the SEV1-safe order, patch userCount, hard
-# refresh, sync (never while an operation is Running), wait Healthy, regenerate htpasswd — is ALREADY
+# refresh, sync (never while an operation is Running; its cluster-idp-users hook deletes the removed
+# users' Keycloak sign-in accounts), wait Healthy — is ALREADY
 # IMPLEMENTED, correctly, as `ws scale-users` (tools/ws/ws, cmd_scale_users). This script DELEGATES to
 # it rather than growing a second copy that can drift; the Argo sync discipline in particular lives in
 # ws's sync_app_operation and is not re-implemented here.
@@ -40,7 +41,7 @@
 # does not remove:
 #
 #   • OpenShift User + Identity objects. Created lazily by the OAuth server on first login and owned
-#     by nobody. Removing an htpasswd line stops a NEW login; it does not remove the User/Identity
+#     by nobody. Deleting the Keycloak account stops a NEW login; it does not remove the User/Identity
 #     pair, and a User object with no identity behind it is exactly the corpse this policy rejects.
 #   • Gitea accounts and their repositories. gitea-user-seed only ever ADDS accounts (create-if-absent
 #     hook), so the account and every fork under it outlive any userCount change.
@@ -48,7 +49,7 @@
 #     owner from the user, so deleting the user — even with purge — does not take it.
 #   • SonarQube accounts. sonarqube-user-seed is create-if-absent, exactly like the Gitea one, and a
 #     SonarQube account is `local: true` — it authenticates against SonarQube's own user table and
-#     needs no OpenShift identity, no htpasswd line and no Gitea account behind it. Left in place it
+#     needs no OpenShift identity, no Keycloak account and no Gitea account behind it. Left in place it
 #     is the ONE working login a wiped attendee keeps.
 #   • Keycloak realms. KeycloakRealmImport is IMPORT-ONCE: the operator imports the realm and then
 #     ignores the CR forever. Pruning the CR does not delete the realm from Keycloak's database.
@@ -171,8 +172,8 @@ echo "    (pod and home), Kueue ClusterQueue, student"
 echo "    AppProject + Argo RBAC, workshop-attendees membership, and KeycloakRealmImport CR"
 echo "  • their per-user worlds are purged FIRST, in ws's SEV1-safe order (attendee Argo apps →"
 echo "    namespace contents → entry-*-<user> apps), so the prune never races an attendee-pinned PVC"
-echo "  • their htpasswd login line (openshift-config/htpasswd-workshop-users)"
-echo "  • their OpenShift User + Identity objects (workshop-users:<user>)"
+echo "  • their cluster sign-in account in Keycloak (the scale-users sync's cluster-idp-users hook)"
+echo "  • their OpenShift User + Identity objects"
 echo "  • their Gitea account, purged — every repository they own goes with it"
 echo "  • their <user>-${SCAFFOLD_ORG_SUFFIX} Gitea scaffold org and its repositories"
 echo "  • their SonarQube account in ${SONAR_NS}, removed AND anonymized so the login is freed —"
@@ -207,7 +208,7 @@ if [[ "$DRY_RUN" == "true" ]]; then
   echo "OpenShift User / Identity objects:"
   for _u in "${REMOVED[@]}"; do
     if oc get user "$_u" >/dev/null 2>&1; then
-      echo "  user/${_u} + identity/workshop-users:${_u}"
+      echo "  user/${_u} + identities: $(oc get user "$_u" -o jsonpath='{.identities[*]}' 2>/dev/null)"
     else
       echo "  (absent) user/${_u}"
     fi
@@ -291,13 +292,13 @@ fi
 confirm_or_exit "Remove ${#REMOVED[@]} user(s) [${REMOVED[*]}] completely, keeping ${KEPT[*]}?"
 
 # ── 1. the GitOps half: lower userCount and let Argo prune ───────────────────────────────────────
-# Delegated in full. `ws scale-users` owns the ordering, the sync discipline and the htpasswd rewrite.
+# Delegated in full. `ws scale-users` owns the ordering, the sync discipline and the Keycloak accounts.
 step "[1/7] lowering userCount ${LIVE_COUNT} → ${KEEP} via ws scale-users (Argo prunes the per-user world)" \
   "$WS_BIN" scale-users "$KEEP" --yes
 
 # ── 2. OpenShift User + Identity objects ─────────────────────────────────────────────────────────
 delete_identities() {
-  local u rc=0
+  local u id rc=0
   for u in "${REMOVED[@]}"; do
     if oc get user "$u" >/dev/null 2>&1; then
       if oc delete user "$u" >/dev/null 2>&1; then
@@ -309,18 +310,16 @@ delete_identities() {
     else
       skip "  user/${u} already absent"
     fi
-    # The Identity name is "<idp>:<username>"; the workshop IdP is always 'workshop-users' —
-    # bootstrap/install.sh appends exactly that entry to the OAuth singleton.
-    if oc get identity "workshop-users:${u}" >/dev/null 2>&1; then
-      if oc delete identity "workshop-users:${u}" >/dev/null 2>&1; then
-        ok "  identity/workshop-users:${u} deleted"
+    # Identity names are "<idp>:<id>" — rhbk:<keycloak user id> for a Keycloak sign-in — so they are
+    # found by the User they point at, never built from the username.
+    for id in $(oc get identities -o jsonpath="{range .items[?(@.user.name==\"${u}\")]}{.metadata.name}{\"\n\"}{end}" 2>/dev/null); do
+      if oc delete identity "$id" >/dev/null 2>&1; then
+        ok "  identity/${id} deleted"
       else
-        err "  could not delete identity/workshop-users:${u}"
+        err "  could not delete identity/${id}"
         rc=1
       fi
-    else
-      skip "  identity/workshop-users:${u} already absent"
-    fi
+    done
   done
   return "$rc"
 }
