@@ -44,8 +44,9 @@ has its own timing table, pre-flight checklist and watchouts.
    a numbered list where each attendee claims a user, so no two people take the same one.
    - Showroom: `https://ogsr-showroom.<apps>`. Log in as `userN` with the workshop password on the
      Keycloak sign-in page. That one sign-in covers the Console, Dev Spaces and Argo CD tabs.
-4. **Last check before you start:** `tools/ws/adm status` must end with
+4. **Check the cohort:** `tools/ws/adm status` must end with
    `shared cockpit showroom-shared ✅ 1/1 · terminal pods ✅ N/N` and `platform all-Synced ✅`.
+5. **Last check:** `tools/ws/adm ready` must end with `✅ workshop ready`.
 
 No login refresh is needed. Each attendee's terminal logs in from their own browser sign-in.
 

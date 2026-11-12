@@ -160,7 +160,12 @@ Both floors exist for one module, `deployment-targets-scheduling`:
    | `modules_enabled` | The opposite, e.g. `[m1, m2, m3, m4, m5]`. Empty means the whole catalog. Use one key or the other, not both. |
    | `repo_url` / `repo_revision` | Where the content is mirrored from |
 
-6. **Install.** About 15–20 minutes. Idempotent: re-run it freely.
+6. **Install.** Idempotent: re-run it freely. It reports two milestones, measured on your cluster by the install itself:
+   - `script done in X min`: everything is applied.
+   - `ready in Y min`: warm-ups finished (image pre-pull, Maven mirror, built images); attendees can start.
+     If this times out (60 min), the install still exits 0 and lists what is still red.
+     Re-run `tools/ws/adm ready` until it prints `✅ workshop ready`.
+   - The `helm/bootstrap/` path has no final step: run `tools/ws/adm ready` yourself.
 
    ```bash
    ./bootstrap/install.sh
@@ -176,6 +181,7 @@ Both floors exist for one module, `deployment-targets-scheduling`:
 7. **Verify.**
 
    ```bash
+   tools/ws/adm ready         # blocks until ready for attendees; exit 1 names what is red
    tools/ws/adm doctor        # login, Argo CD, Gitea, operators
    tools/ws/adm status        # every platform app and every attendee
    ```

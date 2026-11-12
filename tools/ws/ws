@@ -20,6 +20,7 @@
 #   adm scale-users N [--yes]        SA/admin: grow/shrink the workshop cohort to N users
 #   adm preflight                    SA/admin: pre-install readiness + adoption forecast (run before install)
 #   adm status [--user U]            SA/admin: one-glance cohort health (platform + per-user dashboard)
+#   adm ready [--timeout 60m]        SA/admin: wait until the workshop is ready for attendees (warm-ups done)
 #   adm diag [--user U] [<module>]   SA/admin: read-only troubleshooting bundle for a stuck attendee
 #   adm by-design                    SA/admin: every resource this workshop breaks/drifts ON PURPOSE
 #                                    — answers "is this Degraded/OutOfSync app expected?" in one step
@@ -5820,6 +5821,125 @@ plus the cohort, install and troubleshooting commands:  adm help
 EOF
 }
 
+# ── adm ready ── "install script done" ≠ "workshop ready for attendees". Blocks until every check below
+# is green, printing each one as it turns green, or the deadline passes (exit 1 naming what is still red).
+# Each ready_* check prints one detail line and returns 0 (green) / 1 (red). A check whose object does
+# not exist because its module is disabled (no ImageStream / namespace) is green with "n/a".
+# The warm-up objects are env-overridable so tools/lint/ready-guard.sh and a non-destructive red proof
+# can point a check at something that does not exist.
+READY_ISTAGS="${WS_READY_ISTAGS:-${PARASOL_IMAGES_NS}/premium-calculator:latest ogsr-supply-chain/parasol-claims:latest}"
+READY_PREPULL_DS="${WS_READY_PREPULL_DS:-${PARASOL_IMAGES_NS}/ogsr-image-prepull}"
+READY_MAVEN_NS="${WS_READY_MAVEN_NS:-ogsr-maven-mirror}"
+
+ready_argo() {  # every Application Synced+Healthy, no operation in flight (degraded-by-design seeds excluded)
+  local out bad
+  out="$(oc get applications.argoproj.io -A -l 'workshop.redhat.com/degraded-by-design!=true' \
+    -o jsonpath='{range .items[*]}{.metadata.name} {.status.sync.status} {.status.health.status} {.status.operationState.phase}{"\n"}{end}' 2>&1)" \
+    || { echo "cannot list Applications: ${out}"; return 1; }
+  bad="$(awk 'NF && ($2!="Synced" || $3!="Healthy" || $4=="Running") {printf "%s(%s/%s) ", $1, $2, $3}' <<< "$out")"
+  if [[ -n "$bad" ]]; then echo "not Synced/Healthy: ${bad}"; return 1; fi
+  echo "$(grep -c . <<< "$out") Synced/Healthy"
+}
+
+ready_cockpit() {  # the shared cockpit Deployment fully available (terminal pods are doctor's row)
+  local r
+  r="$(oc get deploy "$SHARED_COCKPIT_DEP" -n "$SHOWROOM_NS" -o jsonpath='{.status.availableReplicas}/{.spec.replicas}' 2>/dev/null)" \
+    || { echo "n/a (no ${SHARED_COCKPIT_DEP} — per-user cockpits)"; return 0; }
+  if [[ "${r%/*}" == "${r#*/}" && "${r#*/}" != "0" ]]; then echo "${r} available"; return 0; fi
+  echo "${r:-?} available"; return 1
+}
+
+ready_prepull() {  # image pre-pull DaemonSet: every desired pod scheduled, updated and ready
+  local ns="${READY_PREPULL_DS%%/*}" name="${READY_PREPULL_DS#*/}" r d u k
+  r="$(oc get ds "$name" -n "$ns" -o jsonpath='{.status.desiredNumberScheduled} {.status.updatedNumberScheduled} {.status.numberReady}' 2>&1)" \
+    || { echo "DaemonSet ${READY_PREPULL_DS} not found"; return 1; }
+  read -r d u k <<< "$r"
+  if [[ "${d:-0}" -gt 0 && "$u" == "$d" && "$k" == "$d" ]]; then echo "${k}/${d} nodes pulled"; return 0; fi
+  echo "${k:-0}/${d:-0} ready, ${u:-0} updated"; return 1
+}
+
+ready_maven() {  # newest maven-mirror-warm Job succeeded
+  oc get ns "$READY_MAVEN_NS" >/dev/null 2>&1 || { echo "n/a (no ${READY_MAVEN_NS})"; return 0; }
+  local s
+  s="$(oc get job -n "$READY_MAVEN_NS" -l app.kubernetes.io/name=maven-mirror-warm --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{range .items[*]}{.metadata.name}={.status.succeeded}{"\n"}{end}' 2>/dev/null | tail -1)"
+  if [[ "${s#*=}" == "1" ]]; then echo "${s%=*} succeeded"; return 0; fi
+  echo "${s:-no maven-mirror-warm Job} not succeeded yet"; return 1
+}
+
+ready_istags() {  # warm-built images present; an absent ImageStream = module disabled = n/a
+  local t ns tag bad="" okn=0
+  for t in $READY_ISTAGS; do
+    ns="${t%%/*}"; tag="${t#*/}"
+    oc get is "${tag%%:*}" -n "$ns" >/dev/null 2>&1 || continue
+    if oc get istag "$tag" -n "$ns" >/dev/null 2>&1; then okn=$((okn + 1)); else bad="${bad} ${t}"; fi
+  done
+  if [[ -n "$bad" ]]; then echo "missing:${bad}"; return 1; fi
+  echo "${okn} present"
+}
+
+ready_doctor() {  # adm doctor (incl. terminal pods + workshop IdP rows) has no ❌
+  local out bad
+  out="$(cmd_doctor "" 2>&1)" || true
+  bad="$(grep '❌' <<< "$out" | sed -E 's/^ +//; s/ +❌.*//' | paste -sd, - || true)"
+  if [[ -n "$bad" ]]; then echo "❌ rows: ${bad} — run: ${WS_CMD} doctor"; return 1; fi
+  echo "no ❌"
+}
+
+READY_CHECKS="argo cockpit prepull maven istags doctor"
+
+ready_parse_timeout() {  # 60m | 90s | 2h | bare seconds → seconds on stdout; rc 1 if malformed
+  case "$1" in
+    *[!0-9smh]*|""|[smh]*) return 1;;
+    *h) echo $(( ${1%h} * 3600 ));;
+    *m) echo $(( ${1%m} * 60 ));;
+    *s) echo "${1%s}";;
+    *)  echo "$1";;
+  esac
+}
+
+cmd_ready() {  # [--timeout 60m] [--interval 30s] — READ-ONLY; exit 0 ready, 1 still red at the deadline
+  local timeout=60m interval=30s
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --timeout)  timeout="${2:-}"; shift 2;;
+      --interval) interval="${2:-}"; shift 2;;
+      *) die "ready: unknown argument '$1' — usage: ${WS_CMD} ready [--timeout 60m] [--interval 30s]";;
+    esac
+  done
+  local tsec isec
+  tsec="$(ready_parse_timeout "$timeout")" || die "ready: bad --timeout '${timeout}' — e.g. 60m, 90s, 2h"
+  isec="$(ready_parse_timeout "$interval")" || die "ready: bad --interval '${interval}' — e.g. 30s"
+  need_oc
+  local start=$SECONDS green=" " c msg red
+  echo "${WS_CMD} ready — waiting up to ${timeout} for the workshop to be ready for attendees"
+  while :; do
+    red=""
+    for c in $READY_CHECKS; do
+      [[ "$green" == *" $c "* ]] && continue
+      # doctor is the slow (~90 s) sweep: only worth running once the cheap checks are green.
+      if [[ "$c" == doctor && -n "$red" ]]; then red="${red}${c}|waiting for the checks above"$'\n'; continue; fi
+      if msg="$("ready_${c}")"; then
+        green="${green}${c} "
+        printf '  ✅ %-10s %s   (+%d min)\n' "$c" "$msg" $(( (SECONDS - start) / 60 ))
+      else
+        red="${red}${c}|${msg}"$'\n'
+      fi
+    done
+    if [[ -z "$red" ]]; then
+      echo "✅ workshop ready in $(( (SECONDS - start + 30) / 60 )) min"
+      return 0
+    fi
+    if (( SECONDS - start + isec >= tsec )); then
+      echo "❌ not ready after ${timeout} — still red:"
+      printf '%s' "$red" | while IFS='|' read -r c msg; do printf '  ❌ %-10s %s\n' "$c" "$msg"; done
+      echo "   ↳ re-run when fixed: ${WS_CMD} ready"
+      return 1
+    fi
+    sleep "$isec"
+  done
+}
+
 main() {
   local cmd="${1:-}"
   # Refused HERE, before ws_stay_current or anything else runs. An operator verb that
@@ -5856,6 +5976,7 @@ main() {
   # rebuild-images self-parses too: --image takes a free-form image NAME (parasol-claims), which the
   # generic parser below would otherwise bin as the module argument.
   [[ "$cmd" == "rebuild-images" ]] && { cmd_rebuild_images "$@"; return; }
+  [[ "$cmd" == "ready" ]] && { cmd_ready "$@"; return; }
   local user="" module="" extra=()
   # Which verbs bind a bare token as <module>, and which take an attendee at all. Both drive the
   # `*)` branch below: a bare token that is neither the module nor a userN is a typo on any verb
@@ -5948,11 +6069,11 @@ main() {
     # position number OR a slug" note. Cutting it short leaves a sentence hanging mid-clause. (36, up
     # from 27: the F-03 banner correction added nine header lines — two wrapped command rows, the
     # blank, and the six-line --user/presenter paragraph. Then 38: the two-line "both spellings must
-    # AGREE" note that user_conflict_guard enforces. Then 40: `ws by-design`'s two-line entry.)
+    # AGREE" note that user_conflict_guard enforces. Then 40: `ws by-design`'s two-line entry. Then 41: `adm ready`.)
     ""|help|-h|--help)
       # The header comment is the OPERATOR help and stays the full 21-verb list; the
       # attendee gets a written-for-them four. Same file, two audiences.
-      if ws_is_admin; then grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,40p'
+      if ws_is_admin; then grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,41p'
       else ws_attendee_help; fi ;;
     *) if ws_is_admin; then die "unknown command '$cmd' — try: adm help"
        else die "unknown command '$cmd' — try: ${WS_CMD} help"; fi ;;

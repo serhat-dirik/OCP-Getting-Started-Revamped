@@ -1782,3 +1782,12 @@ emit_bootstrap_verdict() {
 
 echo
 emit_bootstrap_verdict || exit 1
+# Two milestones: the script finishing is not the workshop being ready. Warm-ups (image pre-pull,
+# maven mirror, function + trusted images) keep running after Argo says Healthy; `adm ready` waits for
+# them. A ready timeout is not an install failure — exit 0, but say plainly what is still red.
+echo "   script done in $(( (SECONDS + 30) / 60 )) min"
+if "${SCRIPT_DIR}/../tools/ws/adm" ready --timeout "${OGSR_READY_TIMEOUT:-60m}"; then
+  ok "ready in $(( (SECONDS + 30) / 60 )) min (from install start)"
+else
+  warn "installed, but NOT ready for attendees yet (red checks above) — do not hand out links; re-run: tools/ws/adm ready"
+fi
