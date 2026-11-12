@@ -16,7 +16,7 @@ include::partial$version-attributes.adoc[]
 // and copied with its .sig/.att into {user}-cicd/parasol-claims-trusted at prep (since 2026-11-12), so the trust story runs
 // against a ready image and the scan step READS a verdict instead of waiting on a second build. Grounded:
 // seeded build Failed at acs-scan on Log4Shell (CVSS 10, log4j-core 2.14.1) in 7m11s to a :candidate tag;
-// CycloneDX SBOM = 239 components; cosign v3.0.4 + rekor-cli fetched from the RHTAS cli-server; cosign
+// CycloneDX SBOM = 239 components (240 on 2026-11-12); cosign v3.0.4 + rekor-cli fetched from the RHTAS cli-server; cosign
 // verify + verify-attestation against the trusted image RC=0 (SLSA provenance v0.2, builder
 // tekton.dev/chains/v2); keyless `cosign sign-blob` recorded the SBOM in the live Rekor transparency log
 // and `verify-blob` returned "Verified OK".
@@ -269,8 +269,9 @@ oc tag --source=docker registry.access.redhat.com/ubi9/ubi-minimal:latest \
 oc run demo-unsigned -n $NS --image=image-registry.openshift-image-registry.svc:5000/$NS/parasol-claims-trusted:unsigned \
   --image-pull-policy=Always --command -- sleep infinity
 sleep 10
-oc get pod demo-unsigned -n $NS -o jsonpath='{.status.containerStatuses[0].state.waiting.message}' \
-  | grep -oE 'SignatureValidationFailed|Source image rejected: [^;]*'
+oc get pod demo-unsigned -n $NS \
+  -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}{"\n"}{.status.containerStatuses[0].state.waiting.message}' \
+  | grep -oE 'SignatureValidationFailed|Source image rejected: [^;]*' | sort -u
 ----
 
 *What just happened*
@@ -471,7 +472,7 @@ Then open *Pipelines* (left nav) → *Pipelines* (the resource list) → `paraso
 .Import YAML, not the *Start* button
 =====
 Create the run from *Import YAML* (which takes the whole manifest), *not* from the Pipeline's *Actions → Start* form.
-This run raises per-Task memory for the build steps (the `taskRunSpecs`), and the *Start* form cannot set that — a run started without it is killed mid-build.
+The manifest builds to `parasol-claims:candidate` and requests memory for the two build steps (the `taskRunSpecs`); the *Start* form defaults the image to `parasol-claims:latest` and cannot set per-Task memory.
 =====
 --
 CLI::
@@ -502,7 +503,7 @@ spec:
           resources:
             requests:
               storage: 1Gi
-  taskRunSpecs:                           # more memory than the 1Gi namespace default for the builds
+  taskRunSpecs:                           # a real memory request for the two builds (the namespace default is 256Mi)
     - pipelineTaskName: sbom-report
       computeResources:
         requests: {memory: 1Gi}
@@ -569,7 +570,7 @@ mvn -B -ntp org.cyclonedx:cyclonedx-maven-plugin:2.9.2:makeBom
 .Expected output (abridged)
 [source,texinfo]
 ----
-[INFO] CycloneDX: Creating BOM version 1.6 with 239 component(s)
+[INFO] CycloneDX: Creating BOM version 1.6 with 240 component(s)
 [INFO] CycloneDX: Writing and validating BOM (JSON): .../target/parasol-claims-sbom.json
 [INFO] BUILD SUCCESS
 ----
@@ -805,9 +806,17 @@ cosign download attestation --allow-insecure-registry "$IMG" \
 .Expected output
 [source,texinfo]
 ----
+WARNING: Skipping tlog verification is an insecure practice that lacks transparency and auditability verification for the attestation.
+
+Verification for image-registry.openshift-image-registry.svc:5000/<you>-cicd/parasol-claims-trusted@sha256:... --
+The following checks were performed on each of these signatures:
+  - The cosign claims were validated
+  - The signatures were verified against the specified public key
 ✔ attestation signature verified
 {"predicateType":"https://slsa.dev/provenance/v0.2","buildType":"tekton.dev/v1/TaskRun","builder":"https://tekton.dev/chains/v2"}
 ----
+
+The `WARNING` is the `--insecure-ignore-tlog` flag speaking: this key-based signature has no transparency-log entry, which exercise 4 adds.
 
 That is real *SLSA provenance*: it names the predicate type (`slsa.dev/provenance/v0.2`), the build type (a Tekton TaskRun), and the builder (`tekton.dev/chains/v2`) — a machine-checkable answer to "prove this image came from your pipeline."
 The full predicate also lists the source materials and the start/finish timestamps.
@@ -816,7 +825,7 @@ You have now seen the three artifacts of a trustworthy image, each answering a d
 
 [.checkpoint]
 ****
-✔ *Verify:* `oc get imagestream parasol-claims` shows `.sig` and `.att` tags beside `latest`; `cosign verify-attestation` confirms the attestation's signature; and `cosign download attestation` yields a SLSA provenance predicate naming `buildType: tekton.dev/v1/TaskRun` and `builder: https://tekton.dev/chains/v2`.
+✔ *Verify:* `parasol-claims-trusted` shows `.sig` and `.att` tags beside `latest`, and `parasol-claims` shows its own pair beside your `candidate`; `cosign verify-attestation` confirms the attestation's signature; and `cosign download attestation` yields a SLSA provenance predicate naming `buildType: tekton.dev/v1/TaskRun` and `builder: https://tekton.dev/chains/v2`.
 ****
 
 == 4. Keyless signing and the transparency log
@@ -833,6 +842,14 @@ First point cosign at the RHTAS trust root, and mint a short-lived *identity tok
 cosign initialize --mirror=$TUF --root=$TUF/root.json
 TOKEN=$(oc create token pipeline --audience trusted-artifact-signer -n $NS)
 ----
+
+.Expected output
+[source,texinfo]
+----
+WARNING: Fetching initial root from URL without providing its checksum is deprecated and will be disallowed in a future Cosign release. Please provide the initial root checksum via the --root-checksum argument.
+----
+
+The warning is cosign v3 asking you to pin the trust root's checksum; initialization still completes (troubleshooting has the details).
 
 Now *sign the SBOM* keylessly.
 cosign gets a certificate from Fulcio for your identity, signs, and uploads the record to Rekor — writing a *bundle* (certificate + signature + log proof) beside the file:
@@ -997,12 +1014,13 @@ claims-unsigned   0/1     ImagePullBackOff   0          3s
 ----
 
 The signed pod runs: the node found the `.sig` beside the image, checked it against the key, and accepted its identity.
-The unsigned pod never starts. Read why:
+The unsigned pod never starts. Its `STATUS` may read `ImagePullBackOff` or `SignatureValidationFailed`, depending on the moment. Read why:
 
 [source,sh,role=execute]
 ----
-oc get pod claims-unsigned -n $NS -o jsonpath='{.status.containerStatuses[0].state.waiting.message}' \
-  | grep -oE 'SignatureValidationFailed|Source image rejected: [^;]*'
+oc get pod claims-unsigned -n $NS \
+  -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}{"\n"}{.status.containerStatuses[0].state.waiting.message}' \
+  | grep -oE 'SignatureValidationFailed|Source image rejected: [^;]*' | sort -u
 ----
 
 .Expected output
@@ -1012,7 +1030,8 @@ SignatureValidationFailed
 Source image rejected: A signature was required, but no signature exists
 ----
 
-The node looked for a `.sig` beside the image in `parasol-claims-trusted`, found none, and refused the pull. (`STATUS` may read `ErrImagePull` for the first few seconds; it settles on `ImagePullBackOff` as the node retries, and every retry is refused the same way.)
+The node looked for a `.sig` beside the image in `parasol-claims-trusted`, found none, and refused the pull.
+The node keeps retrying, so `STATUS` alternates: `SignatureValidationFailed` on each pull attempt, `ImagePullBackOff` while it waits for the next (measured: 8 s, 35 s, 51 s, 64 s). Either one is this refusal, and the command above reads the same two lines in both.
 It does not matter whether anyone _remembered_ to run the scan gate: the node will not pull an image in this repository that it cannot verify.
 
 [.checkpoint]
