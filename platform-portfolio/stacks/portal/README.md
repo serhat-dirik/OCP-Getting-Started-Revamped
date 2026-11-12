@@ -41,8 +41,8 @@ admin account; the workshop bootstrap discovers them and creates the secret.
 - **publish:gitea** is not bundled in RHDH 1.10.2 — it is the first-party
   `@backstage/plugin-scaffolder-backend-module-gitea` installed as an external dynamic plugin (v0.2.19,
   version-matched). See `components/rhdh/README.md`.
-- **Auth:** guest sign-in (simplest honest workshop auth); OpenShift OAuth is the documented hardening
-  path.
+- **Auth:** guest sign-in by default; the optional `rhdh-auth` Secret switches it to any provider
+  (e.g. OIDC against Keycloak) without a git change — see `components/rhdh/README.md`.
 - **Developer Lightspeed** ships **on by default** (operator flavour) and degrades gracefully without a
   model; the M12 [ADS] section wires it to MaaS.
 

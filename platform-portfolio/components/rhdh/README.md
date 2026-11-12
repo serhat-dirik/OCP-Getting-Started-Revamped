@@ -9,24 +9,40 @@ browsed and run by every attendee.
 | File | Why |
 |---|---|
 | `namespace.yaml` | `rhdh` — the Backstage CR, config, bundled PostgreSQL, and route live here |
-| `app-config.yaml` | `app-config-rhdh` ConfigMap — guest auth, the Gitea integration, and the Parasol catalog locations, appended to the operator's base app-config |
-| `dynamic-plugins.yaml` | `dynamic-plugins-rhdh` ConfigMap — the default plugin set **plus** the Gitea scaffolder module (external dynamic plugin) |
-| `backstage.yaml` | the `developer-hub` Backstage CR (`rhdh.redhat.com/v1alpha4`), wiring the two ConfigMaps + the `rhdh-gitea` secret + the route |
+| `app-config.yaml` | `app-config-rhdh` ConfigMap — guest auth (default), redirect sign-in flow, the Gitea integration, and the Parasol catalog locations, appended to the operator's base app-config |
+| `dynamic-plugins.yaml` | `dynamic-plugins-rhdh` ConfigMap — the default plugin set **plus** the Gitea scaffolder module (external dynamic plugin) and the bundled Keycloak catalog module (inert until configured) |
+| `backstage.yaml` | the `developer-hub` Backstage CR (`rhdh.redhat.com/v1alpha4`), wiring the two ConfigMaps + the `rhdh-gitea` secret + the optional `rhdh-auth` secret + the route |
 
 The RHDH **operator** is a separate component (`components/rhdh-operator`), installed at wave 0 of the
 portal stack; this component (wave 1) is the instance.
 
-## Auth: guest sign-in (verified live)
+## Auth: guest by default, any provider through the optional `rhdh-auth` Secret
 
-Guest sign-in is the workshop default — the simplest honest choice: no per-attendee login friction, all
-attendees read the shared catalog and run the template. It needs
-`auth.providers.guest.dangerouslyAllowOutsideDevelopment: true` because the RHDH image runs
-`NODE_ENV=production` (the guest provider refuses to start otherwise). Verified live 2026-07-11: guest
-token issues, catalog + scaffolder APIs work.
+**No parameters → guest sign-in**, the simplest honest default: one click, everyone reads the catalog
+and runs templates. It needs `auth.providers.guest.dangerouslyAllowOutsideDevelopment: true` because
+the RHDH image runs `NODE_ENV=production` (the guest provider refuses to start otherwise).
 
-**Hardening path (documented, not wired):** OpenShift OAuth sign-in — `auth.providers.<oidc/oauth2Proxy>`
-against the cluster OAuth server maps OpenShift users to Backstage identities. Deferred: guest is
-sufficient for the catalog-browse + scaffold flow and far more robust for a short workshop.
+**Real identities → the optional Secret `rhdh/rhdh-auth`.** `backstage.yaml` adds it to the backend
+container with `envFrom … optional: true` (a `spec.deployment.patch`, because `extraEnvs` cannot point
+at an optional Secret). Every key becomes an env var, and Backstage reads `APP_CONFIG_<path>` env vars
+as config overrides (JSON values are parsed), so the Secret can switch sign-in without touching git.
+OIDC against a Keycloak realm, for example:
+
+| Key | Value |
+|---|---|
+| `APP_CONFIG_auth_environment` | `production` — the sign-in page stops offering Guest |
+| `APP_CONFIG_signInPage` | `oidc` — the only provider on the sign-in page |
+| `APP_CONFIG_auth_providers_oidc` | `{"production":{"metadataUrl":"<issuer>/.well-known/openid-configuration","clientId":"…","clientSecret":"…","prompt":"auto","signIn":{"resolvers":[{"resolver":"preferredUsernameMatchingUserEntityName","dangerouslyAllowSignInWithoutUserInCatalog":true}]}}}` |
+| `APP_CONFIG_catalog_providers_keycloakOrg` | optional: `{"default":{"baseUrl":"<keycloak>","realm":"…","loginRealm":"…","clientId":"…","clientSecret":"…","schedule":{"frequency":{"minutes":10},"timeout":{"minutes":3}}}}` — imports the realm's users and groups as catalog entities (the client's service account needs realm-management `query-users`, `view-users`, `query-groups`) |
+
+The Keycloak client's redirect URI is `https://<rhdh route>/api/auth/oidc/handler/frame`. The pod reads
+env at start: after creating or changing the Secret, delete the `backstage-developer-hub` pod.
+`enableExperimentalRedirectFlow: true` (always on) makes sign-in navigate the page instead of opening a
+popup, so it works inside an iframe. The guest provider stays enabled for API tokens
+(`/api/auth/guest/refresh`) even when the sign-in page no longer shows it.
+
+The workshop layer supplies this Secret from the cluster's Keycloak realm
+(`gitops/workshop-config/templates/devhub-sso-client.yaml`); the portfolio itself never needs it.
 
 ## Gitea: in-cluster service address (no host injection)
 
@@ -99,7 +115,9 @@ oc get backstage developer-hub -n rhdh                           # Deployed
 oc get pods -n rhdh                                              # backstage + psql Running
 RT=$(oc get route backstage-developer-hub -n rhdh -o jsonpath='{.spec.host}')
 curl -ks -o /dev/null -w '%{http_code}\n' "https://${RT}/"       # 200
-# guest token, then catalog + actions:
+# with rhdh-auth: the sign-in start redirects to the Keycloak realm with your client (302, Location …/protocol/openid-connect/auth?…client_id=…)
+curl -ks -o /dev/null -w '%{http_code} %{redirect_url}\n' "https://${RT}/api/auth/oidc/start?env=production&flow=redirect&redirectUrl=https://${RT}/"
+# guest token (API only when rhdh-auth is set), then catalog + actions:
 TOKEN=$(curl -ks "https://${RT}/api/auth/guest/refresh" | python3 -c 'import sys,json;print(json.load(sys.stdin)["backstageIdentity"]["token"])')
 curl -ks -H "Authorization: Bearer $TOKEN" "https://${RT}/api/catalog/entities?limit=400"   # parasol-* components
 curl -ks -H "Authorization: Bearer $TOKEN" "https://${RT}/api/scaffolder/v2/actions"        # publish:gitea present

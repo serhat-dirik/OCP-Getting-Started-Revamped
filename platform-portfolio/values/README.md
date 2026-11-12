@@ -7,6 +7,7 @@ The portfolio auto-detects what it can (cluster domain from the ingress config, 
 | Contract | Consumed by | Provided how |
 |---|---|---|
 | `credentials` Secret (ns `openshift-lightspeed`, key `apitoken`) — the MaaS/vLLM API token. The endpoint URL + model are **not** secrets: they're set in git by the `ai-assist` stack's kustomize patch on the `OLSConfig` (`stacks/ai-assist/apps/openshift-lightspeed.yaml`); the component ships generic placeholders. | `ai-assist` stack — `OLSConfig.spec.llm.providers[].credentialsSecretRef` | Created by the consumer layer (e.g. workshop bootstrap from `vars.yaml`) **before** the stack reconciles |
+| `rhdh-auth` Secret (ns `rhdh`), OPTIONAL — `APP_CONFIG_*` keys that override Developer Hub's app-config (e.g. OIDC sign-in). Absent = guest sign-in. | `portal` stack — `components/rhdh/backstage.yaml` (`envFrom`, optional) | Any consumer layer; restart the Dev Hub pod after changing it. Shape in `components/rhdh/README.md` |
 | Extra mirror repos: ConfigMap in ns `ogsr-gitea`, label `git-mirror.portfolio.redhat.com/repos: "true"`, keys `org`, `repos` (`name=url` per line) | `core-devtools` git-mirror job | Any consumer layer adds its own ConfigMap; the job mirrors the union |
 
 ### Workshop-layer contracts

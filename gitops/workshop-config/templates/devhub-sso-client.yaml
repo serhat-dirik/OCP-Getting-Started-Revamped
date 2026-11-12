@@ -1,0 +1,183 @@
+{{- /*
+  devhub-sso-client — Red Hat Developer Hub signs attendees in through the SAME Keycloak realm as the
+  cluster (owner decision 2026-11-12): one SSO session, so the cockpit's Dev Hub tab signs in as the
+  attendee themselves, with no Guest and no GitHub button.
+
+  The realm comes from the same source of truth as cluster-idp-users: the IdP `clusterIdp.idpName` on
+  oauth/cluster (RHDP's realm, or the `ogsr` realm install.sh provisioned). Every sync this Job:
+    • creates/updates client ogsr-devhub in that realm (confidential, code flow, redirect to Dev Hub's
+      /api/auth/oidc/handler/frame); Keycloak generates its secret, which is never printed;
+    • lets that client's service account read users and groups (realm-management query-users,
+      view-users, query-groups), so Dev Hub's Keycloak catalog provider lists every attendee as
+      user:default/<userN>;
+    • writes the portfolio's optional sign-in overlay, Secret rhdh/rhdh-auth (APP_CONFIG_* keys:
+      production auth, signInPage oidc, auth.providers.oidc, catalog.providers.keycloakOrg), and
+      restarts the Dev Hub pod only when that Secret changed.
+  Runs as cluster-idp-users' ServiceAccount: it already reads oauth/cluster and the Keycloak admin
+  Secret; the Role below adds exactly the rhdh writes. bootstrap/ogsr-uninstall.sh deletes the client.
+*/ -}}
+{{- if and .Values.clusterIdp.enabled (include "workshop-config.moduleEnabled" (dict "root" $ "slug" "developer-hub-golden-paths")) }}
+{{- $c := .Values.clusterIdp }}
+# why: write the sign-in overlay Secret and restart the Dev Hub pod that reads it — nothing else in rhdh.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ogsr-devhub-sso-client
+  namespace: rhdh
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["rhdh-auth"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "delete"]
+---
+# why: grants the Role above to the Job's ServiceAccount (cluster-idp-users).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ogsr-devhub-sso-client
+  namespace: rhdh
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ogsr-devhub-sso-client
+subjects:
+  - kind: ServiceAccount
+    name: cluster-idp-users
+    namespace: {{ .Values.systemNamespace }}
+---
+# Idempotent: Dev Hub signs in through the cluster's Keycloak realm and lists its users.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: devhub-sso-client
+  namespace: {{ .Values.systemNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 1200
+  template:
+    spec:
+      serviceAccountName: cluster-idp-users
+      restartPolicy: Never
+      containers:
+        - name: seed
+          image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+          resources:
+            requests: {cpu: 10m, memory: 256Mi}
+            limits: {memory: 512Mi}
+          env:
+            - name: IDP_NAME
+              value: {{ $c.idpName | quote }}
+            - name: ADMIN_SECRET
+              value: {{ $c.adminSecret | quote }}
+            - name: ADMIN_NS
+              value: {{ $c.adminSecretNamespace | quote }}
+            - name: KC
+              value: {{ $c.url | quote }}
+            - name: RHDH
+              value: "https://backstage-developer-hub-rhdh.{{ .Values.clusterDomain }}"
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              IDP="$(oc get oauth cluster -o jsonpath="{.spec.identityProviders[?(@.name==\"${IDP_NAME}\")].openID}")"
+              [[ -n "$IDP" ]] || { echo "❌ oauth/cluster has no OpenID IdP named ${IDP_NAME} — re-run bootstrap/install.sh"; exit 1; }
+              KC_ADMIN="$(oc get secret "$ADMIN_SECRET" -n "$ADMIN_NS" -o jsonpath='{.data.username}' | base64 -d)"
+              KC_PASS="$(oc get secret "$ADMIN_SECRET" -n "$ADMIN_NS" -o jsonpath='{.data.password}' | base64 -d)"
+              export IDP KC_ADMIN KC_PASS
+              exec python3 - <<'PY'
+              import base64, json, os, subprocess, time, urllib.parse, urllib.request
+              issuer = json.loads(os.environ["IDP"])["issuer"].rstrip("/")
+              public, realm = issuer.split("/realms/")
+              KC, R, CLIENT, RHDH = os.environ["KC"] or public, f"/admin/realms/{realm}", "ogsr-devhub", os.environ["RHDH"]
+              def call(method, path, token=None, body=None, form=None):
+                  data, headers = None, {}
+                  if form is not None:
+                      data = urllib.parse.urlencode(form).encode()
+                      headers["Content-Type"] = "application/x-www-form-urlencoded"
+                  elif body is not None:
+                      data = json.dumps(body).encode()
+                      headers["Content-Type"] = "application/json"
+                  if token:
+                      headers["Authorization"] = "Bearer " + token
+                  with urllib.request.urlopen(urllib.request.Request(KC + path, data=data, headers=headers, method=method), timeout=30) as r:
+                      raw = r.read()
+                      return json.loads(raw) if raw else None
+              for attempt in range(60):  # a freshly installed Keycloak may still be starting
+                  try:
+                      tok = call("POST", "/realms/master/protocol/openid-connect/token", form={
+                          "grant_type": "password", "client_id": "admin-cli",
+                          "username": os.environ["KC_ADMIN"], "password": os.environ["KC_PASS"]})["access_token"]
+                      break
+                  except Exception as e:
+                      print(f"… waiting for Keycloak admin API at {KC} ({e.__class__.__name__})"); time.sleep(10)
+              else:
+                  raise SystemExit(f"❌ Keycloak admin API at {KC} never answered")
+              want = {"clientId": CLIENT, "name": "Red Hat Developer Hub (workshop)", "enabled": True,
+                      "publicClient": False, "standardFlowEnabled": True, "directAccessGrantsEnabled": False,
+                      "serviceAccountsEnabled": True, "redirectUris": [RHDH + "/api/auth/oidc/handler/frame"],
+                      "webOrigins": [RHDH]}
+              found = call("GET", f"{R}/clients?clientId={CLIENT}", tok)
+              if found:
+                  call("PUT", f"{R}/clients/{found[0]['id']}", tok, {**found[0], **want})
+              else:
+                  call("POST", f"{R}/clients", tok, want)
+                  found = call("GET", f"{R}/clients?clientId={CLIENT}", tok)
+              cid = found[0]["id"]
+              print(f"  ✓ client {CLIENT} in realm {realm} → {RHDH}")
+              sa = call("GET", f"{R}/clients/{cid}/service-account-user", tok)
+              rm = call("GET", f"{R}/clients?clientId=realm-management", tok)[0]["id"]
+              roles = [call("GET", f"{R}/clients/{rm}/roles/{n}", tok) for n in ("query-users", "view-users", "query-groups")]
+              call("POST", f"{R}/users/{sa['id']}/role-mappings/clients/{rm}", tok, roles)
+              secret = call("GET", f"{R}/clients/{cid}/client-secret", tok)["value"]
+              oidc = {"production": {
+                  "metadataUrl": issuer + "/.well-known/openid-configuration", "clientId": CLIENT,
+                  "clientSecret": secret, "prompt": "auto",
+                  # preferred_username = the attendee's login, so they land as user:default/<userN>; the
+                  # fallback signs them in even before the Keycloak catalog provider's first import.
+                  "signIn": {"resolvers": [{"resolver": "preferredUsernameMatchingUserEntityName",
+                                            "dangerouslyAllowSignInWithoutUserInCatalog": True}]}}}
+              org = {"default": {"baseUrl": public, "loginRealm": realm, "realm": realm, "clientId": CLIENT,
+                                 "clientSecret": secret, "schedule": {"frequency": {"minutes": 10},
+                                 "timeout": {"minutes": 3}, "initialDelay": {"seconds": 15}}}}
+              data = {"APP_CONFIG_auth_environment": "production", "APP_CONFIG_signInPage": "oidc",
+                      "APP_CONFIG_auth_providers_oidc": json.dumps(oidc, sort_keys=True),
+                      "APP_CONFIG_catalog_providers_keycloakOrg": json.dumps(org, sort_keys=True)}
+              live = subprocess.run(["oc", "get", "secret", "rhdh-auth", "-n", "rhdh", "-o", "json"],
+                                    capture_output=True, text=True)
+              have = {k: base64.b64decode(v).decode() for k, v in
+                      (json.loads(live.stdout).get("data") or {}).items()} if live.returncode == 0 else None
+              if have == data:
+                  print("✅ Dev Hub already signs in through Keycloak (rhdh-auth unchanged)")
+                  raise SystemExit(0)
+              secret_obj = {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+                            "metadata": {"name": "rhdh-auth", "namespace": "rhdh", "labels": {
+                                "workshop.redhat.com/layer": "workshop-config", "workshop.redhat.com/owner": "ogsr"}},
+                            "data": {k: base64.b64encode(v.encode()).decode() for k, v in data.items()}}
+              # Server-side apply: no last-applied annotation, so the values live only in .data.
+              subprocess.run(["oc", "apply", "--server-side", "--force-conflicts", "--field-manager=devhub-sso-client",
+                              "-f", "-"], input=json.dumps(secret_obj), text=True, check=True, stdout=subprocess.DEVNULL)
+              # envFrom is read at container start, so the running pod must be replaced to see the change.
+              subprocess.run(["oc", "delete", "pod", "-n", "rhdh", "-l", "rhdh.redhat.com/app=backstage-developer-hub",
+                              "--wait=false"], check=True)
+              print("✅ rhdh-auth written; Dev Hub restarting to sign in through Keycloak (realm " + realm + ")")
+              PY
+{{- end }}

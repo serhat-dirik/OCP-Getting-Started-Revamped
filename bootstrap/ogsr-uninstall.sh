@@ -1986,6 +1986,13 @@ remove_keycloak_attendees() {  # delete the realm users cluster-idp-users CREATE
   else
     echo "   • no group ogsr-attendees in realm ${realm} — no workshop-created accounts"
   fi
+  # workshop-config's devhub-sso-client added client ogsr-devhub (Developer Hub sign-in) to this realm.
+  local dh
+  dh="$(kcapi "${kc}/admin/realms/${realm}/clients?clientId=ogsr-devhub" 2>/dev/null | yq -p json '.[0].id // ""' 2>/dev/null || true)"
+  if [[ -n "$dh" ]]; then
+    if [[ "$DRY_RUN" == "true" ]]; then echo "   • WOULD delete client ${realm}/ogsr-devhub"
+    else kcapi -X DELETE "${kc}/admin/realms/${realm}/clients/${dh}" >/dev/null && ok "deleted client ${realm}/ogsr-devhub (Developer Hub sign-in)"; fi
+  fi
   client="$(kcapi "${kc}/admin/realms/${realm}/clients?clientId=${cid}" 2>/dev/null | yq -p json -o json '.[0]' 2>/dev/null || true)"
   orig=""
   [[ -n "$client" ]] && orig="$(yq -p json '.attributes["ogsr.directAccessGrantsEnabled.original"] // ""' <<< "$client" 2>/dev/null || true)"
@@ -2631,7 +2638,8 @@ print_plan() {
   fi
   echo "  • the argo controller ClusterRoleBinding + ClusterRoles (applied imperatively by argocd-bootstrap)"
   echo "  • attendee sign-in accounts the workshop created in Keycloak realm behind IdP '${CIDP_NAME}' (group ogsr-attendees),"
-  echo "    and that realm client's direct-access-grants setting if the workshop changed it; the workshop's own"
+  echo "    its Developer Hub client ogsr-devhub, and that realm client's direct-access-grants setting if the"
+  echo "    workshop changed it; the workshop's own"
   echo "    IdP 'ogsr-sso' if it added one; a legacy workshop-users IdP + htpasswd secret; node labels/taint"
   echo "  • console plugins WE added to consoles.operator.openshift.io (backlog #24): $(state console_plugins_added '<none recorded>')"
   echo "  • operators WE created:${created:-<none recorded>}"
