@@ -327,7 +327,8 @@ else
       check "exercise 1: you generated the CycloneDX SBOM by hand (target/parasol-claims-sbom.json)" test -s "${HOME:-}/parasol-claims/target/parasol-claims-sbom.json" \
         || hint "exercise 1: clone your fork's seed-vulnerable branch to ~/parasol-claims and run the cyclonedx makeBom command"
       check "exercise 4: your SBOM is signed keylessly and Rekor holds the receipt (~/sbom.bundle)" keyless_bundle_recorded \
-        || hint "exercise 4: cosign initialize --mirror=\$TUF, mint the token, then cosign sign-blob -y --identity-token=\"\$TOKEN\" --bundle ~/sbom.bundle target/parasol-claims-sbom.json"
+        || { hint "exercise 4, step 1 (trust root): export PATH=\"\$HOME/bin:\$PATH\"; TUF=https://tuf-trusted-artifact-signer.\$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}'); cosign initialize --mirror=\"\$TUF\" --root=\"\$TUF/root.json\""
+             hint "exercise 4, step 2 (sign + log): cd ~/parasol-claims && cosign sign-blob -y --identity-token=\"\$(oc create token pipeline --audience trusted-artifact-signer -n ${NS})\" --bundle ~/sbom.bundle target/parasol-claims-sbom.json"; }
     else
       # ⚠, never ❌: exercises 2–4 mutate nothing, so from anywhere but the attendee's own shell there
       # is no evidence to read — and grading absent evidence would fail a lab that was done perfectly.
