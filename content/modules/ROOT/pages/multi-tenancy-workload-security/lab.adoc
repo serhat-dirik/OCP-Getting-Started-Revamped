@@ -36,7 +36,7 @@ In this lab you make that sandbox safe: reject a root-demanding workload and fix
 Most steps below are offered two ways: the *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`), the *CLI* tab uses `oc` in the *Terminal* tab beside these instructions.
 Pick a path once — the tabs stay in sync across the page.
 A few steps are *terminal-only* because the console adds nothing: minting a bound token, `oc adm policy who-can` audits, the read-only "how you were provisioned" tour, and the cluster-policy reads and connection probes in exercise 7.
-Keep the terminal open regardless: the `$NS`/`$PROD` shortcuts you just set live there, and the verify steps rely on them.
+The `$NS`/`$PROD` shortcuts live only in this terminal, so every exercise sets them again in its first block: *if your terminal reconnects, run the first block of the exercise you are in again* — in exercise 1 that is the block above.
 ====
 endif::demo[]
 
@@ -133,8 +133,9 @@ Access is granted per namespace, not per person. A RoleBinding grants its role i
 
 Grant the two roles:
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-dev; PROD={user}-prod
 oc adm policy add-role-to-user edit -z payments-ci -n $NS
 oc adm policy add-role-to-user view system:serviceaccount:$NS:payments-ci -n $PROD
 ----
@@ -167,8 +168,9 @@ Least privilege stops being a slogan once it is an object you can review. Two Se
 
 Author the Role:
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-dev; PROD={user}-prod
 oc apply -n $NS -f - <<'EOF'
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -208,12 +210,17 @@ image::multi-tenancy-workload-security/multi-tenancy-workload-security-01-deploy
 
 Nothing was installed to make this happen and nothing was configured: `restricted-v2` is the default constraint every workload on the cluster already runs under. A namespace admin cannot grant their way around it either — the built-in `admin` role has no rule for Security Context Constraints at all, which is exactly what makes the sandbox safe to hand to a team.
 
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev; PROD={user}-prod
+----
+
 [source,sh,role=execute]
 ----
 oc scale deploy/root-demander --replicas=1 -n $NS
 sleep 6
 oc get deploy root-demander -n $NS
-RS=$(oc get rs -n $NS -l app=root-demander -o jsonpath='{.items[0].metadata.name}')
+RS=$(oc get rs -n $NS -l app=root-demander --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')
 MSG=$(oc get events -n $NS --field-selector involvedObject.name="${RS:-none}" -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' \
   | grep -o 'provider restricted-v2: [^,]*, [0-9]*]' | tail -1)
 echo "${MSG:-rejection event not found yet — wait a few seconds and re-run}"
@@ -326,7 +333,7 @@ The full message lists *every* Security Context Constraint on the cluster and wh
 
 [source,sh,role=execute]
 ----
-RS=$(oc get rs -n $NS -l app=root-demander -o jsonpath='{.items[0].metadata.name}')
+RS=$(oc get rs -n $NS -l app=root-demander --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')
 MSG=$(oc get events -n $NS --field-selector involvedObject.name="${RS:-none}" \
   -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' | grep -o 'provider restricted-v2: [^,]*, [0-9]*]' | tail -1)
 echo "${MSG:-rejection event not found yet — wait a few seconds and re-run}"
@@ -394,7 +401,7 @@ See *which UID it landed on* — you never chose one, so restricted-v2 assigned 
 
 [source,sh,role=execute]
 ----
-POD=$(oc get pods -n $NS -l app=root-demander -o jsonpath='{.items[0].metadata.name}')
+POD=$(oc get pods -n $NS -l app=root-demander --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')   # the newest pod
 oc get pod $POD -n $NS -o jsonpath='scc={.metadata.annotations.openshift\.io/scc}  phase={.status.phase}{"\n"}'
 oc exec $POD -n $NS -- id
 ----
@@ -441,6 +448,13 @@ That friction is deliberate, and it is why fixing the image almost always wins.
 
 == 2. Give the workload a safe identity
 ⏱ *~5 min* · ServiceAccounts and short-lived bound tokens
+
+Set this exercise's shortcuts first:
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev; PROD={user}-prod
+----
 
 The Pod you just fixed runs *as a ServiceAccount* — `root-demander` — even though nobody typed a password.
 Workloads authenticate as ServiceAccounts the way people authenticate through an identity provider, and RBAC governs them identically.
@@ -504,8 +518,9 @@ Now the RBAC that makes the sandbox a *team's* sandbox.
 
 First, prove it currently has *nothing* — and meet the audit command you'll use throughout:
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-dev; PROD={user}-prod
 if WHO=$(oc adm policy who-can update deployments -n $NS); then
   echo "$WHO" | grep -i payments || echo "payments-ci: ungoverned (no deployment access yet)"
 else
@@ -633,6 +648,13 @@ It must *ship* Deployments — but it must *never* read the payment Secrets.
 The built-in `edit` role would work for deploying, but you just proved `edit` can read Secrets, so it's too much.
 This is exactly when you *write your own Role*.
 
+Set this exercise's shortcuts first:
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev; PROD={user}-prod
+----
+
 Create a `deployer` Role: full lifecycle on Deployments, read access to Pods to watch a rollout, and *deliberately no rule for Secrets or ConfigMaps*:
 
 // Grounded 2026-07-29 on OCP 4.22.5, signed in as an attendee (user1), viewport 1600x1000:
@@ -722,7 +744,14 @@ Contrast it with `payments-ci`, which holds `edit` in dev and therefore *can* re
 ⏱ *~6 min* · read the team's budget, blow past it, and fix it
 
 RBAC is *what actions* are allowed; *ResourceQuota* is *how much* the namespace may consume.
-Your team's quota is standing platform policy — read what budget you have and what you've used:
+Your team's quota is standing platform policy — read what budget you have and what you've used.
+Set this exercise's shortcuts first:
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev; PROD={user}-prod
+----
+
 
 // Verified live OCP 4.22.5, 2026-07-26: the ResourceQuota detail page (tabs Details · YAML) leads with
 // percentage/ratio gauges — limits.cpu "28.3% used", pods "4 of 30 used" — over a
@@ -809,7 +838,7 @@ Read why:
 
 [source,sh,role=execute]
 ----
-RS=$(oc get rs -n $NS -l app=quota-buster -o jsonpath='{.items[0].metadata.name}')
+RS=$(oc get rs -n $NS -l app=quota-buster --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')
 MSG=$(oc get events -n $NS --field-selector involvedObject.name="${RS:-none}" -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' \
   | grep 'exceeded quota' | tail -1)
 echo "${MSG:-rejection event not found yet — wait a few seconds and re-run}"
@@ -915,8 +944,9 @@ Turn the lens around and inspect your own governance — read-only.
 Start in your own namespace: the platform bound *you* to a role with a RoleBinding — exactly the way you just bound `payments-ci`.
 Read the bindings in your project (you can, because you are `admin` here):
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-dev; PROD={user}-prod
 oc get rolebinding -n $NS -o custom-columns=NAME:.metadata.name,ROLE:.roleRef.name,SUBJECT:.subjects[0].name | grep -E 'NAME|admin'
 ----
 
@@ -1018,6 +1048,7 @@ Try to create a project of your own:
 
 [source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-dev; PROD={user}-prod
 oc new-project {user}-sandbox
 ----
 
@@ -1109,8 +1140,9 @@ You cannot create a project, but you are `admin` of `{user}-dev`, and NetworkPol
 First, prove the namespace is open.
 This block defines a `probe` helper, then starts a small web server, `web`, in `{user}-dev`:
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-dev; PROD={user}-prod
 IMG=image-registry.openshift-image-registry.svc:5000/openshift/tools:latest
 probe() {
   echo -n "from $1: "
@@ -1122,7 +1154,7 @@ oc wait pod/web -n $NS --for=condition=Ready --timeout=60s
 ----
 
 `probe` lives only in this terminal session.
-If the terminal reconnects, re-run the first block on this page and then this one; `oc run web` then reports `AlreadyExists`, which is harmless.
+If the terminal reconnects, run this block again; `oc run web` then reports `AlreadyExists`, which is harmless.
 
 Call it from `{user}-prod`, a different namespace:
 
