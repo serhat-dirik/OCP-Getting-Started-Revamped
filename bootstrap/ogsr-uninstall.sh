@@ -1761,9 +1761,66 @@ diagnose_stuck_app() {  # <app> — name the blocker and the exact command, neve
   return 0
 }
 
+# ── Dev Spaces workspaces, deleted before the first Application ──────────────
+# The entry app that owns <user>-devspaces also owns the workspace's editor (a DevWorkspaceTemplate in
+# the same namespace), and the cascade deletes both at once. The DevWorkspace operator's mutating
+# webhook re-resolves that template on EVERY update of the workspace, the controller's own finalizer
+# removal included, so once the template is gone the finalizer can never be removed: the workspace,
+# its namespace and the entry app all hang ("plugin for component editor not found"; reproduced on
+# user13, 2026-11-12 — a plain admin finalizer strip is refused too). So cascade_delete_applications
+# first deletes every attendee workspace, to completion. Same scope as step 4: a namespace qualifies
+# only when its che.eclipse.org/username is one of ATTENDEE_USERS; the org's own users are not ours.
+purge_devworkspaces() {  # ns [budget-seconds] — the same logic as tools/ws/ws purge_devworkspaces
+  local ns="$1" budget="${2:-180}" t=0 dw
+  [[ -n "$(oc get devworkspaces.workspace.devfile.io -n "$ns" -o name 2>/dev/null)" ]] || return 0
+  info "deleting the Dev Spaces workspace(s) in ${ns} first, while their editor template still exists…"
+  oc delete devworkspaces.workspace.devfile.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
+  while [[ -n "$(oc get devworkspaces.workspace.devfile.io -n "$ns" -o name 2>/dev/null)" ]]; do
+    if (( t >= budget )); then
+      # Already wedged (the template went first). The webhook admits exactly one update then: dropping
+      # the editor contribution together with the finalizers. The namespace is deleted right after.
+      for dw in $(oc get devworkspaces.workspace.devfile.io -n "$ns" -o name 2>/dev/null); do
+        oc patch "$dw" -n "$ns" --type merge \
+          -p '{"spec":{"contributions":null},"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
+      done
+      sleep 3
+      [[ -z "$(oc get devworkspaces.workspace.devfile.io -n "$ns" -o name 2>/dev/null)" ]] && break
+      err "Dev Spaces workspace(s) in ${ns} still deleting after ${t}s — inspect: oc get devworkspaces -n ${ns} -o yaml"
+      return 1
+    fi
+    sleep 3; t=$((t+3))
+  done
+  ok "Dev Spaces workspace(s) in ${ns} deleted (${t}s)"
+}
+
+purge_attendee_devworkspaces() {  # every attendee Dev Spaces namespace (step 4's scope) → purge_devworkspaces
+  local ns che matched=0 rc=0
+  if [[ -z "${ATTENDEE_USERS// /}" ]]; then
+    echo "   • no attendee usernames captured — no Dev Spaces workspace is authorized for removal"
+    return 0
+  fi
+  while IFS='|' read -r ns che; do
+    [[ -n "$ns" && -n "$che" ]] || continue
+    case "$ATTENDEE_USERS" in *" ${che} "*) ;; *) continue ;; esac
+    [[ -n "$(oc get devworkspaces.workspace.devfile.io -n "$ns" -o name 2>/dev/null)" ]] || continue
+    matched=$((matched + 1))
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "   • WOULD delete the Dev Spaces workspace(s) in ${ns} and wait for their finalizers, before any Application"
+      continue
+    fi
+    purge_devworkspaces "$ns" || rc=1
+  done < <(oc get namespaces \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.metadata.annotations.che\.eclipse\.org/username}{"\n"}{end}' \
+    2>/dev/null || true)
+  if [[ "$matched" -eq 0 ]]; then echo "   • no Dev Spaces workspace in an attendee namespace"; fi
+  return "$rc"
+}
+
 cascade_delete_applications() {
   local app n total=0 sweep_budget all_set p1_set p3_set p2_set
   local mstack p1_roots="" p2_roots="" p3_roots="" p3_apps=""
+  # Workspaces before ANY Application — even with no Application left, step 4 deletes their namespaces.
+  sub purge_attendee_devworkspaces
   # The straggler sweep gets a third of the main budget (floor 30s): someone who sets a short
   # --cascade-timeout means "do not sit here", and a fixed second wait would ignore that.
   sweep_budget=$(( CASCADE_TIMEOUT / 3 ))
@@ -2908,9 +2965,10 @@ step_remove_devspaces_namespaces() {  # 4 — Dev Spaces namespaces auto-provisi
   # it the controller. Namespace deletion issued HERE, before step 5, gives any such finalizer its only
   # real chance to run to completion; issued after step 5, or deferred all the way to step 10, the
   # controller that could have cleared it is already gone and the namespace is left to wedge in
-  # Terminating for a human to diagnose. // TODO(verify-on-cluster): no attendee had an open workspace
-  # to confirm a live DevWorkspace's finalizer actually blocks in that state — the CSV-alive-vs-gone
-  # asymmetry is real either way, and acting earlier is never less safe than acting later.
+  # Terminating for a human to diagnose. Verified on user13 (2026-11-12): a live workspace DOES wedge
+  # its namespace, and for a second reason the CSV ordering cannot fix — its editor template going
+  # first. cascade_delete_applications therefore deletes attendee workspaces before any Application
+  # (purge_attendee_devworkspaces); by this step there is normally none left.
   local ns che matched=0
   if [[ -z "${ATTENDEE_USERS// /}" ]]; then
     echo "   • no attendee usernames captured (Group/workshop-attendees and the htpasswd secret were"
