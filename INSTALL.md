@@ -435,6 +435,14 @@ Re-syncing `workshop-config` re-runs it.
 
 Their images have not loaded yet. Check the ImageStreams in `ogsr-parasol-images`.
 
+### adm solve serverless-zero-to-hero fails on premium-calculator-image-ready
+
+The install builds that module's function once, a few minutes after the install ends. Solve waits
+5 minutes for it.
+
+- Check: `oc get builds -n ogsr-parasol-images | grep premium-calculator`
+- Rebuild: `oc start-build premium-calculator -n ogsr-parasol-images --follow`, then solve again.
+
 ### A LoadBalancer Service stays pending
 
 Expected. There is no MetalLB, on purpose. Everything is exposed through Routes.

@@ -5,9 +5,9 @@
 # a TASTE only — the broker-vs-channel decision, trigger filters, dead-letter sinks and SonataFlow
 # workflows are the eventing-deep-dive deep-dive. The other solve outcome — the second revision (parasol-claims-v2) + the
 # 80/20 tag-based blue/green traffic split + tuned autoscaling — is rendered by parasol-claims-ksvc.yaml
-# when solve=true (it morphs the ksvc that must exist at entry), NOT here. Verify asserts these OUTCOMES
-# exist (a split ksvc, a Broker, a Trigger, a PingSource), never the exact wording, so any correct
-# attendee solution stays green (rule 14).
+# when solve=true (it morphs the ksvc that must exist at entry), NOT here. Exercise 5's function is the
+# last block below. Verify asserts these OUTCOMES exist (a split ksvc, a Broker, a Trigger, a PingSource,
+# a Ready function ksvc), never the exact wording, so any correct attendee solution stays green (rule 14).
 ---
 # why: the default in-memory Broker (MTChannelBasedBroker) — the eventing hub. In-memory needs no Kafka/
 # Streams subscription (eventing-deep-dive's optional [ADD-ON]); it is the subscription-free default the taste runs on.
@@ -66,4 +66,63 @@ spec:
       apiVersion: serving.knative.dev/v1
       kind: Service
       name: parasol-claims
+---
+# why: exercise 5's outcome without its build. The install builds the lab's function once
+# (workshop-config function-image.yaml); this hook waits until that image pulls through this
+# namespace's image-puller grant, so the ksvc below never starts a revision on a missing image (a
+# revision past Knative's progress deadline stays failed). The kubelet does the waiting: no token,
+# no extra RBAC. Right after install the build may still be running; past the deadline the solve
+# sync fails on this hook, and `oc get builds -n ogsr-parasol-images` says why.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: premium-calculator-image-ready
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+  labels:
+    workshop.redhat.com/module: serverless-zero-to-hero
+    workshop.redhat.com/owner: ogsr
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: pull
+          image: {{ .Values.functionImage }}
+          imagePullPolicy: Always
+          command: ["true"]
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+---
+# why: the function exercise 5 deploys with `kn func deploy --remote`, from the install-built image.
+# Labelled as kn func labels its ksvc, so verify's function check (function.knative.dev=true) and
+# `kn func` tooling recognise it. No resources: like a kn func deploy, it takes the LimitRange defaults.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: premium-calculator
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    function.knative.dev: "true"
+    function.knative.dev/name: premium-calculator
+    function.knative.dev/runtime: quarkus
+    app.openshift.io/runtime: quarkus
+    workshop.redhat.com/module: serverless-zero-to-hero
+    workshop.redhat.com/owner: ogsr
+spec:
+  template:
+    spec:
+      containers:
+        - name: user-container
+          image: {{ .Values.functionImage }}
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
 {{- end }}

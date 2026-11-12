@@ -133,7 +133,7 @@ else
   check "eventing Broker present (in-memory)"                       broker_present     || hint "not done yet — the entry state ships no eventing objects; creating the Broker is the eventing-taste hub: kn broker create default -n ${NS}"
   check "Trigger present (Broker -> parasol-claims ksvc)"           trigger_present    || hint "not done yet — you create this during the lab (a Trigger routing the Broker to the parasol-claims ksvc); expected red until you do"
   check "PingSource present (source -> Broker)"                     pingsource_present || hint "not done yet — you create this during the lab (a PingSource emitting events into the Broker); expected red until you do"
-  check "a Knative Function (kn func) is deployed and Ready"        function_ready     || hint "not done yet — lab section 5 builds one on the cluster (kn func create, then kn func deploy --remote); expected red until it finishes. adm solve does NOT build it. If the deploy ran and failed: oc get pipelinerun -n ${NS} and see the Troubleshooting page"
+  check "a Knative Function (kn func) is deployed and Ready"        function_ready     || hint "not done yet — lab section 5 builds one on the cluster (kn func create, then kn func deploy --remote); expected red until it finishes (adm solve deploys it from the install-built image instead). If the deploy ran and failed: oc get pipelinerun -n ${NS} and see the Troubleshooting page"
 fi
 
 verify_summary

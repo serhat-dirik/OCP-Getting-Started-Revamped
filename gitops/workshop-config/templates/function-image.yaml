@@ -1,0 +1,89 @@
+{{- /*
+  function-image — serverless-zero-to-hero's Knative Function, built ONCE at install so `adm solve`
+  deploys it without a build.
+
+  WHY. Exercise 5 builds `premium-calculator` per attendee with `kn func deploy --remote` (~2 min, an
+  OpenShift Pipelines run in {user}-dev). `adm solve` renders the module's end state from Git and so
+  could not build it: verify after solve stayed red on the function check. Now this BuildConfig builds
+  the same function once, and the entry state's solve render deploys it from here (pulled through the
+  {user}-dev image-puller grant in parasol-images-pull.yaml; `adm scale-users` already re-renders that).
+  The attendee path is unchanged: their own build, in their own namespace.
+
+  SAME SHAPE AS THE PARASOL IMAGES (parasol-images-build.yaml): an ImageStream plus a BuildConfig whose
+  ConfigChange trigger runs build #1 on creation, so the build is async and never holds this app's
+  health. A plain BuildConfig, not a binary one, so `adm rebuild-images` can start it like the others.
+  Wave 3: after maven-mirror-warm (wave 2) completes, so the build resolves through a warm mirror.
+
+  WHAT IT BUILDS. Exactly what the lab generates: the cluster's own Serverless `kn` (the lab's func
+  version) runs `kn func create -l quarkus -t http`, Maven packages it through the mirror, and the
+  fast-jar lands in /deployments of the same JDK image, which is what func's S2I build produces (its
+  func.yaml buildEnvs: MAVEN_S2I_ARTIFACT_DIRS=target/quarkus-app). The kn stage uses full UBI because
+  the JDK image has no gzip. ponytail: amd64 kn only, like the mirror's warm-up; a rebuild picks up a
+  newer func template only when someone runs `adm rebuild-images --image premium-calculator`.
+*/ -}}
+{{- if include "workshop-config.moduleEnabled" (dict "root" $ "slug" "serverless-zero-to-hero") }}
+{{- $ns := .Values.parasolImages.namespace }}
+# The pre-built function adm solve deploys into {user}-dev.
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: premium-calculator
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: premium-calculator
+    workshop.redhat.com/module: serverless-zero-to-hero
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  lookupPolicy:
+    local: false
+---
+# Builds the lab's kn func Quarkus HTTP function once, at creation (ConfigChange).
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: premium-calculator
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: premium-calculator
+    workshop.redhat.com/module: serverless-zero-to-hero
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  runPolicy: Serial
+  successfulBuildsHistoryLimit: 5
+  failedBuildsHistoryLimit: 5
+  source:
+    type: Dockerfile
+    dockerfile: |
+      FROM registry.access.redhat.com/ubi9/ubi@sha256:8b212f75a0e5a156ac28b1c5c030d2e8a07715254e19d522286118279399af81 AS src
+      ARG KN_URL
+      RUN cd /tmp && curl -ksfL --retry 10 --retry-all-errors --retry-delay 10 "$KN_URL" | tar xz kn \
+       && HOME=/tmp ./kn func create -l quarkus -t http /tmp/premium-calculator
+      FROM registry.access.redhat.com/ubi9/openjdk-21@sha256:24dad82bd5d25d9b0c85f0e9c976e47ccce787cc73792355462bf54fe03d9a77 AS build
+      ARG MAVEN_MIRROR_URL
+      COPY --from=src --chown=185:0 /tmp/premium-calculator /tmp/src
+      RUN cd /tmp/src \
+       && printf '<settings><mirrors><mirror><id>mirror.default</id><url>%s</url><mirrorOf>*</mirrorOf></mirror></mirrors></settings>' "$MAVEN_MIRROR_URL" > /tmp/settings.xml \
+       && mvn -B -ntp -s /tmp/settings.xml -DskipTests package
+      FROM registry.access.redhat.com/ubi9/openjdk-21@sha256:24dad82bd5d25d9b0c85f0e9c976e47ccce787cc73792355462bf54fe03d9a77
+      COPY --from=build --chown=185:0 /tmp/src/target/quarkus-app/ /deployments/
+  strategy:
+    type: Docker
+    dockerStrategy:
+      buildArgs:
+        - name: KN_URL
+          value: https://kn-openshift-serverless.{{ .Values.clusterDomain }}/kn-linux-amd64.tar.gz
+        - name: MAVEN_MIRROR_URL
+          value: http://maven-mirror.{{ .Values.mavenMirror.namespace }}.svc:8080
+  output:
+    to:
+      kind: ImageStreamTag
+      name: premium-calculator:latest
+  triggers:
+    - type: ConfigChange
+{{- end }}
