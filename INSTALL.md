@@ -36,26 +36,28 @@ repo. `tools/ws/adm` is the operator CLI; attendees only get `ws` inside their c
 ### Sizing
 
 ```
-CPU    = 32  + attendees × 2.6     + 20%
-Memory = 56 Gi + attendees × 1.75 Gi + 20%
+CPU    = 32    + attendees × 3    + 20%
+Memory = 58 Gi + attendees × 2 Gi + 20%
 ```
 
-- 32 CPU / 56 Gi is the platform before any attendee does anything (measured requests).
-- **CPU decides the worker count, not memory.** Each Dev Spaces workspace requests 2.5 CPU on one node.
-- Each attendee's terminal pod requests 0.1 CPU / 0.25 Gi and a 1 Gi home claim (measured: idle 1m / 2 Mi;
-  a Maven build in it peaks near 0.8 CPU / 285 Mi).
+- 32 CPU / 58 Gi (~200 pods) is the platform before any attendee does anything (measured requests,
+  2026-11-12; OpenShift's own pods not included).
+- Per attendee: 0.1 CPU / 0.25 Gi idle (their terminal pod, plus a 1 Gi home claim). Working, at most
+  3 CPU / 2 Gi (measured across 13 attendees).
+- **CPU decides the worker count, not memory.** A running Dev Spaces workspace alone requests 2.55 CPU.
+  A terminal pod running a Maven build peaks near 0.8 CPU / 285 Mi actual.
 - Prefer fewer, larger workers. Below 16 vCPU per worker, capacity is stranded.
 - Size on requests, never on a `top` reading — a cluster that looks idle can still refuse a pod.
-- RHACS alone is 26 Gi. To order lean, disable the modules that use it (`modules_disabled`).
+- RHACS alone is 11 CPU / 25 Gi. To order lean, disable the modules that use it (`modules_disabled`).
 
 Workers needed **by capacity** (allocatable ≈ vCPU − 2):
 
 | Worker size | 12 attendees | 20 | 25 | 30 |
 |---|---|---|---|---|
-| 16 vCPU / 64 GiB | 6 | 8 | 9 | 10 |
-| 24 vCPU / 96 GiB | 4 | 5 | 6 | 6 |
-| **32 vCPU / 64 GiB** | **3** | **4** | **4** | **5** |
-| 48 vCPU / 192 GiB | 2 | 3 | 3 | 3 |
+| 16 vCPU / 64 GiB | 6 | 8 | 10 | 11 |
+| 24 vCPU / 96 GiB | 4 | 6 | 6 | 7 |
+| **32 vCPU / 64 GiB** | **3** | **4** | **5** | **5** |
+| 48 vCPU / 192 GiB | 2 | 3 | 3 | 4 |
 
 Then apply the node count below. **Five 32 vCPU / 64 GiB workers run any workshop up to 30 people.**
 
