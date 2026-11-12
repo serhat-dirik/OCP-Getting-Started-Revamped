@@ -5,15 +5,17 @@ include::partial$version-attributes.adoc[]
 // Lab page for Serverless. Workshop exercises are guarded ifndef::demo[]; the DEMO rendering shows only the
 // presenter arc. Every command runs in the Showroom terminal as {user}, so blocks are
 // [source,sh,role=execute]. The FIRST block sets NS={user}-dev (subs=attributes); every later block uses
-// $NS / $URL with NO subs so jsonpath braces stay literal. All commands + outputs + timings were performed
+// $NS / $URL with NO subs so jsonpath braces stay literal. Exercises 2-6 each open with a block that
+// re-sets NS and URL (ex5: FURL), so a terminal reconnect is fixed by re-running that one block, and every
+// check that calls $URL/$FURL fails loudly when it is empty (audit 2026-11-12). All commands + outputs + timings were performed
 // on OCP 4.21.22 (Kubernetes 1.34) against a live OpenShift Serverless control plane (Knative Serving
 // + Eventing) as the sample user in namespace user6-dev on 2026-07-13: the ksvc inspection, the ~15 s JVM
 // cold start (HTTP 200 in 15.27s) vs the warm 0.106 s, the concurrency-driven autoscale 0->2->3 (max-scale
 // ceiling), the 80/20 tag-based revision split (both sub-routes 200; both revision Deployments woken), and
 // the source->broker->trigger eventing taste (Broker/Trigger/PingSource Ready; a real delivery returning
 // HTTP 405 — the app serves / for GET but has no CloudEvents POST handler, so Method Not Allowed) are REAL captures. NAMESPACE in output is the sample
-// user user6-dev (yours is {user}-dev); the cluster domain in output is a generic placeholder (yours is
-// {cluster_domain}). Knative AUTO-CREATES the ksvc edge Route — the lab NEVER runs `oc create route edge`
+// user user6-dev (yours is {user}-dev); the cluster domain in output renders as {cluster_domain} (a
+// literal <cluster-domain> in a subs="attributes" block is emitted as an HTML tag and vanishes). Knative AUTO-CREATES the ksvc edge Route — the lab NEVER runs `oc create route edge`
 // for a ksvc (documented exception). kn (confirmed in the cockpit) is the primary CLI; CR steps are
 // dual-path [tabs] Console(Serverless / Import YAML)::CLI(kn). The cold-start honesty and the eventing 405
 // are explicit NOTEs, never // TODO.
@@ -40,7 +42,9 @@ In this lab you *observe* the deployed service, *wake it from zero* and feel the
 Where you create or change a Knative object, you get two tabs: the *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`) — the *Serverless* area of the navigation, or the masthead *Quick create* (+) menu → *Import YAML* — and the *CLI* tab uses `kn` (the Knative CLI) in the *Terminal* tab beside these instructions.
 Pick a path once — the tabs stay in sync across the page.
 Two things are terminal-only on purpose: *driving traffic* from inside the cluster is an `oc exec … curl`, and *watching pods scale* is a `oc get pods -w` (the console *Topology* view shows the same scale-to-zero, but the numbers you'll read are from the terminal).
-The output blocks below show *your* namespace, `{user}-dev`; the cluster domain shown in them is a placeholder — read the *shape*, not the exact values.
+The output blocks below show *your* namespace, `{user}-dev`, and your cluster's domain; ages, timings and pod names will differ — read the *shape*, not the exact values.
+Exercises 2 to 6 each open with a block that sets the shell shortcuts they use, `$NS` and the service URL; exercise 1 uses the block above and sets `$URL` itself.
+*If your terminal reconnects, run the exercise's first block again* — a fresh shell has none of those shortcuts.
 ====
 endif::demo[]
 
@@ -135,15 +139,18 @@ Capacity follows offered load instead of a replica count someone guessed at sizi
 
 Confirm the service is back at zero first. If a pod is still listed, give it another minute of quiet and run this again:
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-dev
 oc get pods -n $NS -l serving.knative.dev/service=parasol-claims
 ----
 
 Then drive the burst and watch the autoscaler; `Ctrl-C` ends the watch:
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-dev
+URL=$(oc get ksvc parasol-claims -n $NS -o jsonpath='{.status.url}')
 oc exec deploy/demo-client -n $NS -- sh -c '
   end=$(( $(date +%s) + 90 ))
   for i in $(seq 1 12); do
@@ -166,12 +173,15 @@ image::serverless-zero-to-hero/serverless-zero-to-hero-03-serverless-services-re
 
 There is no second Deployment to create, no load-balancer change to request, and nothing to rebuild in order to go back. The previous revision never went away, so the rollback is the same one-line command as the rollout with different numbers — which is what turns progressive delivery into something a team will actually use on a Tuesday afternoon.
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
 # 80/20 blue-green split across the two revisions, each tag also gets its own sub-route:
+NS={user}-dev
 kn service update parasol-claims -n $NS \
   --tag parasol-claims-v1=stable --tag parasol-claims-v2=candidate \
   --traffic stable=80 --traffic candidate=20 --no-wait
+# --no-wait returns before the Route is reprogrammed; wait (up to a minute) until it reports the new weights
+for i in $(seq 1 30); do [ "$(oc get ksvc parasol-claims -n $NS -o jsonpath='{.status.traffic[?(@.tag=="stable")].percent}')" = 80 ] && break; sleep 2; done
 kn revision list -n $NS
 ----
 
@@ -179,9 +189,12 @@ kn revision list -n $NS
 
 Then the rollback — one line, with the candidate left in place, ready to be re-weighted:
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-dev
 kn service update parasol-claims -n $NS --traffic stable=100 --traffic candidate=0 --no-wait
+# --no-wait returns before the Route is reprogrammed; wait (up to a minute) until it reports the new weights
+for i in $(seq 1 30); do [ "$(oc get ksvc parasol-claims -n $NS -o jsonpath='{.status.traffic[?(@.tag=="stable")].percent}')" = 100 ] && break; sleep 2; done
 kn revision list -n $NS
 ----
 
@@ -244,7 +257,7 @@ kn revision list -n $NS
 [source,texinfo,subs="attributes"]
 ----
 NAME             URL                                                            LATEST              AGE   CONDITIONS   READY   REASON
-parasol-claims   https://parasol-claims-{user}-dev.<cluster-domain>              parasol-claims-v1   6m    3 OK / 3     True
+parasol-claims   https://parasol-claims-{user}-dev.{cluster_domain}              parasol-claims-v1   6m    3 OK / 3     True
 
 NAME                SERVICE          TRAFFIC   TAGS   GENERATION   AGE   CONDITIONS   READY   REASON
 parasol-claims-v1   parasol-claims   100%             1            6m    3 OK / 4     True
@@ -262,7 +275,7 @@ oc get ksvc parasol-claims -n $NS -o jsonpath='ready={.status.conditions[?(@.typ
 .Expected output (an HTTPS URL Knative published; the ksvc is Ready even at zero pods)
 [source,texinfo,subs="attributes"]
 ----
-service URL: https://parasol-claims-{user}-dev.<cluster-domain>
+service URL: https://parasol-claims-{user}-dev.{cluster_domain}
 ready=True  latestReady=parasol-claims-v1
 ----
 
@@ -303,6 +316,15 @@ The `parasol-claims` `ksvc` is the *only* object you'd author. Behind it, `oc ge
 == 2. Scale to zero and back — feel the cold start
 ⏱ *~6 min* · wake the service with one request, and measure the honest cost
 
+Set this exercise's shortcuts first — your namespace and the service URL (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+URL=$(oc get ksvc parasol-claims -n $NS -o jsonpath='{.status.url}')
+echo "namespace: $NS  service URL: ${URL:-(none: parasol-claims is missing, see exercise 1)}"
+----
+
 For a real cold start the service must be at *zero* first — and right after you set up the module its initial pod is often still running. Wait for Knative to scale it away (about 60-90s of no traffic), watching the pod disappear:
 
 [source,sh,role=execute]
@@ -318,7 +340,7 @@ Now send it a request and *time it* — the first caller pays the *cold start* w
 
 [source,sh,role=execute]
 ----
-oc exec deploy/demo-client -n $NS -- curl -s -k -o /dev/null -w "cold start: HTTP %{http_code} in %{time_total}s\n" "$URL/api/claims"
+oc exec deploy/demo-client -n $NS -- curl -s -k -o /dev/null -w "cold start: HTTP %{http_code} in %{time_total}s\n" "${URL:?is empty - run the first block of this exercise again}/api/claims"
 ----
 
 // Cold start is a RANGE, not a number. Three measurements on this cluster: 15.27s (original capture),
@@ -339,7 +361,7 @@ That is *not* a hang — it's the cold start, and it's the whole tradeoff of sca
 
 [source,sh,role=execute]
 ----
-oc exec deploy/demo-client -n $NS -- curl -s -k -o /dev/null -w "warm:       HTTP %{http_code} in %{time_total}s\n" "$URL/api/claims"
+oc exec deploy/demo-client -n $NS -- curl -s -k -o /dev/null -w "warm:       HTTP %{http_code} in %{time_total}s\n" "${URL:?is empty - run the first block of this exercise again}/api/claims"
 oc get pods -n $NS -l serving.knative.dev/service=parasol-claims
 ----
 
@@ -355,7 +377,7 @@ The pod is `2/2` — your `parasol-claims` container plus the `queue-proxy` side
 
 [source,sh,role=execute]
 ----
-oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k "'$URL'/api/claims" | head -c 160; echo'
+oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k "'${URL:?is empty - run the first block of this exercise again}'/api/claims" | head -c 160; echo'
 ----
 
 .Expected output (the seeded Parasol claims)
@@ -372,7 +394,7 @@ Now the deliberate *break-and-fix*, because it teaches the cold start the hard w
 until [ "$(oc get pods -n $NS -l serving.knative.dev/service=parasol-claims --no-headers 2>/dev/null | wc -l | tr -d ' ')" = 0 ]; do sleep 10; done
 echo "scaled to zero"
 # now a request with a 5-second timeout — SHORTER than the 10-30 s cold start:
-oc exec deploy/demo-client -n $NS -- curl -s -k -m 5 -o /dev/null -w "with -m5: HTTP %{http_code} in %{time_total}s\n" "$URL/api/claims" || echo "curl gave up (exit $?) — the cold start outran the 5s timeout"
+oc exec deploy/demo-client -n $NS -- curl -s -k -m 5 -o /dev/null -w "with -m5: HTTP %{http_code} in %{time_total}s\n" "${URL:?is empty - run the first block of this exercise again}/api/claims" || echo "curl gave up (exit $?) — the cold start outran the 5s timeout"
 ----
 
 .Expected output (the request is abandoned before the cold start finishes; `curl` exits 28, which `oc exec` surfaces as its own line before the `||` message)
@@ -389,7 +411,7 @@ The client gave up at 5 seconds, before the cold start could complete — a clas
 [source,sh,role=execute]
 ----
 # fix option A — a realistic client timeout that allows for the cold start:
-oc exec deploy/demo-client -n $NS -- curl -s -k -m 60 -o /dev/null -w "with -m60: HTTP %{http_code} in %{time_total}s\n" "$URL/api/claims"
+oc exec deploy/demo-client -n $NS -- curl -s -k -m 60 -o /dev/null -w "with -m60: HTTP %{http_code} in %{time_total}s\n" "${URL:?is empty - run the first block of this exercise again}/api/claims"
 # fix option B — pin a warm floor so scale-from-zero never hits the critical path.
 # Knative revisions are IMMUTABLE: changing the template (here, the min-scale floor) needs a NEW
 # revision name, or the webhook rejects "changes without a name change" — so name this one.
@@ -435,6 +457,15 @@ kn service update parasol-claims -n $NS --scale-min 0 --revision-name parasol-cl
 
 == 3. Autoscale under load, and tune concurrency
 ⏱ *~8 min* · watch it climb from zero to the ceiling on concurrency, then melt back down
+
+Set this exercise's shortcuts first — your namespace and the service URL (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+URL=$(oc get ksvc parasol-claims -n $NS -o jsonpath='{.status.url}')
+echo "namespace: $NS  service URL: ${URL:-(none: parasol-claims is missing, see exercise 1)}"
+----
 
 Knative's autoscaler scales on *concurrency* — how many requests are in flight at once — not on CPU. To make that visible, first *tune* the service: cap each pod at a *hard* concurrency of `2` and a *max-scale* of `3`. Changing the template mints a new revision — name it `parasol-claims-v2`.
 
@@ -603,7 +634,7 @@ Drive a burst from the `demo-client` in the background and *watch the pods climb
 oc exec deploy/demo-client -n $NS -- sh -c '
   end=$(( $(date +%s) + 90 ))
   for i in $(seq 1 12); do
-    ( while [ $(date +%s) -lt $end ]; do curl -s -k -o /dev/null "'$URL'/api/claims"; done ) &
+    ( while [ $(date +%s) -lt $end ]; do curl -s -k -o /dev/null "'${URL:?is empty - run the first block of this exercise again}'/api/claims"; done ) &
   done; wait' &
 # ...and watch the autoscaler react (Ctrl-C once you have seen three pods at 2/2):
 oc get pods -n $NS -l serving.knative.dev/service=parasol-claims -w
@@ -675,6 +706,15 @@ Knative's default target is a *soft* concurrency goal (`autoscaling.knative.dev/
 
 == 4. Split traffic between revisions
 ⏱ *~8 min* · an 80/20 blue-green split, and a one-line rollback
+
+Set this exercise's shortcuts first — your namespace and the service URL (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+URL=$(oc get ksvc parasol-claims -n $NS -o jsonpath='{.status.url}')
+echo "namespace: $NS  service URL: ${URL:-(none: parasol-claims is missing, see exercise 1)}"
+----
 
 You now have *four* revisions — but *two routable targets*: `v1` (the original) and `v2` (the tuned one); the `-warm`/`-cold` pair from exercise 2 sit unrouted in the history. Because a revision is a frozen, addressable version, shifting traffic between the two targets is a *one-object change* on the Route: tag `v1` as `stable` at 80% and `v2` as `candidate` at 20%.
 
@@ -773,9 +813,9 @@ parasol-claims-v1-warm   parasol-claims                         2            5m 
 parasol-claims-v1        parasol-claims   80%       stable      1            10m   3 OK / 4     True
 
 tag=stable rev=parasol-claims-v1 percent=80
-  url=https://stable-parasol-claims-{user}-dev.<cluster-domain>
+  url=https://stable-parasol-claims-{user}-dev.{cluster_domain}
 tag=candidate rev=parasol-claims-v2 percent=20
-  url=https://candidate-parasol-claims-{user}-dev.<cluster-domain>
+  url=https://candidate-parasol-claims-{user}-dev.{cluster_domain}
 ----
 
 The two *tagged sub-routes* let you address either revision *directly* — hit each and confirm it serves:
@@ -799,7 +839,7 @@ Now prove the *main* URL really splits across both revisions — send a batch th
 
 [source,sh,role=execute]
 ----
-oc exec deploy/demo-client -n $NS -- sh -c 'for i in $(seq 1 50); do curl -s -k -o /dev/null "'$URL'/api/claims"; done; echo "sent 50"'
+oc exec deploy/demo-client -n $NS -- sh -c 'for i in $(seq 1 50); do curl -s -k -o /dev/null "'${URL:?is empty - run the first block of this exercise again}'/api/claims"; done; echo "sent 50"'
 # the candidate revision only gets ~20% of these requests, so it may still be mid cold-start
 # (10-30 s on this cluster) right after the batch — give it a moment before reading READY:
 sleep 30
@@ -823,6 +863,8 @@ Finally, the *rollback* — the reason this model is cheap. Send *100%* back to 
 [source,sh,role=execute]
 ----
 kn service update parasol-claims -n $NS --traffic stable=100 --traffic candidate=0 --no-wait
+# --no-wait returns before the Route is reprogrammed; wait (up to a minute) until it reports the new weights
+for i in $(seq 1 30); do [ "$(oc get ksvc parasol-claims -n $NS -o jsonpath='{.status.traffic[?(@.tag=="stable")].percent}')" = 100 ] && break; sleep 2; done
 kn revision list -n $NS
 ----
 
@@ -900,6 +942,15 @@ Everything so far started from an image somebody else built. `kn func` starts on
 This terminal has no container engine, so you build *on the cluster*: `--remote` uploads your source into `{user}-dev` and runs the build there as an OpenShift Pipelines pipeline, pushes the image to the internal registry, and deploys it.
 What comes out is a `ksvc` like `parasol-claims`, so everything from exercises 1–4 applies to it unchanged.
 
+Set this exercise's shortcuts first — your namespace and, once you have deployed it, the function's URL (re-run this block after a reconnect; it does not touch the project):
+
+[source,sh,role=execute,subs="attributes"]
+----
+cd ~ && NS={user}-dev
+FURL=$(oc get ksvc premium-calculator -n $NS -o jsonpath='{.status.url}' 2>/dev/null)
+echo "namespace: $NS  function URL: ${FURL:-(none yet: you deploy it below)}"
+----
+
 Create the project from the Quarkus HTTP template. The first line clears a project an earlier pass may have left, because `kn func create` refuses an existing one:
 
 [source,sh,role=execute]
@@ -970,8 +1021,8 @@ Running Pipeline Task: scaffold
 Running Pipeline Task: Building function image on the cluster
 Running Pipeline Task: Deploying function to the cluster
 ✅ Function deployed in namespace "{user}-dev" and exposed at URL:
-   https://premium-calculator-{user}-dev.<cluster-domain>
-Function Deployed at https://premium-calculator-{user}-dev.<cluster-domain>
+   https://premium-calculator-{user}-dev.{cluster_domain}
+Function Deployed at https://premium-calculator-{user}-dev.{cluster_domain}
 ----
 
 While it runs, watch the build — or read it back afterwards:
@@ -1028,15 +1079,15 @@ echo "scaled to zero — the next call is a cold start"
 [source,texinfo,subs="attributes"]
 ----
 NAME                 URL                                                         LATEST                     AGE   CONDITIONS   READY   REASON
-parasol-claims       https://parasol-claims-{user}-dev.<cluster-domain>          parasol-claims-v2          40m   3 OK / 3     True
-premium-calculator   https://premium-calculator-{user}-dev.<cluster-domain>      premium-calculator-00001   39s   3 OK / 3     True
+parasol-claims       https://parasol-claims-{user}-dev.{cluster_domain}          parasol-claims-v2          40m   3 OK / 3     True
+premium-calculator   https://premium-calculator-{user}-dev.{cluster_domain}      premium-calculator-00001   39s   3 OK / 3     True
 scaled to zero — the next call is a cold start
 ----
 
 [source,sh,role=execute]
 ----
-oc exec deploy/demo-client -n $NS -- curl -s -k -m 60 -w "\ncold start: HTTP %{http_code} in %{time_total}s\n" -H "Content-Type: application/json" -d '{"message":"premium quote for CLM-1001"}' "$FURL"
-oc exec deploy/demo-client -n $NS -- curl -s -k -m 60 -w "\nwarm:       HTTP %{http_code} in %{time_total}s\n" -H "Content-Type: application/json" -d '{"message":"premium quote for CLM-1001"}' "$FURL"
+oc exec deploy/demo-client -n $NS -- curl -s -k -m 60 -w "\ncold start: HTTP %{http_code} in %{time_total}s\n" -H "Content-Type: application/json" -d '{"message":"premium quote for CLM-1001"}' "${FURL:?is empty - run the first block of this exercise again}"
+oc exec deploy/demo-client -n $NS -- curl -s -k -m 60 -w "\nwarm:       HTTP %{http_code} in %{time_total}s\n" -H "Content-Type: application/json" -d '{"message":"premium quote for CLM-1001"}' "${FURL:?is empty - run the first block of this exercise again}"
 ----
 
 .Expected output (the handler echoes its input; a cold start of a few seconds, not tens)
@@ -1057,6 +1108,15 @@ Compare that with exercise 2. The same scale-to-zero, but the function woke in a
 
 == 6. A taste of eventing — source, broker, trigger
 ⏱ *~8 min* · wake the service on an event, and meet the honest boundary
+
+Set this exercise's shortcuts first — your namespace and the service URL (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+URL=$(oc get ksvc parasol-claims -n $NS -o jsonpath='{.status.url}')
+echo "namespace: $NS  service URL: ${URL:-(none: parasol-claims is missing, see exercise 1)}"
+----
 
 So far everything has been *request-driven*. Knative *Eventing* adds *event-driven* delivery: a *source* emits events into a *broker*, and a *trigger* routes them to a *sink* — your `ksvc`, which *wakes from zero* to receive them. Wire all three.
 
@@ -1156,7 +1216,7 @@ oc exec deploy/demo-client -n $NS -- sh -c '
     -X POST -H "Content-Type: application/json" \
     -H "ce-specversion: 1.0" -H "ce-type: dev.knative.sources.ping" \
     -H "ce-source: /apis/v1/namespaces/'$NS'/pingsources/claim-ticker" -H "ce-id: demo-1" \
-    -d "{\"source\":\"claim-ticker\"}" "'$URL'/"'
+    -d "{\"source\":\"claim-ticker\"}" "'${URL:?is empty - run the first block of this exercise again}'/"'
 ----
 
 .Expected output (the delivery is real — and honestly returns 405)
