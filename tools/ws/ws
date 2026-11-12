@@ -1518,6 +1518,44 @@ terminal_pod_for() {  # user [any] → newest (Running, unless "any") pod of the
   printf '%s' "${p#pod/}"
 }
 
+terminal_ready_list() {  # → "<user>=<readyReplicas>" per attendee terminal Deployment, ONE cluster-wide
+  # list. oc's rc and stderr pass through: `status` discards them, `doctor` tells Forbidden from absent.
+  oc get deploy -A -l app.kubernetes.io/name=ogsr-terminal \
+    -o jsonpath='{range .items[*]}{.metadata.labels.workshop\.redhat\.com/terminal-for}{"="}{.status.readyReplicas}{"\n"}{end}'
+}
+
+terminal_ready() {  # list user → 0 when that attendee's terminal has a Ready replica. The ONE readiness
+  # test: `status` and `doctor` both grade through it, so they cannot disagree about a pod.
+  local r; r="$(printf '%s\n' "$1" | sed -n "s/^${2}=//p")"
+  [[ "${r:-0}" -ge 1 ]]
+}
+
+wipe_terminal_home() {  # user → restart the attendee's terminal pod, then empty its home claim.
+  # The home is a PVC, so a restart alone re-mounts the previous person's files (history, kubeconfig,
+  # clones). Restart FIRST: ttyd SIGHUPs its shells on the way down and bash writes ~/.bash_history as
+  # it exits, so a wipe before the restart is refilled by the shells it meant to end. An exec, not a
+  # PVC delete: workshop-config owns the claim and selfHeal would race us re-creating it.
+  local u="$1" tns="${TERMINAL_NS_PREFIX}$1" home="${SHARED_COCKPIT_HOMES}/$1"
+  if ! oc get deploy terminal -n "$tns" >/dev/null 2>&1; then
+    info "  ${u}: no terminal in ${tns} — nothing to wipe"
+    return 0
+  fi
+  if ! oc rollout restart deploy/terminal -n "$tns" >/dev/null 2>&1 \
+     || ! oc rollout status deploy/terminal -n "$tns" --timeout=180s >/dev/null 2>&1; then
+    err "  ${u}: ${tns}/terminal did not restart, home NOT wiped — check: oc get deploy,pods -n ${tns}"
+    return 1
+  fi
+  # lost+found belongs to the filesystem; everything else in the home is the attendee's.
+  if oc exec deploy/terminal -n "$tns" -c terminal -- sh -c \
+       "find '${home}' -mindepth 1 -maxdepth 1 ! -name lost+found -exec rm -rf {} + ; test -z \"\$(find '${home}' -mindepth 1 -maxdepth 1 ! -name lost+found)\"" \
+       >/dev/null 2>&1; then
+    ok "  ${u}: terminal restarted, home ${home} emptied"
+    return 0
+  fi
+  err "  ${u}: home NOT emptied — check: oc exec deploy/terminal -n ${tns} -- ls -la ${home}"
+  return 1
+}
+
 # ── ws smoke — the G1 attendee-cockpit gate ───────────────────────────────────────────────────────
 # Runs the attendee path FROM the real cockpit terminal as {user} (never the admin kubeconfig), to
 # catch the recurring cockpit/identity defect class (ws-not-on-PATH, HOME=/data, JVM user.home,
@@ -2195,14 +2233,13 @@ cmd_session_refresh() {
 
   # THIS COMMAND HAS NO WORK TO DO UNDER THE SHARED COCKPIT, and saying so is the whole point. The
   # defect it sweeps is "the kubeconfig was written ONCE, at pod start, and its token has since
-  # expired". The shared cockpit's ttyd wrapper mints a fresh kubeconfig from the front door's access
-  # token on EVERY websocket, so that failure mode does not exist there and there is nothing to
-  # re-mint between sessions. Its in-pod script is per-user-model by construction anyway — it hard-
-  # codes HOME=/home/lab-user and logs the whole POD in, which on a pod shared by the cohort would be
-  # meaningless at best. Exits 0: a command that correctly does not apply has not failed.
+  # expired". Under the shared cockpit each attendee's own terminal pod signs them in on EVERY
+  # websocket whose saved login no longer works, so that failure mode does not exist there and there
+  # is nothing to re-mint between sessions. Its in-pod script is per-user-model by construction anyway
+  # — it hard-codes HOME=/home/lab-user, which the per-attendee terminal pods do not use. Exits 0: a command that correctly does not apply has not failed.
   local sr_shared; sr_shared="$(shared_cockpit_dep)"
   if [[ -n "$sr_shared" ]]; then
-    info "nothing to refresh: one shared cockpit (${sr_shared}) serves the cohort, and its terminal mints each attendee's kubeconfig from the OAuth front door on every sign-in — there is no pod-start token to go stale."
+    info "nothing to refresh: one shared cockpit (${sr_shared}) serves the cohort, and each attendee's terminal pod signs them in again whenever their saved login stops working — there is no pod-start token to go stale."
     info "if an attendee is seeing Unauthorized, they reopen the terminal: the wrapper signs in again when the saved login no longer works. Check one: oc exec deploy/terminal -n ${TERMINAL_NS_PREFIX}<user> -- ls -l ${SHARED_COCKPIT_HOMES}/<user>/.kube/config"
     return 0
   fi
@@ -3396,6 +3433,29 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
       ok "no unresolved placeholders in ${#ck_graded[@]} cockpit ConfigMap(s): ${ck_graded[*]}${ck_scope_note}"
     fi
   fi
+  printf "  %-28s" "terminal pods"
+  # Each attendee's own ttyd (ogsr-term-<user>), graded by the SAME list and Ready test as `status`
+  # (terminal_ready_list / terminal_ready), so the two reports never disagree about a pod. A cluster
+  # Deployment list is Forbidden to an attendee: ⚠, not ❌, like every cluster-scoped row here.
+  local tm_out tm_rc=0 tm_u tm_ok=0 tm_n=0 tm_bad=""
+  tm_out="$(terminal_ready_list 2>&1)" || tm_rc=$?
+  if [[ "$tm_rc" -ne 0 ]] && printf '%s' "$tm_out" | grep -qi forbidden; then
+    unknown "not checked (listing Deployments cluster-wide is Forbidden — needs cluster-admin)"
+  elif [[ "$tm_rc" -ne 0 ]]; then
+    unknown "not checked (the terminal Deployments could not be listed — retry, or run as admin)"
+  elif [[ -z "$tm_out" && -z "$(shared_cockpit_dep)" ]]; then
+    skip "n/a (no shared cockpit — per-user cockpits run their own terminal)"
+  else
+    for tm_u in ${scope_user:-$(workshop_users)}; do
+      tm_n=$((tm_n + 1))
+      if terminal_ready "$tm_out" "$tm_u"; then tm_ok=$((tm_ok + 1)); else tm_bad="${tm_bad} ${tm_u}"; fi
+    done
+    if [[ "$tm_n" -gt 0 && -z "$tm_bad" ]]; then
+      ok "${tm_ok}/${tm_n} Ready"
+    else
+      nok "${tm_ok}/${tm_n} Ready — not ready:${tm_bad:- (no attendees found)} — inspect: oc get deploy,pods -n ${TERMINAL_NS_PREFIX}<user>"; fail=1
+    fi
+  fi
   printf "  %-28s" "parasol images"
   # Many entry states pull parasol-claims/parasol-web:1.0|1.1, parasol-fraud:1.0 and
   # parasol-notifications:1.0 from PARASOL_IMAGES_NS without building them; the BuildConfigs
@@ -3912,7 +3972,8 @@ cmd_cohort_reset() {  # SA/admin: wipe ALL per-user module state for a FRESH coh
   # CONTENTS via purge_ns (label-discovered — user_namespaces — keeps each namespace shell + its
   # workshop-owned RBAC/quota/LimitRange), (3) delete the entry-*-<user> apps LAST so the
   # resources-finalizer never deadlocks on a PVC still pinned by an attendee pod (cmd_reset's SEV1
-  # ordering). Idempotent + safe to re-run.
+  # ordering), (4) restart the attendee's terminal pod and empty its home (wipe_terminal_home).
+  # Idempotent + safe to re-run.
   local yes="false" do_restart="false"
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -3938,15 +3999,17 @@ cmd_cohort_reset() {  # SA/admin: wipe ALL per-user module state for a FRESH coh
   echo "  • CONTENTS of every <user>-* namespace (label-discovered via workshop.redhat.com/user=<user>,"
   echo "    currently 11: dev/stage/prod/cicd + batch/gitops/mesh/partner + resilience's"
   echo "    client/site-a/site-b): workloads, PVCs, user secrets/configmaps, lab CRs"
+  echo "  • the attendee's terminal HOME (${TERMINAL_NS_PREFIX}<user>): pod restarted, then emptied —"
+  echo "    no files, shell history or saved login pass to the next person"
   echo
   echo "WILL PRESERVE (untouched):"
   echo "  • platform-portfolio stacks (pp-*), operators, workshop-config"
   echo "  • ogsr-gitea, ogsr-parasol-images, ogsr-parasol-tasks, ogsr-maven-mirror, ogsr-showroom infra"
   echo "  • the per-user namespace SHELLS + their workshop-owned RBAC / quota / LimitRange"
   if [[ "$do_restart" == "true" ]]; then
-    echo "  • per-user cockpits — RESTARTED at the end (--restart-terminals)"
+    echo "  • the cockpit — RESTARTED at the end (--restart-terminals), so pages re-render"
   else
-    echo "  • per-user cockpits (left running; add --restart-terminals to cycle them for the new cohort)"
+    echo "  • the cockpit (left running; add --restart-terminals to re-render its pages)"
   fi
   echo
 
@@ -3961,7 +4024,7 @@ cmd_cohort_reset() {  # SA/admin: wipe ALL per-user module state for a FRESH coh
     fi
   fi
 
-  local u ns app wedged=0
+  local u ns app wedged=0 homes_left=0
   for u in "${users_arr[@]}"; do
     echo
     info "── ${u} ──"
@@ -3985,13 +4048,18 @@ cmd_cohort_reset() {  # SA/admin: wipe ALL per-user module state for a FRESH coh
         *) : ;;
       esac
     done
+    # 4. The terminal home — the one per-attendee store outside every <user>-* namespace.
+    # ponytail: one user at a time (~1 min each); restart all first, then wipe, if a big cohort waits on it.
+    wipe_terminal_home "$u" || homes_left=1
   done
 
   echo
-  if (( wedged == 0 )); then
+  if (( wedged == 0 && homes_left == 0 )); then
     ok "cohort-reset complete — ${n} user(s) wiped to pristine; platform intact."
-  else
+  elif (( wedged != 0 )); then
     err "cohort-reset finished, but one or more entry apps were wedged (see above) — re-run cohort-reset or inspect manually."
+  else
+    err "cohort-reset finished, but one or more terminal homes were NOT emptied (see above) — re-run cohort-reset."
   fi
   echo "   verify: oc get applications -n ${ARGO_NS} | grep entry-   (expect none)"
   echo "           oc get all -n ${users_arr[0]}-dev                 (expect empty)"
@@ -4002,7 +4070,7 @@ cmd_cohort_reset() {  # SA/admin: wipe ALL per-user module state for a FRESH coh
     info "restarting cockpits so the new cohort gets fresh pods…"
     restart_terminals "" true
   fi
-  (( wedged == 0 )) || return 1
+  (( wedged == 0 && homes_left == 0 )) || return 1
 }
 
 # ── ws scale-users — grow/shrink the workshop cohort ───────────────────────────────────────────────
@@ -4626,7 +4694,7 @@ cmd_status() {  # SA everyday cohort-health dashboard. READ-ONLY. [--user U] sco
   # the per-user lookup found nothing and the column read "— none" for all 8 attendees on a cluster
   # whose cockpit was up (measured 2026-08-16); an operator reading that would go provision cockpits
   # that already exist.
-  local st_shared st_cell="" st_attn="" st_terms="" st_term_ok=0 st_tr
+  local st_shared st_cell="" st_attn="" st_terms="" st_term_ok=0
   st_shared="$(shared_cockpit_dep)"
   if [[ -n "$st_shared" ]]; then
     ready="$(oc get deploy "$st_shared" -n "$SHOWROOM_NS" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
@@ -4640,15 +4708,13 @@ cmd_status() {  # SA everyday cohort-health dashboard. READ-ONLY. [--user U] sco
     fi
     echo "  cockpit: one shared cockpit (${st_shared}) serves every attendee — the column below reports ITS state, the same value on every row"
     # Each attendee's own terminal pod: ONE list call, then a per-user lookup in the loop.
-    st_terms="$(oc get deploy -A -l app.kubernetes.io/name=ogsr-terminal \
-      -o jsonpath='{range .items[*]}{.metadata.labels.workshop\.redhat\.com/terminal-for}{"="}{.status.readyReplicas}{"\n"}{end}' 2>/dev/null || true)"
+    st_terms="$(terminal_ready_list 2>/dev/null || true)"
   fi
   printf "  %-8s %-9s %-24s %-10s\n" "User" "Cockpit" "Modules active" "Entries"
   for u in "${users_arr[@]}"; do
     if [[ -n "$st_shared" ]]; then
       cockpit="$st_cell"
-      st_tr="$(printf '%s\n' "$st_terms" | sed -n "s/^${u}=//p")"
-      if [[ "${st_tr:-0}" -ge 1 ]]; then st_term_ok=$((st_term_ok + 1))
+      if terminal_ready "$st_terms" "$u"; then st_term_ok=$((st_term_ok + 1))
       else attention+=("${u}: terminal pod not ready — oc get deploy,pods -n ${TERMINAL_NS_PREFIX}${u}"); fi
     elif ! oc get deploy "showroom-${u}" -n "$SHOWROOM_NS" >/dev/null 2>&1; then
       cockpit="— none"

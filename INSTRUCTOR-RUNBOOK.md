@@ -102,9 +102,9 @@ oc get applications -n openshift-gitops
 | Keep one sample attendee | `./bootstrap/ogsr-wipe-users.sh` |
 | Give the cluster back | [INSTALL.md › Remove the workshop](INSTALL.md#remove-the-workshop) |
 
-`ogsr-reset.sh` clears all lab work and keeps the platform and every account. It does **not** clear:
+`ogsr-reset.sh` clears all lab work and empties each attendee's terminal home. It keeps the platform
+and every account. It does **not** clear:
 
 - Data inside shared tools: SonarQube projects, Developer Hub catalog entries.
 - Contents of each attendee's Keycloak realm.
-- Attendee home directories in the cockpit.
 - Gitea tokens and SSH keys on the kept accounts.

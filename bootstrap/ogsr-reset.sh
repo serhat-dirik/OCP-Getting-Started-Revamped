@@ -10,7 +10,7 @@
 #   ./bootstrap/ogsr-reset.sh --dry-run             # print the CLEAR/KEEP plan; change nothing
 #   ./bootstrap/ogsr-reset.sh                       # interactive confirm, then reset
 #   ./bootstrap/ogsr-reset.sh --yes                 # no prompt (CI / scripted)
-#   ./bootstrap/ogsr-reset.sh --restart-terminals   # also cycle the cockpit pods for the new group
+#   ./bootstrap/ogsr-reset.sh --restart-terminals   # also restart the cockpit so its pages re-render
 #
 # ── WHAT "IMMEDIATELY POST-INSTALL" MEANS HERE ───────────────────────────────────────────────────
 #   • entry-state Applications gone     — every entry-<module>-<user> in the GitOps namespace
@@ -21,6 +21,9 @@
 #   • Gitea back to seeded fork state   — the per-user forks are DELETED, so the next `ws start`
 #                                         re-forks them clean from the canonical parasol/* repos, and
 #                                         the attendee's <user>-svcs scaffold org is emptied
+#   • terminal homes empty              — each attendee's terminal pod (ogsr-term-<user>) restarts and
+#                                         its home claim is emptied: no files, history or saved login
+#                                         pass to the next person
 #
 # The per-module purge logic is not re-invented here. Every entry state declares what its module owns
 # (purgeNamespaces / purgeAppsNamespace / purgeAppsProject in gitops/entry-states/*/ws-meta.yaml) and
@@ -46,16 +49,10 @@
 # key, shared workshop password, Gitea/Keycloak admin credentials) are all left exactly as they are.
 #
 # ── WHAT THIS DOES *NOT* CLEAR — a real scope boundary, not an oversight ─────────────────────────
-# "Immediately post-install" above means the KUBERNETES and GIT state. Four kinds of attendee state
+# "Immediately post-install" above means the KUBERNETES and GIT state. Three kinds of attendee state
 # live outside both and survive this reset. Handing a cluster to a NEW group without knowing that is
 # how last week's attendee's work turns up in this week's attendee's session:
 #
-#   • the cockpit HOME directory. /home/lab-user is a per-user PVC (showroom-home-<user> in the
-#     showroom namespace), not an emptyDir — so clones, edited files, shell history, generated
-#     kubeconfigs and anything they saved survive, and --restart-terminals does NOT clear them
-#     (a restart re-mounts the same volume). Modules are authored to be re-run-safe against a dirty
-#     home (commit 727cd1d), which covers the SAME attendee re-running a lab; it does not cover a
-#     DIFFERENT person inheriting the volume.
 #   • per-user Keycloak realm CONTENTS. realm-<user> is created once by a KeycloakRealmImport that
 #     the operator does not re-import over a realm that already exists, so clients/users the
 #     securing-apps-keycloak lab created stay.
@@ -233,6 +230,7 @@ echo "  • every Gitea repository the attendee owns — the next 'ws start' re-
 echo "    the canonical parasol/* seeds"
 echo "  • the attendee's <user>-${SCAFFOLD_ORG_SUFFIX} Gitea scaffold org is EMPTIED (the org itself stays)"
 echo "  • per-user entry-hook leftovers (Jobs/SA/Role/RoleBinding) in ${GITEA_NS}"
+echo "  • each attendee's terminal HOME (ogsr-term-<user>): the pod restarts, then the home is emptied"
 echo
 echo "WILL KEEP — untouched:"
 echo "  • every attendee: login, htpasswd entry, User/Identity, workshop-attendees membership"
@@ -243,15 +241,13 @@ echo "  • every installed component and operator, the platform-portfolio stack
 echo "  • the shared ogsr-* layer, and every admin-supplied credential (MaaS key, shared workshop"
 echo "    password, Gitea/Keycloak admin credentials) — those came from the admin via install.sh"
 if [[ "$RESTART_TERMINALS" == "true" ]]; then
-  echo "  • per-user cockpits — RESTARTED at the end (--restart-terminals)"
+  echo "  • the cockpit — RESTARTED at the end (--restart-terminals), so its pages re-render"
 else
-  echo "  • per-user cockpits (left running; add --restart-terminals to cycle them for the new group)"
+  echo "  • the cockpit (left running; add --restart-terminals to re-render its pages)"
 fi
 echo
 echo "WILL *NOT* CLEAR — attendee state that lives outside Kubernetes and Git (read this before"
 echo "handing the cluster to a NEW group; see the header for the detail):"
-echo "  • the cockpit HOME directory — /home/lab-user is a per-user PVC; --restart-terminals re-mounts"
-echo "    the same volume rather than emptying it"
 echo "  • per-user Keycloak realm CONTENTS (clients/users the securing-apps-keycloak lab created)"
 echo "  • SonarQube projects/analyses, RHDH catalog entities (product databases)"
 echo "  • Gitea personal access tokens and SSH keys on the kept attendee account"

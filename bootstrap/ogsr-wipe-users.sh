@@ -4,7 +4,7 @@
 # The workshop is no longer something you uninstall; it is something you hand over and re-run. This
 # script removes the ATTENDEES and everything they own — namespaces, cluster identities, Gitea
 # accounts and repositories, Keycloak realms — while LEAVING every installed component, the shared
-# ogsr-* layer, Gitea itself, all cockpits and Keycloak exactly where they are.
+# ogsr-* layer, Gitea itself, the cockpit and Keycloak exactly where they are.
 #
 # user1 SURVIVES ENTIRELY, login included (--keep N keeps user1..userN). Whoever inherits the cluster
 # inherits a WORKING SAMPLE they can log into and click through — not an inspectable corpse.
@@ -23,7 +23,8 @@
 # So the cohort is removed by LOWERING userCount and letting Argo prune — GitOps doing the work rather
 # than being fought. userCount is a SCALAR, which is the only kind of value an Argo helm.parameters
 # override applies reliably (list literals do not; those belong in values.yaml). Lowering it
-# un-renders the per-user namespaces, the workshop-attendees group entries, the cockpits, the Kueue
+# un-renders the per-user namespaces, the workshop-attendees group entries, the terminal namespaces
+# (ogsr-term-<user>: pod and home claim go with them), the Kueue
 # ClusterQueues, the student AppProjects and Argo RBAC, and the KeycloakRealmImport CRs — and Argo's
 # own prune removes them in reverse sync-wave order. No chart CONTENT changes, so there is no stale
 # manifest render to bust and no chart version to bump.
@@ -165,7 +166,8 @@ fi
 
 echo "WILL REMOVE COMPLETELY — ${#REMOVED[@]} user(s) [${REMOVED[*]}]:"
 echo "  • userCount lowered ${LIVE_COUNT} → ${KEEP}, and Argo PRUNES everything the chart rendered for"
-echo "    them: every <user>-* namespace (shell included), cockpit, Kueue ClusterQueue, student"
+echo "    them: every <user>-* namespace (shell included), their terminal namespace ogsr-term-<user>"
+echo "    (pod and home), Kueue ClusterQueue, student"
 echo "    AppProject + Argo RBAC, workshop-attendees membership, and KeycloakRealmImport CR"
 echo "  • their per-user worlds are purged FIRST, in ws's SEV1-safe order (attendee Argo apps →"
 echo "    namespace contents → entry-*-<user> apps), so the prune never races an attendee-pinned PVC"
@@ -180,7 +182,7 @@ echo "  • their Keycloak realm realm-<user> in ${SSO_NS} (pruning the import C
 echo "  • their student-Argo local account password key in ${STUDENT_ARGO_NS}/argocd-secret"
 echo
 echo "WILL PRESERVE — untouched:"
-echo "  • ${KEPT[*]} — namespaces, cockpit, Gitea account and repos, Keycloak realm, SonarQube"
+echo "  • ${KEPT[*]} — namespaces, terminal and its home, Gitea account and repos, Keycloak realm, SonarQube"
 echo "    account, AND LOGIN."
 echo "    Whoever inherits this cluster can log in as ${KEPT[0]} and click through a working workshop."
 echo "  • every installed component and operator, the platform-portfolio stacks (pp-*), workshop-config"
@@ -544,6 +546,7 @@ else
   err "wipe finished with failures — read the ledger below and re-run (every step is idempotent)."
 fi
 echo "   verify: oc get ns -l workshop.redhat.com/owner=ogsr | grep -E '^${USER_PREFIX}'   (expect only ${KEPT[*]})"
+echo "           oc get ns -l workshop.redhat.com/terminal-for                      (expect one per kept user: ${KEPT[*]})"
 echo "           oc get users                                                       (expect only ${KEPT[*]} + your admin)"
 echo "           oc get group workshop-attendees -o jsonpath='{.users[*]}'; echo    (expect ${KEPT[*]})"
 echo "           ws status                                                          (cohort dashboard)"

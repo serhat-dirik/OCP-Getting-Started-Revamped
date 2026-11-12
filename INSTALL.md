@@ -260,13 +260,13 @@ gets crowded, reset finished modules.
 | Command | Removes | Use when |
 |---|---|---|
 | `tools/ws/ws reset <module> --user U` | One module, one attendee | Someone wants a redo |
-| `./bootstrap/ogsr-reset.sh` | All lab work. Platform, accounts, Gitea, Keycloak and cockpits stay. | **Next cohort, same cluster — the normal path** |
+| `./bootstrap/ogsr-reset.sh` | All lab work and each attendee's terminal home. Platform, accounts, Gitea and Keycloak stay. | **Next cohort, same cluster — the normal path** |
 | `./bootstrap/ogsr-wipe-users.sh` | `user2`…`userN` completely (`--keep 2` keeps two) | Cutting down to one sample attendee |
 | `./bootstrap/ogsr-uninstall.sh` | Everything the workshop created | Giving the cluster back |
 
 - All three scripts take `--dry-run` (show the plan) and `--yes` (no prompt).
 - They need the full repo checkout, not just `bootstrap/`.
-- `ogsr-reset.sh --restart-terminals` also cycles the cockpits for the new group.
+- `ogsr-reset.sh --restart-terminals` also restarts the cockpit so its pages re-render.
 
 **What `ogsr-wipe-users.sh` leaves behind**
 
@@ -363,6 +363,8 @@ oc get applications -n openshift-gitops
 - Keeps applying old content: the manifest cache is stale. Bump the chart version.
 - Helm list literals (`{a,b,c}`) do not work in `helm.parameters`. Keep lists in `values.yaml`.
 - A change to a hook only does not propagate. Delete the hook Job, then sync.
+- Upgrading from the one-terminal cockpit (before chart 0.3.37), the sync stalls deleting PVC
+  `showroom-shared-homes`: scale `showroom-shared` and `showroom-shared-demos` in `ogsr-showroom` to 0.
 
 ### A namespace is stuck Terminating
 

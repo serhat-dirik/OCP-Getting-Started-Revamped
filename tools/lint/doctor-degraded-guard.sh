@@ -396,6 +396,20 @@ self_test() {
     '"$expected_str" "$userobj_str")"' \
     "attendees who have not logged in yet read as a half-finished wipe" || failures=1
 
+  # [1] The per-attendee terminal row (2026-11-12) on an attendee: a cluster-wide Deployment list
+  # they may not make is "could not look", never a broken terminal.
+  expect_caught terminal-forbidden-turned-red attendee-forbidden check_row_marks \
+    '    unknown "not checked (listing Deployments cluster-wide is Forbidden — needs cluster-admin)"' \
+    '    nok "not checked (listing Deployments cluster-wide is Forbidden — needs cluster-admin)"; fail=1' \
+    "an attendee who cannot list Deployments is told their terminal pods are down" || failures=1
+
+  # [1] The Ready test `status` and `doctor` share stops recognising a Ready pod — the room's
+  # terminals read down while every attendee is typing in one.
+  expect_caught terminal-ready-test-broken admin-readable check_row_marks \
+    '  [[ "${r:-0}" -ge 1 ]]' \
+    '  [[ "${r:-0}" -ge 2 ]]' \
+    "a Ready terminal pod is graded not ready" || failures=1
+
   # [3] The exit-code contract, stated as a canary: an attendee's healthy-but-partly-unreadable run
   # must not become non-zero. Same rows, same verdict — only the status moves.
   expect_caught partial-run-exits-nonzero attendee-forbidden check_exit_code \
@@ -433,10 +447,11 @@ self_test() {
   fi
 
   if [[ "$failures" -ne 0 ]]; then return 2; fi
-  ok "self-test ok — the real tree reproduces all ${#CASES[@]} recordings, and all nine reintroduced"
+  ok "self-test ok — the real tree reproduces all ${#CASES[@]} recordings, and all eleven reintroduced"
   echo "   defects are caught by the one detector each is meant to prove: summary-verdict-silenced,"
   echo "   clean-run-gains-a-caveat, failure-verdict-drops-not-graded, ungraded-row-turned-red,"
-  echo "   row-label-renamed, user-objects-missing-graded, partial-run-exits-nonzero,"
+  echo "   row-label-renamed, user-objects-missing-graded, terminal-forbidden-turned-red,"
+  echo "   terminal-ready-test-broken, partial-run-exits-nonzero,"
   echo "   failure-run-exits-zero, unmodelled-read-introduced (plus the missing-recording canary)."
   return 1
 }
