@@ -50,7 +50,7 @@ In this lab you expose the front end deliberately, lock the namespace down to on
 Most steps below are offered two ways: the *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`), the *CLI* tab uses `oc` in the *Terminal* tab beside these instructions.
 Pick a path once — the tabs stay in sync across the page.
 A few steps are *terminal-only* because the console adds nothing: the throwaway NodePort/LoadBalancer asides, the in-pod reachability probes, and the Gateway API reads are quickest in the terminal.
-Keep the terminal open regardless: the `$NS`/`$PARTNER` shortcuts you just set live there.
+The `$NS`/`$PARTNER` shortcuts live only in this terminal, so every exercise sets them again in its first block: *if your terminal reconnects, run the first block of the exercise you are in again* — in exercise 1 that is the block above.
 ====
 endif::demo[]
 
@@ -141,15 +141,16 @@ image::networking-dev-devops/networking-dev-devops-03-networkpolicy-yaml.png["Th
 
 A default-deny baseline is the only starting point that is honest about what a namespace allows, and the breakage that follows is the lesson rather than a fault. `parasol-claims` falls to `0/1` because its readiness probe checks a database it can no longer reach; the pod does not crash, it is simply marked NotReady. The same policy also blocks DNS, which is why a first default-deny so often gets blamed on the application.
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-dev; PARTNER={user}-partner
 oc apply -n $NS -f - <<'EOF'
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata: {name: default-deny-all}
 spec: {podSelector: {}, policyTypes: [Ingress, Egress]}
 EOF
-for i in $(seq 1 24); do oc get pods -n $NS -l app=parasol-claims -o jsonpath='{.items[0].status.containerStatuses[0].ready}' | grep -q false && break; sleep 3; done
+for i in $(seq 1 24); do oc get pods -n $NS -l app=parasol-claims -o jsonpath='{.items[*].status.containerStatuses[0].ready}' | grep -q false && break; sleep 3; done
 oc get pods -n $NS -l app=parasol-claims
 MSG=$(oc logs -n $NS deploy/parasol-claims --tail=20 2>/dev/null | grep -o 'health down.*Acquisition timeout' | tail -1)
 echo "${MSG:-step failed: no DB health-down line in the logs yet — check the pod exists and is Running (oc get pods -n $NS -l app=parasol-claims), then re-run}"
@@ -171,8 +172,9 @@ This is least privilege applied to the network, and it is written down. Each all
 
 The DNS allow is the one everybody gets wrong the first time. It has to name the CoreDNS pods' own ports — `dns` and `dns-tcp`, which are `5353` — because the rule is evaluated against the destination pod, not against the Service's port 53.
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-dev; PARTNER={user}-partner
 oc apply -n $NS -f - <<'EOF'
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -218,8 +220,9 @@ include::example$diagrams/networking-dev-devops/06-one-allowed-path.mmd[]
 
 Same database, same namespace, same port — the only difference is a policy set that fits on one screen. That is micro-segmentation, and it is the sentence a security review is looking for.
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-dev; PARTNER={user}-partner
 echo -n "parasol-claims (the API)   -> claims-db:5432 : "; oc exec deploy/parasol-claims -n $NS -- timeout 5 bash -c '</dev/tcp/claims-db/5432 && echo OPEN'
 echo -n "demo-client (anything else) -> claims-db:5432 : "; oc exec deploy/demo-client -n $NS -- timeout 5 bash -c '</dev/tcp/claims-db/5432 && echo OPEN' 2>/dev/null; rc=$?
 [ $rc -eq 124 ] && echo "BLOCKED (connect timed out — the policy dropped it)" || { [ $rc -ne 0 ] && echo "step failed (exit $rc) — check the demo-client pod exists (oc get pods -n $NS -l app=demo-client)"; }
@@ -241,8 +244,9 @@ Where isolation is a property of the whole namespace, a UserDefinedNetwork gives
 
 The front end sits behind the default-deny from step 2, so a blocked connection alone would prove nothing. The block opens `parasol-web` port 8080 to every source, probes it from this terminal and from the partner workload, and then removes that opening again.
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-dev; PARTNER={user}-partner
 oc get networkpolicy -n $PARTNER
 oc exec deploy/partner-workload -n $PARTNER -- ip -brief addr show ovn-udn1
 oc apply -n $NS -f - <<'EOF'
@@ -443,6 +447,13 @@ Remember this shape — `<none>` endpoints — the next time "the Service is up 
 
 == 2. Expose the front end to the world
 ⏱ *~11 min* · an edge Route (the workhorse), the honest NodePort and LoadBalancer asides, then a re-encrypt Route that encrypts the last hop
+
+Set this exercise's shortcuts first:
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev; PARTNER={user}-partner
+----
 
 Only `parasol-web` should be reachable from outside, and the deterministic way to do that on OpenShift is a *Route*.
 Create an *edge*-terminated Route so the router terminates TLS and forwards to the Service (always `oc create route edge` with `--insecure-policy=Allow`, never a plain expose, so both HTTP and HTTPS answer cleanly):
@@ -730,6 +741,7 @@ Prove it by reading the certificate at each hop:
 
 [source,sh,role=execute]
 ----
+SECURE=$(oc get route parasol-web-secure -n $NS -o jsonpath='{.spec.host}')
 echo -n "hop 1  client -> router : "; curl -skv --max-time 15 "https://$SECURE/api/claims" -o /dev/null 2>&1 | grep -m1 -o 'subject: CN=.*'
 echo -n "hop 2  router -> pod    : "; oc exec deploy/demo-client -n $NS -- timeout 10 openssl s_client -connect parasol-web:8443 </dev/null 2>/dev/null | grep -m1 -o 'subject=CN=.*'
 echo -n "hop 2  issued by        : "; oc exec deploy/demo-client -n $NS -- timeout 10 openssl s_client -connect parasol-web:8443 </dev/null 2>/dev/null | grep -m1 -o 'issuer=CN=.*'
@@ -765,6 +777,13 @@ Supply a `destinationCACertificate` when the backend's certificate comes from *y
 
 == 3. Lock the namespace down with default-deny
 ⏱ *~5 min* · apply the baseline and watch the app — and DNS — break
+
+Set this exercise's shortcuts first:
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev; PARTNER={user}-partner
+----
 
 Now the east-west half.
 The pattern is *default-deny first, precise allows second*.
@@ -808,7 +827,7 @@ The API tier — `parasol-claims` — can no longer reach the database, so its r
 
 [source,sh,role=execute]
 ----
-for i in $(seq 1 24); do oc get pods -n $NS -l app=parasol-claims -o jsonpath='{.items[0].status.containerStatuses[0].ready}' | grep -q false && break; sleep 3; done
+for i in $(seq 1 24); do oc get pods -n $NS -l app=parasol-claims -o jsonpath='{.items[*].status.containerStatuses[0].ready}' | grep -q false && break; sleep 3; done
 oc get pods -n $NS -l app=parasol-claims
 oc logs -n $NS deploy/parasol-claims --tail=1
 ----
@@ -863,8 +882,9 @@ Re-open egress to the cluster DNS service.
 The subtlety: name the CoreDNS pods' *named ports* `dns`/`dns-tcp`, *not* port `53`.
 OpenShift's DNS Service listens on `53` but forwards to CoreDNS pods on port `5353`, and a NetworkPolicy is evaluated against the *destination pod's* port — so a rule for `53` silently fails to admit DNS:
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-dev; PARTNER={user}-partner
 oc apply -n $NS -f - <<'EOF'
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -1121,8 +1141,9 @@ That is a *UserDefinedNetwork*.
 Your `{user}-partner` namespace was created with a *Layer 2 Primary UDN*: it has its *own* pod network, so its workloads are isolated from `{user}-dev` *natively*.
 First, confirm the partner namespace holds *no NetworkPolicy* and read its network:
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-dev; PARTNER={user}-partner
 oc get networkpolicy -n $PARTNER || true
 oc get userdefinednetwork partner-udn -n $PARTNER -o jsonpath='topology={.spec.topology}  role={.spec.layer2.role}  subnet={.spec.layer2.subnets[0]}{"\n"}'
 ----
@@ -1246,8 +1267,9 @@ You read the first one and build the other two.
 *First, see what the platform offers.*
 A GatewayClass is cluster-wide and set up by the platform team; you only read it:
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-dev; PARTNER={user}-partner
 oc get gatewayclass
 ----
 
