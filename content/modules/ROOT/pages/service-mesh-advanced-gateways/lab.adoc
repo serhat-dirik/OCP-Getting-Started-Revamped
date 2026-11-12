@@ -4,8 +4,12 @@ include::partial$version-attributes.adoc[]
 
 // Lab page for Service Mesh. Workshop exercises are guarded ifndef::demo[]; the DEMO rendering shows only the
 // SA-Demos page. Every command runs in the Showroom terminal as {user}, so blocks are
-// [source,sh,role=execute]. The FIRST block sets NS={user}-mesh (subs=attributes); every later block uses
-// $NS / $CLAIMS / $WEB with NO subs so jsonpath braces stay literal. All commands + outputs + timings were
+// [source,sh,role=execute]. The FIRST block sets NS={user}-mesh (subs=attributes); exercises 2-7 each open
+// with a block that re-sets NS and the pods they call from ($CLAIMS, $WEB; ex4 also defines fraud_split() — not split, which is a coreutils command that
+// silently reads the terminal when the function is missing), so a
+// terminal reconnect is fixed by re-running that one block; other blocks use them with NO subs so
+// jsonpath braces stay literal. Pod picks take the NEWEST pod (sort by creationTimestamp): right after
+// a rollout {.items[0]} can be the replaced pod, still Terminating (audit 2026-11-12). All commands + outputs + timings were
 // performed on OCP 4.21.22 (Kubernetes 1.34) against OpenShift Service Mesh 3.3.5
 // (Istio v1.28.6) as user4 on 2026-07-13: sidecar injection (native-sidecar init container), the namespace-
 // label RBAC break-and-fix, STRICT mTLS block/allow + the SPIFFE identity, the weighted/header split read
@@ -62,6 +66,8 @@ In this lab you *enroll* the app, prove *mutual TLS*, watch the *Kiali* graph, *
 Where you apply a mesh custom resource, you get two tabs: the *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`) to import/edit YAML, the *CLI* tab uses `oc` in the *Terminal* tab beside these instructions.
 Pick a path once — the tabs stay in sync across the page.
 Two things are single-path on purpose: *Kiali* is its own product console (there's no console-tab equivalent), and *driving traffic* from inside a meshed pod is a terminal `oc exec` — the console can't do it.
+Exercises 2 to 7 each open with a block that sets the shell shortcuts they use — `$NS`, and the pods you call from, `$CLAIMS` and `$WEB`; exercise 1 uses the namespace block at the top of this page.
+*If your terminal reconnects, run the exercise's first block again* — a fresh shell has none of those shortcuts.
 ====
 endif::demo[]
 
@@ -143,11 +149,12 @@ oc rollout status deploy/parasol-fraud -n $NS --timeout=120s
 
 The pods come back `2/2` — that second container is the Envoy proxy the mesh injected. Now drive the two hops the graph needs:
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
 # this app makes no downstream calls of its own, so drive BOTH hops the graph needs, at once,
 # one request a second for ~45s: Kiali draws a rate, and the mesh's metrics are scraped every 30s
-CLAIMS=$(oc get pod -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+NS={user}-mesh
+CLAIMS=$(oc get pod -n $NS -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')
 ( oc exec deploy/demo-client -n $NS -- sh -c 'for i in $(seq 1 45); do curl -s -o /dev/null http://parasol-web:8080/api/claims; sleep 1; done' &
   oc exec $CLAIMS -c parasol-claims -n $NS -- sh -c 'for i in $(seq 1 45); do curl -s -o /dev/null http://parasol-fraud:8080/api/fraud/score/CLM-$i; sleep 1; done'
   wait ); echo "traffic sent"
@@ -169,8 +176,9 @@ image::service-mesh-advanced-gateways/service-mesh-advanced-gateways-02-traffic-
 
 The routing is programmed into the caller's proxy, which turns a release into a configuration change rather than a deployment event. The same resource covers a canary, a blue/green cut-over, and a header-pinned preview for named test users while everyone else stays on the old version.
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-mesh
 oc apply -n $NS -f - <<'EOF'
 apiVersion: apps/v1
 kind: Deployment
@@ -219,7 +227,7 @@ spec:
         - {destination: {host: parasol-fraud, subset: v2}, weight: 10}
 EOF
 
-CLAIMS=$(oc get pod -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+CLAIMS=$(oc get pod -n $NS -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')
 split() { oc exec $CLAIMS -c istio-proxy -n $NS -- pilot-agent request GET 'stats?filter=istio_requests_total' 2>/dev/null \
   | grep reporter.source | grep response_code.200 \
   | sed -nE 's/.*destination_version\.(v[12])\..*: ([0-9]+)/\1 \2/p' \
@@ -249,8 +257,10 @@ Everything in that picture is programmed into the caller's own sidecar: the inje
 
 Timeouts, retries and ejection of a failing endpoint are the three things every team writes, and writes differently. Applied uniformly by the platform, "one hung service hangs everything" becomes "one service degrades and its callers fail fast" — with no retry loop in anybody's code, and the same policy for a service written in a language nobody on the platform team knows.
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-mesh
+CLAIMS=$(oc get pod -n $NS -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')
 oc apply -n $NS -f - <<'EOF'
 apiVersion: networking.istio.io/v1
 kind: DestinationRule
@@ -285,7 +295,7 @@ spec:
       retries: {attempts: 2, perTryTimeout: 1s, retryOn: "5xx,reset,connect-failure"}
 EOF
 sleep 3
-oc exec $CLAIMS -c parasol-claims -n $NS -- curl -s -m8 -o /dev/null -w "claims felt: %{time_total}s\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001
+oc exec $CLAIMS -c parasol-claims -n $NS -- curl -s -m8 -o /dev/null -w "claims felt: %\{time_total}s\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001
 
 # restore the clean (fault-free) route — the resilience policy (timeout/retry/circuit breaker) stays
 oc apply -n $NS -f - <<'EOF'
@@ -321,6 +331,7 @@ A NetworkPolicy answers by location: pods in namespace A may reach namespace B. 
 
 [source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-mesh
 oc apply -n $NS -f - <<EOF
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
@@ -337,13 +348,15 @@ spec:
 EOF
 ----
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
 sleep 5
-WEB=$(oc get pod -n $NS -l app=parasol-web -o jsonpath='{.items[0].metadata.name}')
-oc exec $CLAIMS -c parasol-claims -n $NS -- curl -s -m5 -o /dev/null -w "claims -> fraud: %{http_code}\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001
-oc exec $WEB -c parasol-web -n $NS -- curl -s -m5 -w "web -> fraud: %{http_code}\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001 | tail -1
-oc exec deploy/demo-client -n $NS -- curl -s -m5 -o /dev/null -w "demo-client -> fraud: %{http_code}\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001
+NS={user}-mesh
+CLAIMS=$(oc get pod -n $NS -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')
+WEB=$(oc get pod -n $NS -l app=parasol-web --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')
+oc exec $CLAIMS -c parasol-claims -n $NS -- curl -s -m5 -o /dev/null -w "claims -> fraud: %\{http_code}\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001
+oc exec $WEB -c parasol-web -n $NS -- curl -s -m5 -w "web -> fraud: %\{http_code}\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001 | tail -1
+oc exec deploy/demo-client -n $NS -- curl -s -m5 -o /dev/null -w "demo-client -> fraud: %\{http_code}\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001
 ----
 
 *What just happened*
@@ -494,7 +507,7 @@ Confirm its always-on restart policy (what makes it start before your app and st
 
 [source,sh,role=execute]
 ----
-POD=$(oc get pod -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+POD=$(oc get pod -n $NS -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')
 oc get pod $POD -n $NS -o jsonpath='{range .spec.initContainers[*]}{.name}{" restartPolicy="}{.restartPolicy}{"\n"}{end}'
 ----
 
@@ -514,6 +527,15 @@ The `restartPolicy: Always` on an init container is the Kubernetes native-sideca
 
 == 2. Prove mutual TLS with a STRICT policy
 ⏱ *~7 min* · encryption you can prove by watching a plaintext client get refused
+
+Set this exercise's shortcuts first — your namespace, and the claims pod you'll call from later (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-mesh
+CLAIMS=$(oc get pod -n $NS -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')
+echo "namespace: $NS  claims pod: ${CLAIMS:-(none: finish exercise 1 first)}"
+----
 
 Meshed workloads now talk over *mutual TLS* automatically — but the default mode is *PERMISSIVE*, which still *accepts* plaintext from outside the mesh so nothing breaks on day one.
 See that first: your un-meshed `demo-client` can still reach the meshed `parasol-web`.
@@ -597,7 +619,6 @@ Meanwhile a *meshed* caller — whose proxy speaks mutual TLS — sails through.
 
 [source,sh,role=execute]
 ----
-CLAIMS=$(oc get pod -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
 oc exec $CLAIMS -c parasol-claims -n $NS -- curl -s -m5 -o /dev/null -w "claims -> fraud (meshed): HTTP %{http_code}\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001
 ----
 
@@ -647,12 +668,20 @@ demo-client -> web after revert: HTTP 200
 == 3. See the mesh in Kiali
 ⏱ *~7 min* · turn live traffic into a service graph — the picture `oc get` can't give you
 
+Set this exercise's shortcuts first — your namespace, and the claims pod that drives the claims-to-fraud hop (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-mesh
+CLAIMS=$(oc get pod -n $NS -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')
+echo "namespace: $NS  claims pod: ${CLAIMS:-(none: finish exercise 1 first)}"
+----
+
 Kiali is the mesh's console: it reads the proxies' telemetry and draws a live *graph* of what's calling what, with health and mutual-TLS badges.
 A graph needs *traffic*, so first generate some. Because the sample app doesn't yet make its own downstream calls, *you* drive the chain — `demo-client → web`, and `claims → fraud` from inside the meshed claims pod. It takes about 45 seconds: Kiali draws a request *rate* from metrics scraped every 30 seconds, so the traffic has to outlast a scrape.
 
 [source,sh,role=execute]
 ----
-CLAIMS=$(oc get pod -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
 # both hops at once, one request a second for ~45s (each loop runs inside its pod): the front door,
 # and the claims->fraud hop. Kiali draws a RATE, and the mesh's metrics are scraped every 30s.
 ( oc exec deploy/demo-client -n $NS -- sh -c 'for i in $(seq 1 45); do curl -s -o /dev/null http://parasol-web:8080/api/claims; sleep 1; done' &
@@ -726,6 +755,19 @@ The one thing that's manual is the *traffic itself*: the sample app doesn't auto
 
 == 4. Shift traffic between service versions
 ⏱ *~7 min* · a weighted canary and a header route — with two custom resources
+
+Set this exercise's shortcuts first — your namespace, the claims pod that calls fraud, and `fraud_split`, a helper that reads how many successful calls that pod's proxy has sent to each fraud version (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-mesh
+CLAIMS=$(oc get pod -n $NS -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')
+fraud_split() { oc exec ${CLAIMS:?is empty - run the first block of this exercise again} -c istio-proxy -n $NS -- pilot-agent request GET 'stats?filter=istio_requests_total' 2>/dev/null \
+  | grep reporter.source | grep response_code.200 \
+  | sed -nE 's/.*destination_version\.(v[12])\..*: ([0-9]+)/\1 \2/p' \
+  | awk '{s[$1]+=$2} END{printf "v1=%d v2=%d\n", s["v1"], s["v2"]}'; }
+echo "namespace: $NS  claims pod: ${CLAIMS:-(none: finish exercise 1 first)}"
+----
 
 Parasol wants to roll out fraud-scoring *v2* carefully: 10% of traffic at first, and a way for *test users* to hit v2 explicitly.
 
@@ -872,7 +914,6 @@ Confirm the mesh programmed the split into the *claims* sidecar (the caller). `i
 
 [source,sh,role=execute]
 ----
-CLAIMS=$(oc get pod -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
 istioctl proxy-config route $CLAIMS.$NS --name 8080 -o json \
   | grep -E 'weight|"cluster"|"name"|x-parasol-test' | grep -Eo 'v[12]\|parasol-fraud[^"]*|"weight": [0-9]+|x-parasol-test' | head
 ----
@@ -888,17 +929,13 @@ v2|parasol-fraud.{user}-mesh.svc.cluster.local
 "weight": 10
 ----
 
-Now *drive* the split and *measure* it. Send 200 requests from the meshed claims pod (no header) and read how the mesh actually distributed them — from its own `istio_requests_total` telemetry, broken down by destination version:
+Now *drive* the split and *measure* it. Send 200 requests from the meshed claims pod (no header) and read how the mesh actually distributed them — from its own `istio_requests_total` telemetry, broken down by destination version, with the `fraud_split` helper from this exercise's first block:
 
 [source,sh,role=execute]
 ----
-split() { oc exec $CLAIMS -c istio-proxy -n $NS -- pilot-agent request GET 'stats?filter=istio_requests_total' 2>/dev/null \
-  | grep reporter.source | grep response_code.200 \
-  | sed -nE 's/.*destination_version\.(v[12])\..*: ([0-9]+)/\1 \2/p' \
-  | awk '{s[$1]+=$2} END{printf "v1=%d v2=%d\n", s["v1"], s["v2"]}'; }
-B=$(split)
+B=$(fraud_split)
 oc exec $CLAIMS -c parasol-claims -n $NS -- sh -c 'for i in $(seq 1 200); do curl -s -o /dev/null http://parasol-fraud:8080/api/fraud/score/CLM-$i; done'
-A=$(split)
+A=$(fraud_split)
 echo "before: $B"; echo "after:  $A"
 ----
 
@@ -929,9 +966,9 @@ Finally, the *header route* — pin test users to v2. Send 30 requests *with* th
 
 [source,sh,role=execute]
 ----
-B=$(split)
+B=$(fraud_split)
 oc exec $CLAIMS -c parasol-claims -n $NS -- sh -c 'for i in $(seq 1 30); do curl -s -o /dev/null -H "x-parasol-test: true" http://parasol-fraud:8080/api/fraud/score/CLM-$i; done'
-A=$(split)
+A=$(fraud_split)
 echo "before: $B"; echo "after:  $A"
 B1=${B%% *}; B1=${B1#v1=}; A1=${A%% *}; A1=${A1#v1=}; B2=${B##*v2=}; A2=${A##*v2=}
 [ "$A1" = "$B1" ] && [ $((A2-B2)) -eq 30 ] && echo "verdict: v1 unchanged, all +30 on v2 — the header route is deterministic" \
@@ -956,11 +993,19 @@ verdict: v1 unchanged, all +30 on v2 — the header route is deterministic
 == 5. Add resilience: faults, timeouts, and a circuit breaker
 ⏱ *~7 min* · make a slow dependency fail fast instead of hanging the caller
 
+Set this exercise's shortcuts first — your namespace, and the claims pod that calls fraud (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-mesh
+CLAIMS=$(oc get pod -n $NS -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')
+echo "namespace: $NS  claims pod: ${CLAIMS:-(none: finish exercise 1 first)}"
+----
+
 A slow `parasol-fraud` is the cascading-failure trigger. The mesh lets you *simulate* that failure and *configure* the defenses against it. First, baseline the healthy latency:
 
 [source,sh,role=execute]
 ----
-CLAIMS=$(oc get pod -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
 oc exec $CLAIMS -c parasol-claims -n $NS -- curl -s -m8 -o /dev/null -w "healthy: HTTP %{http_code} in %{time_total}s\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001
 ----
 
@@ -1116,13 +1161,21 @@ restored: HTTP 200 in 0.010798s
 == 6. Secure the call path with an AuthorizationPolicy
 ⏱ *~5 min* · "only claims may call fraud" — enforced by identity, not location
 
+Set this exercise's shortcuts first — your namespace, and the two pods you'll call fraud from: claims and web (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-mesh
+CLAIMS=$(oc get pod -n $NS -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')
+WEB=$(oc get pod -n $NS -l app=parasol-web --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')
+echo "namespace: $NS  claims pod: ${CLAIMS:-(none: finish exercise 1 first)}  web pod: ${WEB:-(none)}"
+----
+
 The mesh can decide *who is allowed to call whom* by *workload identity*.
 Right now, under PERMISSIVE mutual TLS, *any* meshed workload can reach fraud. Prove it — the *web* tier (a different identity, `sa/default`) can call fraud today:
 
 [source,sh,role=execute]
 ----
-CLAIMS=$(oc get pod -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
-WEB=$(oc get pod -n $NS -l app=parasol-web -o jsonpath='{.items[0].metadata.name}')
 oc exec $WEB -c parasol-web -n $NS -- curl -s -m5 -o /dev/null -w "web -> fraud (before policy): HTTP %{http_code}\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001
 ----
 
@@ -1235,6 +1288,14 @@ The sample app doesn't auto-call fraud, so you *simulated* a rogue caller by run
 ⏱ *~8 min* · go where Routes can't — a raw-TCP partner feed, and a native gateway rate limit
 
 _This is the deep-dive encore. If you're short on time, skim it — the core module is complete at exercise 6._
+
+Set this exercise's shortcut first — your namespace (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-mesh
+echo "namespace: $NS"
+----
 
 Parasol's *legacy partner bureaus* send claim feeds over *raw TCP* — not HTTP. An OpenShift Route can't route an arbitrary TCP protocol, and the experimental L4 Gateway API resources are commonly not installed. Check your cluster's boundary:
 
