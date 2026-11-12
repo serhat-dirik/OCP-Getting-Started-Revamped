@@ -168,13 +168,32 @@ claims_created_total 85.0 # {span_id="2a0044e65e926836",trace_id="9e981f3ddb8c81
 ----
 =====
 
-[NOTE]
-.Why PromQL rate math lives in the console, not `curl`
+`curl /q/metrics` gives you an instantaneous *count*.
+Turning counts into *rates* over a time window (`rate(...[5m])`), or summing across replicas, is what a query engine does.
+The console's *Observe → Metrics* is one door to that engine.
+The terminal has another: the in-cluster *tenancy* port of `thanos-querier`, which answers with your own token, scoped to your namespace.
+Run the console's first query from here:
+
+[source,sh,role=execute]
+----
+curl -sk -G -H "Authorization: Bearer $(oc whoami -t)" \
+  https://thanos-querier.openshift-monitoring.svc:9092/api/v1/query \
+  --data-urlencode "namespace=$NS" \
+  --data-urlencode 'query=sum(rate(http_server_requests_seconds_count{uri="/api/claims"}[5m]))' \
+  | jq -r '.data.result[0].value[1]'
+----
+
+.Expected output (the rate differs — the claims-list requests per second)
+[%collapsible]
 =====
-`curl` gives you an instantaneous *count*.
-Turning counts into *rates* over a time window (`rate(...[5m])`), or summing across replicas, is what a query engine does — and on this cluster that engine is reached through *Observe → Metrics* in the console.
-Running ad-hoc PromQL from the terminal needs a cluster-monitoring view role most attendees do not have, so treat the console as the PromQL surface and `curl /q/metrics` as the raw-truth surface.
+[source,texinfo]
+----
+0.815220886536487
+----
 =====
+
+Swap in any query from the Console tab.
+Port `9092` has no Route, so this works only from the cockpit terminal; the `thanos-querier` Route needs a cluster-monitoring role you do not have.
 --
 ====
 
@@ -194,6 +213,9 @@ oc get servicemonitor parasol-claims -n $NS -o yaml | grep -A6 'endpoints:'
   - interval: 10s
     path: /q/metrics
     port: http
+  selector:
+    matchLabels:
+      app: parasol-claims
 ----
 ====
 
@@ -265,6 +287,7 @@ spec:
 . Read the rule back: open the project-scoped {ocp_console_url}/dev-monitoring/ns/{user}-dev/alertrules?alert-source=user[*Alerting rules* view for `{user}-dev`^].
 The page carries a *Project* selector (set to `{user}-dev`) and the tabs *Events* | *Alerting rules* | *Alerts* | *Dashboards* | *Metrics* | *Silences*; on *Alerting rules*, your rule is the single row — `ParasolClaimsErrorRateHigh`, severity *Warning*, source *User*.
 Its *State* column reads `-`: the rule is loaded and watching, but no alert has become active yet — there are no 5xx.
+The rule takes about a minute to load after *Create*; until then the list is empty, so refresh after a minute.
 // Grounded 2026-07-28 as user1 in an authenticated console: /dev-monitoring/ns/user1-dev/alertrules?alert-source=user
 // renders the Project selector + the six tabs above and lists exactly this one row (Severity Warning, State -, Source User).
 
@@ -308,12 +331,28 @@ prometheusrule.monitoring.coreos.com/parasol-claims-alerts created
 ----
 =====
 
-Confirm it loaded and is armed-not-firing:
+The object exists at once, but `oc get prometheusrule` shows only its name and age, not its state.
+The state lives in the alerting engine, which takes about a minute to load the rule.
+Ask the engine through its tenancy rules port (`9093`), with your own token:
 
 [source,sh,role=execute]
 ----
-oc get prometheusrule parasol-claims-alerts -n $NS
+curl -sk -G -H "Authorization: Bearer $(oc whoami -t)" \
+  https://thanos-querier.openshift-monitoring.svc:9093/api/v1/rules \
+  --data-urlencode "namespace=$NS" \
+  | jq -r '.data.groups[].rules[] | "\(.name)  \(.state)  \(.health)"'
 ----
+
+.Expected output (about a minute after `apply`; before that it prints nothing, then `unknown` health for one evaluation)
+[%collapsible]
+=====
+[source,texinfo]
+----
+ParasolClaimsErrorRateHigh  inactive  ok
+----
+=====
+
+`inactive` with health `ok` is armed-not-firing: loaded, evaluating, no 5xx yet.
 --
 ====
 
@@ -401,11 +440,15 @@ done
 wait
 ----
 
-.Expected output (the once-a-second sample; the 20 workers push silently in the background — 200 while the database drains ~30s, 500 once it is gone, then 503 about a minute in once the readiness probe pulls the pod from the router)
+.Expected output (the shell first prints one job line per background worker, `[1]` to `[20]`, and may print `Done` lines at the end; between them, the once-a-second sample — 200 while the database drains ~30s, 500 once it is gone, then 503 about a minute in once the readiness probe pulls the pod from the router)
 [%collapsible]
 ====
 [source,texinfo]
 ----
+[1] 19745
+[2] 19746
+…
+[20] 19789
 GET /api/claims -> HTTP 200
 GET /api/claims -> HTTP 200
 GET /api/claims -> HTTP 500
@@ -417,8 +460,8 @@ GET /api/claims -> HTTP 503
 ====
 
 Now watch the alert catch it.
-The live *inactive → pending → firing* progression lives in the platform's alerting engine, not on the `PrometheusRule` object — the CR carries only your rule's *spec*, and reading the ruler directly needs a cluster-monitoring role you do not have.
-So read the state where the platform exposes it to you — the project-scoped Observe view:
+The live *inactive → pending → firing* progression lives in the platform's alerting engine, not on the `PrometheusRule` object — the CR carries only your rule's *spec*.
+Read the state where the platform exposes it to you: the project-scoped Observe view, or the exercise 2 rules query from the terminal, whose `state` column moves from `inactive` to `pending` to `firing`.
 
 . Open the {ocp_console_url}/dev-monitoring/ns/{user}-dev/alertrules?alert-source=user[*Alerting rules* view for `{user}-dev`^] and find `ParasolClaimsErrorRateHigh` — the row whose *State* read `-` a moment ago.
 (An empty list here almost always means the *Source* filter: it defaults to *Platform*, and your rule's source is *User*.)
@@ -439,9 +482,11 @@ While it climbs, read the *three signals* on the same fault — this is the whol
 
 * *Metrics* say *what*: in *Observe → Metrics*, `sum(rate(http_server_requests_seconds_count{status=~"5.."}[5m]))` rises off zero and keeps climbing.
 That rising line is what tripped the alert.
-* *Logs* say… almost nothing useful.
+* *Logs* say *why* — once you know to look.
 Run `oc logs deploy/parasol-claims -n $NS --tail=20`.
-A healthy claims request logs nothing, and even the failures are terse — which is precisely why you do not operate this service by tailing logs.
+During the fault you get a Java stack trace whose `Caused by:` line reads `java.net.ConnectException: Connection refused`, thrown by the PostgreSQL driver, and a `SRHCK01001: Reporting health down status` line naming the *Database connections health check*.
+The cause is right there — but the logs did not notice, count or page anything.
+You read them because the metric and the alert sent you here — which is why you operate this service by metrics and alerts, not by tailing logs.
 * *Traces* say *where* — you will use them in the next exercise; the failing requests are recorded there with their status.
 
 [NOTE]
@@ -481,12 +526,25 @@ The alert does not clear the instant you recover: the 5-minute rate keeps counti
 [source,sh,role=execute]
 ----
 curl -s -o /dev/null -w 'GET /api/claims -> HTTP %{http_code}\n' "$CLAIMS/api/claims"
-oc get prometheusrule parasol-claims-alerts -n $NS
+curl -sk -G -H "Authorization: Bearer $(oc whoami -t)" \
+  https://thanos-querier.openshift-monitoring.svc:9093/api/v1/rules \
+  --data-urlencode "namespace=$NS" \
+  | jq -r '.data.groups[].rules[] | "\(.name)  \(.state)  \(.health)"'
 ----
+
+.Expected output (right after the fix; `firing` turns back to `inactive` about five minutes past the spike)
+[%collapsible]
+====
+[source,texinfo]
+----
+GET /api/claims -> HTTP 200
+ParasolClaimsErrorRateHigh  firing  ok
+----
+====
 
 [.checkpoint]
 ****
-✔ *Verify:* you saw `ParasolClaimsErrorRateHigh` go *Firing* while the database was down, watched the 5xx-rate metric climb while the logs stayed nearly silent, and recovered the service (database back *and* app restarted) so the claims list returns *HTTP 200* again.
+✔ *Verify:* you saw `ParasolClaimsErrorRateHigh` go *Firing* while the database was down, watched the 5xx-rate metric climb and found the database `Connection refused` in the logs once the alert pointed you there, and recovered the service (database back *and* app restarted) so the claims list returns *HTTP 200* again.
 That "restart to drop the poisoned connection pool" step is the fix worth remembering.
 ****
 
@@ -501,7 +559,7 @@ This is a product-UI beat — reading a trace waterfall has no terminal equivale
 
 . In the {ocp_console_url}[OpenShift web console^], open *Observe* → *Traces*.
 +
-// media-pass: screenshot/gif observability-health-scale-02-observe-traces.png — Observe -> Traces: select the tempo-traces instance and parasol-claims service (or paste the TraceQL query), sort the trace list by duration, and open the slowest trace to its HTTP span (HIGH; prefer a <30s gif of the search->open flow). Alt: "Observe Traces view with a TraceQL query for service.name parasol-claims, a trace list sorted by duration, and one trace expanded to its HTTP server span." Pulled 2026-07-28: the previously embedded capture showed only the empty "No Tempo instance selected" landing state — no TraceQL query run, no trace list, no opened span — do not re-embed that asset; re-shoot the completed search->open flow.
+// media-pass: screenshot/gif observability-health-scale-02-observe-traces.png — Observe -> Traces: select the traces instance (TempoMonolithic `traces` in ogsr-observability-workshop; its pods and services carry the tempo-traces prefix) and parasol-claims service (or paste the TraceQL query), sort the trace list by duration, and open the slowest trace to its HTTP span (HIGH; prefer a <30s gif of the search->open flow). Alt: "Observe Traces view with a TraceQL query for service.name parasol-claims, a trace list sorted by duration, and one trace expanded to its HTTP server span." Pulled 2026-07-28: the previously embedded capture showed only the empty "No Tempo instance selected" landing state — no TraceQL query run, no trace list, no opened span — do not re-embed that asset; re-shoot the completed search->open flow.
 // UNBLOCKED 2026-07-26 (task #86) — the platform fix landed in three stages:
 //   1. spec.multitenancy {enabled: true, mode: openshift} on the TempoMonolithic. The operator
 //      then fronts Tempo with tempo-traces-gateway (+ an OPA sidecar) and repoints the JaegerUI
@@ -527,13 +585,16 @@ This is a product-UI beat — reading a trace waterfall has no terminal equivale
 // STILL OPEN, and only this: the screenshot. The pulled capture showed the empty landing state, so a
 // re-capture with a trace actually OPEN is the remaining media-pass item.
 // NOTE the CLI caveat below still stands for the TENANT grant only.
-. Select the `tempo-traces` instance and the `parasol-claims` service, or paste the TraceQL query directly:
+. Select the `traces` instance and the `parasol-claims` service, or paste the TraceQL query directly:
 +
 [.copy]
 `{ resource.service.name = "parasol-claims" }`
 . You get a stream of recent traces.
 *Sort by duration* and open the slowest one.
-Each trace is one request — its HTTP method, route (`/api/claims/\{claimNumber}/history`), status, and total time.
+Each trace is one request — its HTTP method, route, status, and total time.
+Right after exercise 3, the slowest are usually `GET /api/claims` requests from the outage and from the restarted pod's first, cold requests — up to about a second.
+That is the trace doing its job: it names the exact request that was slow, and when.
+. Now open a `GET /api/claims/\{claimNumber}/history` trace and compare its time with the cold ones.
 
 [NOTE]
 .The metric that points at its own trace
@@ -990,16 +1051,16 @@ done
 
 * *Observe → Metrics* with `sum(rate(http_server_requests_seconds_count{status=~"5.."}[5m]))` — the error rate climbing off zero. The metric noticed.
 * *Observe → Traces*, filtered to the `parasol-claims` service — open a request and read its route and status. The trace located it.
-* The application's own logs, which say almost nothing:
+* The application's own logs — a stack trace ending in `Connection refused` from the database driver:
 
 [source,sh,role=execute,subs="attributes"]
 ----
-oc logs deploy/parasol-claims -n {user}-dev --tail=15
+oc logs deploy/parasol-claims -n {user}-dev --tail=20
 ----
 
 *What just happened*
 
-This is the argument for observability in one screen. The metric noticed, the trace located, and the logs — which everyone reaches for first — barely helped. A healthy Parasol request logs nothing by design, and a failing one under load is not much louder.
+This is the argument for observability in one screen. The metric noticed, the trace located, and the logs explained. The cause was in the logs all along, but nothing read them until the metric moved. Logs confirm the detail once you know where to look; they do not notice, count or page.
 
 === 3 · It pages, and the fix takes two steps — 2 min
 
