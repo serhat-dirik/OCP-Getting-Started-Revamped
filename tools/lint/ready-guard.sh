@@ -6,6 +6,9 @@
 # [parse] --timeout spellings. --self-test swaps in a cmd_ready that always says ready: the guard must
 # catch it and exit EXACTLY 1.
 set -euo pipefail
+# shellcheck source=tools/lint/_parse-guard-args.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_parse-guard-args.sh"
+parse_guard_args "$@"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export WS_AUDIENCE=admin
 # shellcheck source=/dev/null
@@ -15,7 +18,7 @@ need_oc() { :; }
 fails=0
 bad() { echo "❌ [$1] $2"; fails=$((fails + 1)); }
 
-if [[ "${1:-}" == "--self-test" ]]; then
+if [[ "$GUARD_SELF_TEST" -eq 1 ]]; then
   cmd_ready() { echo "✅ workshop ready in 0 min"; return 0; }   # canary: a ready that never waits
 fi
 
