@@ -14,13 +14,17 @@ include::partial$version-attributes.adoc[]
 // the retries+dead-letter step (a failing /process subscriber dead-letters with knativeerrorcode:404 in
 // ~7.9 s of exp backoff), and the scheduled PingSource (fires */5, displayed with claimpriority=high) are
 // REAL captures. NAMESPACE in output is the sample user user7-dev (yours is {user}-dev); the cluster domain
-// is a generic placeholder (yours is {cluster_domain}). kn is the primary CLI; config steps are dual-path
+// in output is {cluster_domain} (subs=attributes), so it renders as yours. kn is the primary CLI; config steps are dual-path
 // [tabs] Console(Serverless / Eventing / Import YAML)::CLI(kn/oc). The showcase event-display UI is a
 // product UI (single-path). The seeded-source honesty (the app doesn't emit yet) and the DLQ knativeerror
 // attributes are explicit NOTEs, not unverified placeholders.
 // Re-performed 2026-11-12 twice from a cold start as user9 in the attendee's cockpit terminal (OCP 4.22.22,
 // Serverless 1.37.3): the ex2/ex3/ex5/ex6 outputs, the ex3 wait-for-zero loop and the ex6 newest-ping
 // reads (grep -A10 | tail -11) are from those runs.
+// 2026-11-12 cross-module audit, re-proven as user9 in the attendee terminal pod: exercises 2-6 open with
+// a block that re-derives $NS/$BROKER/$CONSUMER, demo steps 2-3 re-derive $NS/$BROKER, and exercise 6's
+// two blocks that would otherwise print an old ping on an empty variable stop with `${VAR:?…}`
+// (terminals restart more often since the per-attendee pods; a fresh shell has none of the shortcuts).
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -43,7 +47,9 @@ In this lab you *inspect* that working `source → broker → trigger → sink` 
 Where you create or change an eventing object, you get two tabs: the *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`) — the *Serverless → Eventing* area, or the masthead *Quick create* (+) menu → *Import YAML* — and the *CLI* tab uses `kn`/`oc` in the *Terminal* tab beside these instructions.
 Pick a path once — the tabs stay in sync across the page.
 One thing is single-path on purpose: reading what the consumer *displays* is done in its *event-display* UI (the `showcase` app's own web page) and in its pod logs — that is the product's UI, not something with a console-vs-CLI choice.
-The namespace in the output below is the sample user `user7-dev`; *yours* is `{user}-dev`, and the cluster domain shown is a placeholder — read the *shape*, not the exact values.
+The namespace in the output below is the sample user `user7-dev`; *yours* is `{user}-dev`, and the cluster domain is your cluster's — read the *shape*, not the exact values.
+Each exercise from 2 on opens with a block that sets the shell shortcuts it uses (`$NS`, `$BROKER`, `$CONSUMER`).
+*If your terminal reconnects, run the exercise's first block again* (in exercise 1, the shortcut block above) — a fresh shell has none of them.
 ====
 endif::demo[]
 
@@ -137,15 +143,17 @@ include::example$diagrams/eventing-deep-dive/05-filter-decision.mmd[]
 
 Routing lives in the trigger, which is a small Kubernetes object. Sending fraud scoring a new class of event, or adding an analytics consumer that only wants high-value claims, is an edit to that object — no producer change, no consumer change, nothing redeployed.
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-dev
+BROKER=$(oc get broker default -n $NS -o jsonpath='{.status.address.url}')
 # the staged fraud-review Trigger filters on the seeded PingSource's own type; align it to the
 # CloudEvent type this step sends — the same filter exercise 4 builds by hand:
 oc patch trigger claims-fraud-review -n $NS --type=merge -p '{"spec":{"filter":{"attributes":{"type":"com.parasol.claim.submitted"}}}}'
 kn trigger list -n $NS
 for kind in "cnt-submitted:com.parasol.claim.submitted" "cnt-rejected:com.parasol.claim.rejected"; do
   id=${kind%%:*}; typ=${kind#*:}
-  oc exec deploy/demo-client -n $NS -- sh -c "curl -s -k -m 20 -o /dev/null -w '$id: HTTP %{http_code}\n' \
+  oc exec deploy/demo-client -n $NS -- sh -c "curl -s -k -m 20 -o /dev/null -w '$id: HTTP %\{http_code}\n' \
     -X POST -H 'Ce-Id: $id' -H 'Ce-Specversion: 1.0' -H 'Ce-Type: $typ' \
     -H 'Ce-Source: /demo/claims' -H 'Content-Type: application/json' -d '{\"claimId\":\"$id\"}' '$BROKER'"
 done
@@ -169,8 +177,11 @@ image::eventing-deep-dive/eventing-deep-dive-02-dead-letter-event.png["A termina
 
 Consumers fail. The question a platform has to answer is what happens to the event when one does, and the answer here is written on the trigger rather than in the producer: retry a few times, then hand the event to a sink that records it. Nothing is silently lost, and the record says why.
 
-[source,sh,role=execute]
+// attributes+ APPENDS: plain subs="attributes" drops HTML escaping, and the browser swallowed <EOF as a tag.
+[source,sh,role=execute,subs="attributes+"]
 ----
+NS={user}-dev
+BROKER=$(oc get broker default -n $NS -o jsonpath='{.status.address.url}')
 # repoint fraud-review's delivery at a path the consumer 404s, keeping retries + the dead-letter sink:
 oc apply -n $NS -f - <<EOF
 apiVersion: eventing.knative.dev/v1
@@ -187,7 +198,7 @@ spec:
     backoffDelay: PT1S
     deadLetterSink: { ref: { apiVersion: serving.knative.dev/v1, kind: Service, name: claims-dlq } }
 EOF
-oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -m 90 -o /dev/null -w "fails -> retries -> DLQ: HTTP %{http_code} in %{time_total}s\n" \
+oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -m 90 -o /dev/null -w "fails -> retries -> DLQ: HTTP %\{http_code} in %\{time_total}s\n" \
   -X POST -H "Ce-Id: dead-99" -H "Ce-Specversion: 1.0" -H "Ce-Type: com.parasol.claim.submitted" \
   -H "Ce-Source: /demo/claims" -H "Content-Type: application/json" -d "{\"claimId\":\"CLM-DEAD-99\"}" "'$BROKER'"'
 oc logs deploy/claims-dlq-v1-deployment -c showcase -n $NS --tail=200 | grep -iE 'id:|knativeerror'
@@ -269,12 +280,12 @@ oc get pods -n $NS -l 'app in (claims-consumer,claims-dlq)' --no-headers 2>/dev/
 ----
 
 .Expected output (abridged — your hostnames and revision hashes differ; the broker's internal address, two Ready scale-to-zero consumers, zero pods while idle)
-[source,texinfo]
+[source,texinfo,subs="attributes"]
 ----
 broker ingress: http://broker-ingress.knative-eventing.svc.cluster.local/user7-dev/default
 NAME              URL                                                       LATESTCREATED         LATESTREADY          READY   REASON
-claims-consumer   https://claims-consumer-user7-dev.<cluster-domain>        claims-consumer-v1    claims-consumer-v1   True
-claims-dlq        https://claims-dlq-user7-dev.<cluster-domain>             claims-dlq-v1         claims-dlq-v1        True
+claims-consumer   https://claims-consumer-user7-dev.{cluster_domain}        claims-consumer-v1    claims-consumer-v1   True
+claims-dlq        https://claims-dlq-user7-dev.{cluster_domain}             claims-dlq-v1         claims-dlq-v1        True
 0
 ----
 
@@ -300,6 +311,16 @@ Everything *downstream* is real: the broker, the triggers, the filtering, the co
 
 == 2. The consumer is a real CloudEvents processor
 ⏱ *~5 min* · send it an event directly, and watch it display the envelope
+
+Set this exercise's shortcuts first (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+BROKER=$(oc get broker default -n $NS -o jsonpath='{.status.address.url}')
+CONSUMER=$(oc get ksvc claims-consumer -n $NS -o jsonpath='{.status.url}')
+echo "namespace: $NS"; echo "broker:    ${BROKER:-NONE — is ws prep done?}"; echo "consumer:  ${CONSUMER:-NONE — is ws prep done?}"
+----
 
 Before routing anything, meet the consumer. Unlike the Serverless eventing *taste* — where the app had no handler and every delivery returned `405` (Method Not Allowed: the POST arrived, nothing handled it) — `claims-consumer` is a *real* CloudEvents consumer (the OpenShift Serverless `showcase` / *event-display*): it returns `HTTP 200` on a plain `GET`, `204` on a CloudEvents `POST`, and *displays* every event it receives.
 
@@ -395,6 +416,16 @@ There is the *CloudEvents envelope*: the *context attributes* (`type`, `source`,
 == 3. Route an event through the Broker — and wake a consumer from zero
 ⏱ *~7 min* · POST to the broker, watch it route to the consumer, which scales up on the event
 
+Set this exercise's shortcuts first (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+BROKER=$(oc get broker default -n $NS -o jsonpath='{.status.address.url}')
+CONSUMER=$(oc get ksvc claims-consumer -n $NS -o jsonpath='{.status.url}')
+echo "namespace: $NS"; echo "broker:    ${BROKER:-NONE — is ws prep done?}"; echo "consumer:  ${CONSUMER:-NONE — is ws prep done?}"
+----
+
 In exercise 2 you called the consumer *directly*. That's not eventing — that's a direct call. Now do it *properly*: POST the event to the *Broker*, and let the `claims-events` *Trigger* route it to the consumer. The producer (you) touches only the broker; the trigger owns delivery.
 
 Let the consumer settle back to *zero* first, so you can watch it *wake on the event*:
@@ -485,6 +516,16 @@ This synchronous, in-memory behavior is exactly why the *Kafka* broker exists (d
 
 == 4. Route by attribute — trigger filters
 ⏱ *~9 min* · add filtered triggers, and watch matching events delivered while non-matching are dropped
+
+Set this exercise's shortcuts first (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+BROKER=$(oc get broker default -n $NS -o jsonpath='{.status.address.url}')
+CONSUMER=$(oc get ksvc claims-consumer -n $NS -o jsonpath='{.status.url}')
+echo "namespace: $NS"; echo "broker:    ${BROKER:-NONE — is ws prep done?}"; echo "consumer:  ${CONSUMER:-NONE — is ws prep done?}"
+----
 
 The baseline `claims-events` trigger is a *catch-all* — no filter, so it delivers *every* broker event to the consumer. Real routing is *selective*: fraud-review wants `claim.submitted` events; an audit path wants only *high-priority* claims. That selection is an *attribute filter* on a trigger — and each trigger filters *independently*.
 
@@ -594,6 +635,16 @@ Here all three triggers point at the *same* `claims-consumer` so you can *see an
 
 == 5. Survive a failing consumer — retries and a dead-letter sink
 ⏱ *~9 min* · add delivery guarantees, break the consumer, and catch the dead events
+
+Set this exercise's shortcuts first (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+BROKER=$(oc get broker default -n $NS -o jsonpath='{.status.address.url}')
+CONSUMER=$(oc get ksvc claims-consumer -n $NS -o jsonpath='{.status.url}')
+echo "namespace: $NS"; echo "broker:    ${BROKER:-NONE — is ws prep done?}"; echo "consumer:  ${CONSUMER:-NONE — is ws prep done?}"
+----
 
 Routing works — but what happens when a consumer *fails*? By default, a failed delivery is *retried a few times and then dropped*. For events you can't afford to lose, a trigger's `delivery` spec adds *retries with backoff* and a *dead-letter sink* (DLQ): the events that still fail land in a separate sink, *stamped with why*.
 
@@ -809,6 +860,16 @@ A healthy trigger *never* uses its dead-letter sink — events flow straight to 
 == 6. Broker backing, channels, and workflows
 ⏱ *~5 min* (plus 5½ min if you choose to catch a real tick) · the decisions — in-memory vs Kafka, broker vs channel, choreography vs orchestration
 
+Set this exercise's shortcuts first (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+BROKER=$(oc get broker default -n $NS -o jsonpath='{.status.address.url}')
+CONSUMER=$(oc get ksvc claims-consumer -n $NS -o jsonpath='{.status.url}')
+echo "namespace: $NS"; echo "broker:    ${BROKER:-NONE — is ws prep done?}"; echo "consumer:  ${CONSUMER:-NONE — is ws prep done?}"
+----
+
 You've built the eventing core on the *in-memory* broker. Two decisions and one deep dive round out the picture — this exercise is *reading and one observation*, no new graded wiring.
 
 First, *see the seeded source on its schedule*. The `claim-ticker` PingSource fires every five minutes; watch a scheduled tick arrive at the consumer (it carries `claimpriority: high`, so your `claims-audit` trigger routes it):
@@ -866,7 +927,7 @@ You have two honest options:
 oc exec deploy/demo-client -n $NS -- sh -c "curl -s -k -m 30 -o /dev/null -w 'self-ping: HTTP %{http_code}\n' \
   -X POST -H 'Ce-Id: self-ping-1' -H 'Ce-Specversion: 1.0' -H 'Ce-Type: dev.knative.sources.ping' \
   -H 'ce-claimpriority: high' -H 'Ce-Source: /demo/self-ping' -H 'Content-Type: application/json' \
-  -d '{\"claimId\":\"CLM-0000\",\"amount\":4200,\"fraudScore\":0.82,\"note\":\"self-sent ping-shaped event\"}' '$BROKER'"
+  -d '{\"claimId\":\"CLM-0000\",\"amount\":4200,\"fraudScore\":0.82,\"note\":\"self-sent ping-shaped event\"}' '${BROKER:?empty - run this exercise first block}'"
 sleep 5
 oc logs deploy/claims-consumer-v1-deployment -c showcase -n $NS | grep -A10 'type: dev.knative.sources.ping' | tail -11
 ----
@@ -894,7 +955,7 @@ Data,
 ----
 END=$(( $(date +%s) + 330 ))
 while [ "$(date +%s)" -lt "$END" ]; do
-  oc exec deploy/demo-client -n $NS -- curl -s -k -m 5 -o /dev/null "$CONSUMER" >/dev/null 2>&1 || true
+  oc exec deploy/demo-client -n $NS -- curl -s -k -m 5 -o /dev/null "${CONSUMER:?empty - run this exercise first block}" >/dev/null 2>&1 || true
   sleep 20
 done
 oc logs deploy/claims-consumer-v1-deployment -c showcase -n $NS | grep -A10 'type: dev.knative.sources.ping' | tail -11
