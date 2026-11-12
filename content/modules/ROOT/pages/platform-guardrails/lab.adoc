@@ -7,10 +7,14 @@ include::partial$version-attributes.adoc[]
 // so blocks are role=execute (click-to-run) with subs="attributes" ONLY where {user} must
 // interpolate — blocks driven by shell variables or by jsonpath braces omit it (CC-6).
 //
-// PROVENANCE. Every command and every captured output on this page was performed on cluster-m24jn
-// (OCP 4.22.8, External Secrets Operator 1.2.0, OpenBao 2.6.2) on 2026-08-23, against user4-dev
-// materialized from this module's own entry-state chart. Hashes, resourceVersions and elapsed
+// PROVENANCE. Every command and every captured output on this page was re-performed on 2026-11-12
+// (OCP 4.22.22, External Secrets Operator 1.2.1, OpenBao 2.6.2) as user6 in the attendee's own
+// terminal pod, which starts in an EMPTY $HOME — so the Git search blocks cd into the repo clone at
+// /showroom/repo — and ships sha256sum and jq (no shasum, yq or openssl). The two hashes are
+// deterministic: 690c7bf39c96 is the chart's 7-byte seed, 8c12416d2611 is `rotated-by-me`. Elapsed
 // times are from that run and will differ on yours; the SHAPE of every output will not.
+// Exercise 4's counts are against the 8-rule ogsr-attendee-entry-app-guard (commit 4fb4174); if
+// that policy changes, re-derive them as an attendee with `oc create --dry-run=server`.
 //
 // SCOPE, and it is deliberate: attendees never create a cluster-scoped object. They READ the
 // policy that governs them and they BREAK it on purpose. They do not author one — a
@@ -108,7 +112,7 @@ oc get secret claims-creds -n {user}-dev -o jsonpath='{.metadata.ownerReferences
 ....
 Data
 ====
-POSTGRESQL_PASSWORD:  18 bytes
+POSTGRESQL_PASSWORD:  7 bytes
 
 ExternalSecret/claims-creds
 ....
@@ -134,16 +138,16 @@ Record what the Secret holds now, and what the vault has:
 
 [source,sh,role=execute,subs="attributes"]
 ----
-oc get secret claims-creds -n {user}-dev -o jsonpath='{.data.POSTGRESQL_PASSWORD}' | shasum -a 256 | cut -c1-12
-oc exec -n {user}-dev deploy/openbao -- bao kv metadata get -mount=parasol -format=json claims-db | grep -o '"current_version":[0-9]*'
+oc get secret claims-creds -n {user}-dev -o jsonpath='{.data.POSTGRESQL_PASSWORD}' | sha256sum | cut -c1-12
+oc exec -n {user}-dev deploy/openbao -- bao kv metadata get -mount=parasol -format=json claims-db | jq -c '{current_version: .data.current_version}'
 ----
 
 ....
 690c7bf39c96
-"current_version":1
+{"current_version":1}
 ....
 
-Version 1: the vault has been written once, when this environment was built. Now rotate it, with any value:
+Version 1: the vault has been written once, when this environment was built. Now rotate it. The block writes `rotated-by-me`, which always hashes to `8c12416d2611`; any other value works and gives a different hash:
 
 [source,sh,role=execute,subs="attributes"]
 ----
@@ -154,15 +158,15 @@ Then watch the Kubernetes Secret follow. Run this a few times over the next twen
 
 [source,sh,role=execute,subs="attributes"]
 ----
-oc get secret claims-creds -n {user}-dev -o jsonpath='{.data.POSTGRESQL_PASSWORD}' | shasum -a 256 | cut -c1-12
+oc get secret claims-creds -n {user}-dev -o jsonpath='{.data.POSTGRESQL_PASSWORD}' | sha256sum | cut -c1-12
 ----
 
-On the measured run the hash changed between the ninth and fifteenth second:
+On the measured run the hash changed at the fifteenth second:
 
 ....
 t+3s    690c7bf39c96
 t+9s    690c7bf39c96
-t+15s   a195862ede2e
+t+15s   8c12416d2611
 ....
 
 *What just happened*
@@ -226,7 +230,7 @@ That match condition is why the platform team can create whatever they need on t
 
 === 4 · Break it on purpose — 4 min
 
-Submit an Application that is deliberately wrong — someone else's project, a name that is not the one this account may use — and read the refusal.
+Submit an Application written the way anyone would write one by hand — the `default` project, a free-form name, a placeholder repository, no Helm parameters, a destination namespace — and read the refusal.
 
 [mermaid]
 ....
@@ -259,15 +263,12 @@ oc create -f /tmp/try-1.yaml
 ----
 
 ....
-Error from server (Forbidden): error when creating "/tmp/try-1.yaml":
-applications.argoproj.io "not-the-right-name" is forbidden:
-ValidatingAdmissionPolicy 'ogsr-attendee-entry-app-guard' with binding 'ogsr-attendee-entry-app-guard'
-denied request: attendees may only use their own 'entries-<username>' AppProject
+Error from server (Forbidden): error when creating "/tmp/try-1.yaml": applications.argoproj.io "not-the-right-name" is forbidden: ValidatingAdmissionPolicy 'ogsr-attendee-entry-app-guard' with binding 'ogsr-attendee-entry-app-guard' denied request: attendees may only use their own 'entries-<username>' AppProject
 ....
 
 *What just happened*
 
-The cluster refused the request in the policy's own words: `denied request: attendees may only use their own 'entries-<username>' AppProject`. That manifest broke *two* rules — the project and the name — and the message named only the first, because a policy reports the first validation that evaluates false, in declaration order. It is not a report card. Nothing reached storage either, so asking for the object afterwards returns `NotFound`.
+The cluster refused the request in the policy's own words: `denied request: attendees may only use their own 'entries-<username>' AppProject`. That manifest breaks *five* of the eight rules: the project (1), the name (3), the repository (5), the missing Helm parameters (6) and the destination namespace (7). The message named only the first, because a policy reports the first validation that evaluates false, in declaration order. It is not a report card. Nothing reached storage either, so asking for the object afterwards returns `NotFound`.
 
 == Frequently asked questions
 
@@ -311,7 +312,7 @@ oc describe secret claims-creds -n {user}-dev | sed -n '/^Data/,$p'
 ....
 Data
 ====
-POSTGRESQL_PASSWORD:  18 bytes
+POSTGRESQL_PASSWORD:  7 bytes
 ....
 
 [WARNING]
@@ -350,23 +351,28 @@ Fifteen seconds is how often the operator re-checks. `claims-db/password` is *a 
 
 === Now go looking for the password in Git
 
-Search this repository for a Secret manifest called `claims-creds`:
+Your terminal starts in an empty home directory; the workshop repository is cloned at `/showroom/repo`.
+Search it for a Secret manifest called `claims-creds`.
+`grep -x` matches whole lines only, so `kind: SecretStore` and `kind: ExternalSecret` do not count as a `kind: Secret`:
 
 [source,sh,role=execute]
 ----
-grep -rl "name: claims-creds" --include="*.yaml" . | xargs grep -l "kind: Secret"
+cd /showroom/repo
+grep -rl "name: claims-creds" --include="*.yaml" . | xargs grep -lx "kind: Secret" | sort
 ----
 
-You will find one — and it is *not* the one your app is using:
+You will find two, and *neither* is the one your app is using:
 
 ....
+./gitops/entry-states/config-multienv/templates/solve-endstate.yaml
 ./gitops/promotion/claims-config-template/base/claims-creds-secret.yaml
 ....
 
-Open it.
+Open the second:
 
 [source,sh,role=execute]
 ----
+cd /showroom/repo
 sed -n '5,12p' gitops/promotion/claims-config-template/base/claims-creds-secret.yaml
 ----
 
@@ -381,16 +387,27 @@ stringData:
   POSTGRESQL_PASSWORD: parasol
 ....
 
-That file belongs to a different module, and it is the pattern this one replaces: a password sitting in a repository in plain text, reviewable by anyone with read access, permanent in the history.
+Both files belong to other modules, and both carry the same plaintext value. They are the pattern this module replaces: a password sitting in a repository in plain text, reviewable by anyone with read access, permanent in the history.
 
-Now confirm that *your* namespace's Secret did not come from any such file — nothing in this module's chart creates it:
+Now look at what *this* module's chart creates. List every `Secret` and `ExternalSecret` in it, with the name of each:
 
 [source,sh,role=execute]
 ----
-grep -rl "kind: Secret" gitops/entry-states/platform-guardrails/templates/ || echo "no Secret manifest in this module's chart"
+cd /showroom/repo/gitops/entry-states/platform-guardrails/templates
+grep -n -A2 -x -e "kind: Secret" -e "kind: ExternalSecret" *.yaml
 ----
 
-The chart ships a Secret for OpenBao's *own* access token, and none for your application's password. That absence is the lesson, and you just checked it yourself rather than taking anyone's word for it.
+....
+openbao.yaml:26:kind: Secret
+openbao.yaml-27-metadata:
+openbao.yaml-28-  name: openbao-token
+--
+secret-store.yaml:71:kind: ExternalSecret
+secret-store.yaml-72-metadata:
+secret-store.yaml-73-  name: claims-creds
+....
+
+The chart has one Secret, `openbao-token`, which is the vault's *own* access token. The object it names `claims-creds` is an `ExternalSecret`: the mapping you read above, which says where the value lives and never what it is. No file in the chart holds your application's password. That absence is the lesson, and you just checked it yourself rather than taking anyone's word for it.
 
 == Exercise 2 — Rotate it, and prove the rotation lands
 
@@ -398,18 +415,18 @@ Record what the Secret holds now. Hash it, so the value never reaches your scree
 
 [source,sh,role=execute,subs="attributes"]
 ----
-oc get secret claims-creds -n {user}-dev -o jsonpath='{.data.POSTGRESQL_PASSWORD}' | shasum -a 256 | cut -c1-12
-oc exec -n {user}-dev deploy/openbao -- bao kv metadata get -mount=parasol -format=json claims-db | grep -o '"current_version":[0-9]*'
+oc get secret claims-creds -n {user}-dev -o jsonpath='{.data.POSTGRESQL_PASSWORD}' | sha256sum | cut -c1-12
+oc exec -n {user}-dev deploy/openbao -- bao kv metadata get -mount=parasol -format=json claims-db | jq -c '{current_version: .data.current_version}'
 ----
 
 ....
 690c7bf39c96
-"current_version":1
+{"current_version":1}
 ....
 
 Version 1 — the vault has been written once, when this environment was built.
 
-Now rotate. Pick your own value:
+Now rotate. The block writes `rotated-by-me`, which always hashes to `8c12416d2611`; any other value works and gives a different hash:
 
 [source,sh,role=execute,subs="attributes"]
 ----
@@ -420,15 +437,15 @@ Watch the Kubernetes Secret follow. Run this a few times over the next twenty se
 
 [source,sh,role=execute,subs="attributes"]
 ----
-oc get secret claims-creds -n {user}-dev -o jsonpath='{.data.POSTGRESQL_PASSWORD}' | shasum -a 256 | cut -c1-12
+oc get secret claims-creds -n {user}-dev -o jsonpath='{.data.POSTGRESQL_PASSWORD}' | sha256sum | cut -c1-12
 ----
 
-On the measured run the hash changed between the ninth and fifteenth second:
+On the measured run the hash changed at the fifteenth second:
 
 ....
 t+3s    690c7bf39c96
 t+9s    690c7bf39c96
-t+15s   a195862ede2e
+t+15s   8c12416d2611
 ....
 
 Nobody edited a manifest. Nobody redeployed. The `refreshInterval` you read in exercise 1 is exactly the window you just watched.
@@ -437,11 +454,11 @@ Confirm the vault agrees:
 
 [source,sh,role=execute,subs="attributes"]
 ----
-oc exec -n {user}-dev deploy/openbao -- bao kv metadata get -mount=parasol -format=json claims-db | grep -o '"current_version":[0-9]*'
+oc exec -n {user}-dev deploy/openbao -- bao kv metadata get -mount=parasol -format=json claims-db | jq -c '{current_version: .data.current_version}'
 ----
 
 ....
-"current_version":2
+{"current_version":2}
 ....
 
 [NOTE]
@@ -482,7 +499,7 @@ Eight rules. Now read the expressions that enforce them:
 oc get validatingadmissionpolicy ogsr-attendee-entry-app-guard -o jsonpath='{range .spec.validations[*]}{.expression}{"\n"}{end}'
 ----
 
-These are CEL. They are short on purpose, and two things in them are worth noticing: `request.userInfo.username` — the policy is written once and evaluates differently for every attendee — and `has(object.spec.project)`, which guards a field access, because an expression that errors is an expression that cannot decide.
+These are CEL. Most are one short line; rule 6 is long because it lists every Helm field it forbids. Two things in them are worth noticing: `request.userInfo.username` — the policy is written once and evaluates differently for every attendee — and `has(object.spec.project)`, which guards a field access, because an expression that errors is an expression that cannot decide.
 
 Read the condition that decides whether the policy applies at all:
 
@@ -499,7 +516,7 @@ That is why the platform team can create whatever they need on this cluster whil
 
 == Exercise 4 — Predict, then break it
 
-Read the rules again and *predict* before you run anything: which rule will this Application trip?
+Read the eight rules again and *predict* before you run anything: how many of them does this Application break, and which one will the refusal name?
 
 [source,sh,role=execute,subs="attributes"]
 ----
@@ -523,42 +540,38 @@ oc create -f /tmp/try-1.yaml
 ----
 
 ....
-Error from server (Forbidden): error when creating "/tmp/try-1.yaml":
-applications.argoproj.io "not-the-right-name" is forbidden:
-ValidatingAdmissionPolicy 'ogsr-attendee-entry-app-guard' with binding 'ogsr-attendee-entry-app-guard'
-denied request: attendees may only use their own 'entries-<username>' AppProject
+Error from server (Forbidden): error when creating "/tmp/try-1.yaml": applications.argoproj.io "not-the-right-name" is forbidden: ValidatingAdmissionPolicy 'ogsr-attendee-entry-app-guard' with binding 'ogsr-attendee-entry-app-guard' denied request: attendees may only use their own 'entries-<username>' AppProject
 ....
 
-That manifest broke *two* rules — the project and the name — and the message named only the first. A policy reports the first validation that evaluates false, in declaration order. It is not a report card.
+It breaks *five* of the eight: the project (rule 1), the name (3), the repository (5), the missing Helm parameters (6) and the destination namespace (7). The refusal named only rule 1. A policy reports the first validation that evaluates false, in declaration order. It is not a report card.
 
-Fix the project and the name, and leave one thing wrong:
+To break exactly *one* rule, start from an Application this policy has already admitted: the one `ws prep` created for you, as you. Save a copy of it, change only the source path, and submit that:
 
 [source,sh,role=execute,subs="attributes"]
 ----
-cat > /tmp/try-2.yaml <<'EOF'
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: entry-platform-guardrails-{user}
-  namespace: openshift-gitops
-spec:
-  project: entries-{user}
-  source:
-    repoURL: "https://example.com/x.git"
-    path: "apps/parasol-claims"
-    targetRevision: main
-  destination:
-    server: "https://kubernetes.default.svc"
-    namespace: {user}-dev
-EOF
-oc create -f /tmp/try-2.yaml
+oc get application entry-platform-guardrails-{user} -n openshift-gitops -o json \
+  | jq '{apiVersion, kind, metadata: {name: .metadata.name, namespace: .metadata.namespace}, spec}' > /tmp/mine.json
+jq '.spec.source.path = "apps/parasol-claims"' /tmp/mine.json | oc create -f -
 ----
 
+[literal,subs="attributes+"]
 ....
-denied request: attendees may only source Applications from gitops/entry-states/
+Error from server (Forbidden): error when creating "STDIN": applications.argoproj.io "entry-platform-guardrails-{user}" is forbidden: ValidatingAdmissionPolicy 'ogsr-attendee-entry-app-guard' with binding 'ogsr-attendee-entry-app-guard' denied request: attendees may only source Applications from gitops/entry-states/
 ....
 
-A different rule, named precisely.
+Rule 4, named precisely. To prove the path was the *only* thing wrong, submit the unchanged copy. `--dry-run=server` runs every admission check for real and then stores nothing:
+
+[source,sh,role=execute]
+----
+oc create --dry-run=server -f /tmp/mine.json
+----
+
+[literal,subs="attributes+"]
+....
+Error from server (AlreadyExists): error when creating "/tmp/mine.json": applications.argoproj.io "entry-platform-guardrails-{user}" already exists
+....
+
+`AlreadyExists`, not `Forbidden`. All eight rules admitted the copy, and the request got as far as storage, where the name is already taken by the original. One field changed, one rule refused it.
 
 Now confirm what a refusal at admission actually costs:
 

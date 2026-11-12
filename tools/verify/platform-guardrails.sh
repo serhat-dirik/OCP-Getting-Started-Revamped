@@ -237,11 +237,10 @@ check "route parasol-claims answers 200 in ${NS}"             route_ready_200   
 # module's entry state to create — but the lab reads it, tries to violate it and expects a denial by
 # name, and all three of those are dead if the object has been renamed or removed. Graded here so a
 # workshop-config change surfaces in this module's verify instead of in an attendee's terminal.
-# AN ATTENDEE CANNOT ANSWER THIS ONE and is not meant to: probed as a real read on cluster-m24jn
-# 2026-08-23 (impersonating user1 with --as-group=workshop-attendees, not `oc auth can-i`),
-# validatingadmissionpolicies is Forbidden at cluster scope. oc_read files Forbidden under "could not
-# ask", so the attendee gets ⚠ with _lib.sh's "not yours to fix and not graded" line, and an
-# instructor or CI run — which is where a missing platform object should be caught — gets ✅ or ❌.
+# An attendee CAN answer it: platform-observer grants admissionregistration.k8s.io get/list/watch
+# (gitops/workshop-config) — the lab's Exercise 3 depends on the same read; measured as user6 in the
+# attendee terminal 2026-11-12. If that grant is missing, oc_read files Forbidden under "could not
+# ask" and the attendee gets ⚠, not ❌.
 check "policy ${ENTRY_APP_GUARD} exists (the policy the lab reads)"  oc get validatingadmissionpolicy "$ENTRY_APP_GUARD" -o name || hint "the ValidatingAdmissionPolicy this module is about is missing — the lab's read, its deliberate violation and its denial message all reference it by name. It is owned by gitops/workshop-config, not by this module: re-sync the workshop-config Application"
 
 # The egress grant, with all three of its honest outcomes.
@@ -260,8 +259,20 @@ case "$eso_gate_rc" in
     na "egress allow for the ESO controller — this cluster's ${ESO_NS} carries no deny-all NetworkPolicy, so nothing is blocking port 8200 and there is no allow to require. The credential path itself IS graded above (SecretStore Ready, ExternalSecret SecretSynced), which is the outcome the allow exists to produce"
     ;;
   *)
-    warn "could not check: the ESO controller's egress to TCP 8200 — ${ESO_NS} is not readable as this identity"
-    hint "not yours to fix and not graded: NetworkPolicies in a platform namespace are not an attendee's to read. The checks above already grade the OUTCOME (SecretStore Ready, ExternalSecret SecretSynced); run this one from an instructor or CI session if you need the cause rather than the symptom"
+    # WHO could not read it decides the verdict. An ATTENDEE never can — NetworkPolicies in a platform
+    # namespace are not theirs to read, and no re-run of theirs ever will be — so for them a warn()
+    # only ever produced "this run did NOT fully verify the lab" on a healthy world, and under
+    # `ws prep` (VERIFY_STRICT=1, rc 3) a "could not fully verify … --yes" nudge toward a wipe
+    # (smoke 2026-11-12, F6). The attendee gets a neutral, uncounted line instead: the OUTCOME this
+    # allow exists to produce is graded above (SecretStore Ready = the controller reached the vault).
+    # Any other identity that could not read it (an instructor whose session lost a grant, CI) is
+    # exactly who should be told the cause went unchecked, so it keeps the warn().
+    if oc_read_optional whoami && [[ "$OC_OUT" == "$USER_NAME" ]]; then
+      info "not graded as ${USER_NAME}: the ESO controller's egress to TCP 8200 (NetworkPolicies in ${ESO_NS} are platform-layer, not an attendee's to read). Its outcome IS graded above: SecretStore Ready means the controller reached the vault"
+    else
+      warn "could not check: the ESO controller's egress to TCP 8200 — ${ESO_NS} is not readable as this identity"
+      hint "NetworkPolicies in a platform namespace need a platform read. The checks above already grade the OUTCOME (SecretStore Ready, ExternalSecret SecretSynced); run this one from an instructor or CI session if you need the cause rather than the symptom"
+    fi
     ;;
 esac
 
