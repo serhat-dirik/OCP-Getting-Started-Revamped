@@ -1214,6 +1214,14 @@ _frame_domain="${DOMAIN:-$(oc get ingresses.config cluster -o jsonpath='{.spec.d
 oc patch ingresscontroller/default -n openshift-ingress-operator --type=merge -p "{\"spec\":{\"httpHeaders\":{\"actions\":{\"response\":[{\"name\":\"X-Frame-Options\",\"action\":{\"type\":\"Delete\"}},{\"name\":\"Content-Security-Policy\",\"action\":{\"type\":\"Set\",\"set\":{\"value\":\"frame-ancestors 'self' https://*.${_frame_domain}\"}}}]}}}}" >/dev/null
 ok "router: X-Frame-Options removed, frame-ancestors allow https://*.${_frame_domain} (cockpit tabs embed)"
 
+# The router tolerates the batch-pool taint. On clusters whose router runs one replica per worker-role node
+# (RHDP: replicas=6 on 3 control planes + 3 workers, host ports), the NoSchedule taint on the batch worker left
+# no node for the 6th replica, so ANY router rollout (this header change, an upgrade) stalled at 5/6 and the
+# ingress operator went Degraded (seen 2026-11-12 on cluster-5vqxc). Routers are cluster infrastructure; the
+# taint exists to repel ordinary workloads (M18). Merge patch: keeps the existing nodeSelector.
+oc patch ingresscontroller/default -n openshift-ingress-operator --type=merge -p '{"spec":{"nodePlacement":{"tolerations":[{"key":"workshop.redhat.com/pool","operator":"Equal","value":"batch","effect":"NoSchedule"}]}}}' >/dev/null
+ok "router: tolerates the ${POOL_LABEL} batch-pool taint (rollouts never stall on it)"
+
 # 2b. MaaS token for OpenShift Lightspeed (only when WE install it — a pre-installed
 # Lightspeed brings its own provider secret, which we must never overwrite).
 if [[ "$LIGHTSPEED" == "true" && "$LIGHTSPEED_PREINSTALLED" == "false" ]]; then
