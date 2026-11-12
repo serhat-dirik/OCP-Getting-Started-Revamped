@@ -128,11 +128,11 @@ except ImportError:  # pragma: no cover - exercised only on a machine without Py
     sys.exit(2)
 
 
-# The 13 suffixes gitops/workshop-config renders per user today. The COPY side must be told which
+# The 11 suffixes gitops/workshop-config renders per user today. The COPY side must be told which
 # namespaces to render (its assertInputs refuses an empty `suffixes`), so unlike the source side
 # this list cannot be discovered. It is not a coverage ceiling: a suffix the source renders and this
 # list omits becomes an `absent-copy` FINDING, so under-coverage fails loudly instead of passing.
-SUFFIXES = ("dev", "stage", "prod", "cicd", "ai", "batch", "mesh", "modernize", "partner",
+SUFFIXES = ("dev", "stage", "prod", "cicd", "batch", "mesh", "partner",
             "gitops", "client", "site-a", "site-b")
 
 # The one user both sides are rendered for. Policy is per-suffix, never per-user — on both sides the
