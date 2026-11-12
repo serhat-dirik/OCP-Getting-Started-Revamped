@@ -5,7 +5,9 @@ include::partial$version-attributes.adoc[]
 // Lab page for Trusted Software Supply Chain. Workshop exercises are guarded ifndef::demo[]; the DEMO rendering shows only the
 // SA demo page. Every command runs in the Showroom Terminal as {user}, so blocks are
 // [source,sh,role=execute]. To avoid AsciiDoc attribute-substitution eating jsonpath braces, the
-// FIRST block sets NS={user}-cicd + the RHTAS route URLs (subs=attributes, no braces) and later
+// FIRST block sets NS={user}-cicd + the RHTAS route URLs + IMG/PATH (subs=attributes; its one jsonpath
+// `{.image…}` is safe — Asciidoctor substitutes only attribute-name references) and is the page's
+// re-run-after-reconnect block (smoke 2026-11-12 F2). Later
 // oc/tkn/cosign blocks use $NS/$CLI/$REKOR/$TUF with NO subs — so `{.status...}` stays literal (same
 // idiom as jobs-batch-kueue/pipelines-fundamentals).
 //
@@ -34,7 +36,7 @@ ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
 
 Set the shortcuts you will reuse in every command below.
-`$NS` is your `-cicd` project; `$CLI`, `$REKOR`, and `$TUF` are the *Red Hat Trusted Artifact Signer* (RHTAS) service URLs you will download tools from and query later:
+`$NS` is your `-cicd` project; `$CLI`, `$REKOR`, and `$TUF` are the *Red Hat Trusted Artifact Signer* (RHTAS) service URLs you will download tools from and query later; `$IMG` is the signed image you verify; `~/bin` is where exercise 2 puts `cosign`:
 
 [source,sh,role=execute,subs="attributes"]
 ----
@@ -42,8 +44,12 @@ NS={user}-cicd
 CLI=https://cli-server-trusted-artifact-signer.{cluster_domain}
 REKOR=https://rekor-server-trusted-artifact-signer.{cluster_domain}
 TUF=https://tuf-trusted-artifact-signer.{cluster_domain}
+IMG=$(oc get istag parasol-claims-trusted:latest -n $NS -o jsonpath='{.image.dockerImageReference}')
+export PATH="$HOME/bin:$PATH"
 echo "working in project: $NS"
 ----
+
+If your terminal reconnects (a page reload opens a fresh shell), re-run this block — your downloaded tools stay in `~/bin`, but the shortcuts do not.
 
 In this lab you take Parasol's `parasol-claims` pipeline from "it builds" to "it is *trustworthy*."
 Most of your time is spent on the *trust* controls — the *signature* and *SLSA provenance* that travel with the image, a *transparency-log* record anyone can audit, and the cluster *refusing to run anything unsigned*.
@@ -133,7 +139,7 @@ So when a flaw like Log4Shell lands, the hard questions are not about the code t
 
 *Three artifacts, three questions*
 
-A *signature* says the image is intact and came from us. An *attestation* — signed SLSA provenance — says how it was built: the builder, the source, the steps. An *SBOM* says what is inside, component by component. They are different facts and they reinforce each other: the attestation is signed, the SBOM can be attested, and the signature is what an admission gate checks.
+A *signature* says the image is intact and came from us. An *attestation* — signed SLSA provenance — says how it was built: the builder, the build type, the timestamps. An *SBOM* says what is inside, component by component. They are different facts and they reinforce each other: the attestation is signed, the SBOM can be attested, and the signature is what an admission gate checks.
 
 On OpenShift those artifacts are produced by the pipeline rather than by anyone remembering to make them. Tekton Chains signs every image the pipeline builds and attaches its provenance with no per-build wiring, Red Hat Trusted Artifact Signer records signatures in a public transparency log, and a native `ClusterImagePolicy` makes the cluster verify a signature before it will pull an image.
 
@@ -284,7 +290,7 @@ That tree size is the live Rekor log run by Red Hat Trusted Artifact Signer: eve
 No, that is the design. The scan runs after the build, because an image has to exist before it can be scanned. So the image is built — and even signed, since signing answers "who built it", not "is it clean" — and then the gate refuses the `:candidate` tag and fails the run.
 
 *What is the difference between the signature, the attestation and the SBOM?*::
-Three different facts. The signature proves the image is intact and came from you. The attestation is signed provenance: the builder, the source, the steps, the timestamps, as a SLSA statement. The SBOM is what is inside — every component and version. Tekton Chains produces the first two automatically; the build produces the SBOM.
+Three different facts. The signature proves the image is intact and came from you. The attestation is signed provenance: the builder, the build type, the build tool, the timestamps, as a SLSA statement. The SBOM is what is inside — every component and version. Tekton Chains produces the first two automatically; the build produces the SBOM.
 
 *Key-based or keyless signing — which should we use?*::
 Key-based signing is deterministic and needs no per-build identity, which makes it the simpler, sufficient choice for a controlled build system like this one; the private key lives in the cluster and anyone verifies with the public key, offline. Keyless removes the long-lived key: Trusted Artifact Signer issues a short-lived certificate bound to the build's own identity and records the signature in the transparency log. Reach for keyless when you need public verifiability or per-identity signing.
@@ -606,17 +612,21 @@ tkn pipelinerun logs --last -f -n $NS
 .The scan step's output (abridged — the real RHACS table has more columns)
 [source,texinfo]
 ----
-[image-check] ▶ RHACS build-time image check: .../parasol-claims:candidate (categories: Supply Chain Security)
-[image-check] (TOTAL: 1, LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 1)
-[image-check]
-[image-check] | POLICY                                    | SEVERITY | BREAKS BUILD | VIOLATION
-[image-check] | Block Log4Shell (CVE-2021-44228) at build | CRITICAL |      X       | CVE-2021-44228 (CVSS 10) (severity Critical) found in
-[image-check] |                                           |          |              | component 'org.apache.logging.log4j:log4j-core' (version 2.14.1)
-[image-check]
-[image-check] ERROR: failed policies found: 1 policies violated that are failing the check
-[image-check] ❌ image check FAILED — an enforced build policy was violated (e.g. Log4Shell).
+[acs-scan : image-check] ▶ RHACS build-time image check: .../parasol-claims:candidate (categories: Supply Chain Security)
+[acs-scan : image-check] (TOTAL: 1, LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 1)
+[acs-scan : image-check]
+[acs-scan : image-check] | POLICY                                    | SEVERITY | BREAKS BUILD | VIOLATION
+[acs-scan : image-check] | Block Log4Shell (CVE-2021-44228) at build | CRITICAL |      X       | CVE-2021-44228 (CVSS 10) (severity Critical) found in
+[acs-scan : image-check] |                                           |          |              | component 'org.apache.logging.log4j:log4j-core' (version 2.14.1)
+[acs-scan : image-check]
+[acs-scan : image-check] ERROR: failed policies found: 1 policies violated that are failing the check
+[acs-scan : image-check] ❌ image check FAILED — an enforced build policy was violated (e.g. Log4Shell).
+[acs-scan : image-check]    fix: remove the vulnerable dependency / bump the base image, then re-run.
+
+failed to get logs for task acs-scan : container step-image-check has failed  : [{"key":"check-passed","value":"false","type":1},{"key":"StartedAt","value":"...","type":3}]
 ----
 
+The last line is `tkn` reporting that the step failed, not a broken log command.
 The build *succeeded* — the image was built — and then the `acs-scan` step turned the run *red* on one `CRITICAL` violation: "Block Log4Shell," CVSS 10, in `log4j-core` 2.14.1.
 Because `acs-scan` runs *after* `build-image` (you cannot scan an image you have not built), the image exists and is even signed — the *scan* is what refuses it.
 
@@ -704,6 +714,8 @@ cosign verify --key ~/cosign.pub --allow-insecure-registry --insecure-ignore-tlo
 .Expected output (abridged)
 [source,texinfo]
 ----
+WARNING: Skipping tlog verification is an insecure practice that lacks transparency and auditability verification for the signature.
+
 Verification for image-registry.openshift-image-registry.svc:5000/<you>-cicd/parasol-claims-trusted@sha256:... --
 The following checks were performed on each of these signatures:
   - The cosign claims were validated
@@ -714,7 +726,7 @@ The following checks were performed on each of these signatures:
 
 The signature is *valid*: this image is intact and was signed with the key your pipeline signs with.
 The last line is the signed payload. Its `docker-reference` names the repository the image was built and signed in — `ogsr-supply-chain/parasol-claims`, where the platform ran the pipeline — even though you pulled a copy from your own project. Exercise 5's cluster policy checks exactly that name.
-(`--insecure-ignore-tlog` tells cosign not to look for a transparency-log entry — this key-based signature does not use one; you will meet the transparency log with *keyless* signing in exercise 4. `--allow-insecure-registry` skips the internal registry's service-CA TLS.)
+(The `WARNING` and `--insecure-ignore-tlog` go together: the flag tells cosign not to look for a transparency-log entry — this key-based signature does not use one; you will meet the transparency log with *keyless* signing in exercise 4. `--allow-insecure-registry` skips the internal registry's service-CA TLS.)
 
 Now watch it *reject* an image that was not signed with your key — a stock public image:
 
@@ -743,7 +755,7 @@ Exercise 5 turns that check into a cluster rule.
 ⏱ *~6 min* · read the SLSA attestation Chains attached beside the image
 
 A signature says the image is intact and yours.
-An *attestation* says _how it was built_ — the builder, the source, the steps, the timestamps — as a signed *SLSA provenance* statement.
+An *attestation* says _how it was built_ — the builder, the build type, the build tool, the timestamps — as a signed *SLSA provenance* statement.
 Chains attached one to your image, stored in the registry beside it as a `.att` tag.
 
 First see the artifacts Chains stored — each image plus two tags derived from its digest, in two repositories: the trusted copy, and your own seeded build:
@@ -821,7 +833,9 @@ The following checks were performed on each of these signatures:
 The `WARNING` is the `--insecure-ignore-tlog` flag speaking: this key-based signature has no transparency-log entry, which exercise 4 adds.
 
 That is real *SLSA provenance*: it names the predicate type (`slsa.dev/provenance/v0.2`), the build type (a Tekton TaskRun), and the builder (`tekton.dev/chains/v2`) — a machine-checkable answer to "prove this image came from your pipeline."
-The full predicate also lists the source materials and the start/finish timestamps.
+The full predicate also lists its `materials` and the start/finish timestamps.
+Here `materials` holds only the `buildah` tool image, by digest — no git URL or commit.
+Chains records the source only when the build task reports it, and this pipeline's `buildah` task does not; provenance is only as complete as what the build tells Chains.
 
 You have now seen the three artifacts of a trustworthy image, each answering a different question: the *signature* (intact + ours), the *attestation* (how it was built), and the *SBOM* (what is inside).
 
@@ -1051,7 +1065,7 @@ Try these on your own:
 Answer a real question with `jq`: how many components come from `org.apache.*`? (`jq '[.components[] | select(.group | startswith("org.apache"))] | length' target/parasol-claims-sbom.json`.)
 That is exactly the query you would run the day a CVE lands in an Apache library.
 * *Read the full provenance.*
-`cosign download attestation --allow-insecure-registry "$IMG" | jq -r '.payload' | base64 -d | jq '.predicate.materials, .predicate.metadata'` — the SLSA predicate lists the source materials and build timestamps.
+`cosign download attestation --allow-insecure-registry "$IMG" | jq -r '.payload' | base64 -d | jq '.predicate.materials, .predicate.metadata'` — the SLSA predicate lists its materials (here only the `buildah` image, by digest) and the build timestamps.
 That is the machine-readable answer to "how was this image built."
 * *Inspect a Rekor entry in full.*
 Take the UUID from exercise 4 and run `rekor-cli get --rekor_server $REKOR --uuid <uuid>` — read the log index, the integrated time, and the certificate the identity was issued.
