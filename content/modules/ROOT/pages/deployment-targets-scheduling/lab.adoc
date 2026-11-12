@@ -33,6 +33,12 @@ include::partial$version-attributes.adoc[]
 // parasol-claims pods through the Eviction API (two 201s, one 429, then a 5 s retry loop accepted after
 // 12 s). Exercise 5's minAvailable:3 exhaust-and-evict step moved there: the refusal now comes from the
 // budget's own arithmetic, not from a patched floor.
+// 2026-11-12, re-proven as user7 on OCP 4.22.22 from a cold `adm reset`, in the attendee's own terminal pod
+// (ws verify 18/18): every parasol-claims rollout that is followed by a pod read now ends with a bounded
+// wait until only the desired number of pods is listed, and exercise 5's "restart one pod" picks the
+// newest pod. Without them the G3 smoke (as user12) listed a Terminating pod in exercise 2, counted four
+// replicas for three in exercise 3's zone readout, and in exercise 5 deleted a pod that was already gone
+// (NotFound) — so the "Approved survives a restart" proof proved nothing. Keep them.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -403,21 +409,26 @@ CLI::
 ----
 oc patch deploy parasol-claims -n $NS --type=merge -p '{"spec":{"template":{"spec":{"affinity":{"podAntiAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":[{"labelSelector":{"matchLabels":{"app":"parasol-claims"}},"topologyKey":"kubernetes.io/hostname"}]}}}}}}'
 oc rollout status deploy/parasol-claims -n $NS --timeout=90s
+for i in $(seq 1 45); do [ "$(oc get pods -n $NS -l app=parasol-claims -o name | wc -l)" -eq 2 ] && break; sleep 2; done
 ----
 --
 ====
 
-// Re-measured live on OCP 4.22.6 (frozen provenance — not a requirement), 2026-07-31: the required podAntiAffinity forces the scheduler
-// to find a distinct node for each replacement before the old pod retires, so the roll runs slower
-// than a plain rollout — samples have landed anywhere from ~48s to ~72s. Treat this as a range —
-// actual wall-clock time depends on image-pull and node availability on your cluster.
-.Expected output (a sample — the roll takes ~48–72s, slower than a plain rollout, because anti-affinity makes it deliberate)
+// Re-measured live on OCP 4.22.6 (frozen provenance — not a requirement), 2026-07-31: samples landed
+// anywhere from ~48s to ~72s. On OCP 4.22.22, 2026-11-12, the same roll took 26 s (smoke, user12) and
+// ~30 s (user7). Treat this as a range — actual wall-clock time depends on image-pull and node
+// availability on your cluster.
+.Expected output (a sample — the roll took anywhere from ~25 s to ~72 s across our runs)
 [source,texinfo]
 ----
 deployment.apps/parasol-claims patched
 Waiting for deployment "parasol-claims" rollout to finish: 1 out of 2 new replicas have been updated...
 deployment "parasol-claims" successfully rolled out
 ----
+
+The `for` line after `rollout status` waits until only the rollout's own pods are listed.
+`rollout status` returns as soon as the new pods are ready, while the pods they replaced are still `Terminating` for up to 30 seconds — still listed, and still in phase `Running`.
+Every `parasol-claims` rollout on this page that is followed by a pod read ends with the same line, so the read sees only the pods you mean.
 
 Confirm the replicas are now on *distinct* nodes — guaranteed, not lucky:
 
@@ -511,6 +522,7 @@ Scale back to three (a good spread, room for the disruption budget later):
 ----
 oc scale deploy/parasol-claims -n $NS --replicas=3
 oc rollout status deploy/parasol-claims -n $NS --timeout=90s
+for i in $(seq 1 45); do [ "$(oc get pods -n $NS -l app=parasol-claims -o name | wc -l)" -eq 3 ] && break; sleep 2; done
 ----
 
 [.checkpoint]
@@ -542,6 +554,7 @@ CLI::
 ----
 oc patch deploy parasol-claims -n $NS --type=merge -p '{"spec":{"template":{"spec":{"topologySpreadConstraints":[{"maxSkew":1,"topologyKey":"kubernetes.io/hostname","whenUnsatisfiable":"ScheduleAnyway","labelSelector":{"matchLabels":{"app":"parasol-claims"}}}]}}}}'
 oc rollout status deploy/parasol-claims -n $NS --timeout=120s
+for i in $(seq 1 45); do [ "$(oc get pods -n $NS -l app=parasol-claims -o name | wc -l)" -eq 3 ] && break; sleep 2; done
 oc get pods -n $NS -l app=parasol-claims -o wide
 ----
 --
@@ -564,11 +577,13 @@ Point it at a *zone* label instead of the hostname, and the same constraint now 
 ----
 oc patch deploy parasol-claims -n $NS --type=merge -p '{"spec":{"template":{"spec":{"topologySpreadConstraints":[{"maxSkew":1,"topologyKey":"workshop.redhat.com/zone","whenUnsatisfiable":"ScheduleAnyway","labelSelector":{"matchLabels":{"app":"parasol-claims"}}}]}}}}'
 oc rollout status deploy/parasol-claims -n $NS --timeout=120s
+for i in $(seq 1 45); do [ "$(oc get pods -n $NS -l app=parasol-claims -o name | wc -l)" -eq 3 ] && break; sleep 2; done
 oc get pods -n $NS -l app=parasol-claims --field-selector=status.phase=Running -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | while read n; do echo "$n zone=$(oc get node $n -o jsonpath='{.metadata.labels.workshop\.redhat\.com/zone}')"; done
 ----
 
 // The spread varies run to run. Measured twice in 2026-07 as a:1 b:2 c:0 (the sample below); measured
-// even (a:1 b:1 c:1) by the 2026-11 smoke run and again as user2 on 2026-11-12. See the IMPORTANT box.
+// even (a:1 b:1 c:1) by the 2026-11 smoke run and again as user2 on 2026-11-12; skewed b:2 c:1 as user7
+// later that day. See the IMPORTANT box.
 .Expected output (a sample — the spread varies: you may get one replica per zone, or a skew like this one)
 [source,texinfo]
 ----
@@ -663,10 +678,10 @@ Do exactly that — *only* the selector — and read what actually happens (on a
 ----
 oc patch deploy statement-batch -n $NS --type=merge -p '{"spec":{"template":{"spec":{"nodeSelector":{"workshop.redhat.com/pool":"batch"}}}}}'
 sleep 10
-oc get pods -n $NS -l app=statement-batch
+oc get pods -n $NS -l app=statement-batch -o wide
 ----
 
-.Expected output — two honest outcomes; the precondition check above told you which is yours
+.Expected output — two honest outcomes; the precondition check above told you which is yours (columns trimmed)
 [source,texinfo]
 ----
 # on a TAINTED batch pool (3-worker floor met): the new pod is stuck Pending
@@ -797,11 +812,14 @@ wait
 default roll: ok=292 dropped=4
 ----
 
+Your terminal may also print a line such as `[1] 12190` before the tally, and `[1]+  Done …` after it: that is the shell reporting the probe it ran in the background, not part of the result.
+
 The tally only means something if the roll actually ran — confirm it landed before you read anything into the numbers:
 
 [source,sh,role=execute]
 ----
 oc rollout status deploy/parasol-claims -n $NS --timeout=180s
+for i in $(seq 1 45); do [ "$(oc get pods -n $NS -l app=parasol-claims -o name | wc -l)" -eq 3 ] && break; sleep 2; done
 ----
 
 Requests dropped. Not many — but a customer-facing API that drops *any* request during a routine deploy has a bug, and the count is not the interesting part: *why* they dropped is. Before reaching for a rollout knob, find out.
@@ -844,7 +862,7 @@ Now restart *one* pod and read `CLM-1001` again:
 
 [source,sh,role=execute]
 ----
-ONEPOD=$(oc get pods -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+ONEPOD=$(oc get pods -n $NS -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')
 oc delete pod $ONEPOD -n $NS
 sleep 3
 oc wait --for=condition=Ready pod -l app=parasol-claims -n $NS --timeout=180s
@@ -900,6 +918,7 @@ CLI::
 ----
 oc set env deployment/parasol-claims QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY=none -n $NS
 oc rollout status deploy/parasol-claims -n $NS --timeout=180s
+for i in $(seq 1 45); do [ "$(oc get pods -n $NS -l app=parasol-claims -o name | wc -l)" -eq 3 ] && break; sleep 2; done
 ----
 --
 ====
@@ -910,7 +929,7 @@ Prove the fix the same way you proved the fault — plant the value again, resta
 ----
 oc exec deploy/claims-load -n $NS -- curl -s -X PUT http://parasol-claims:8080/api/claims/CLM-1001/status \
   -H 'Content-Type: application/json' -d '{"status":"Approved"}' -o /dev/null -w 'wrote HTTP %{http_code}\n'
-ONEPOD=$(oc get pods -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+ONEPOD=$(oc get pods -n $NS -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')
 oc delete pod $ONEPOD -n $NS
 sleep 3
 oc wait --for=condition=Ready pod -l app=parasol-claims -n $NS --timeout=180s
@@ -973,6 +992,7 @@ CLI::
 ----
 oc patch deploy parasol-claims -n $NS --type=strategic -p '{"spec":{"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":1,"maxUnavailable":0}},"template":{"spec":{"containers":[{"name":"parasol-claims","resources":{"requests":{"cpu":"200m","memory":"256Mi"},"limits":{"cpu":"1","memory":"512Mi"}}}]}}}}'
 oc rollout status deploy/parasol-claims -n $NS --timeout=180s
+for i in $(seq 1 45); do [ "$(oc get pods -n $NS -l app=parasol-claims -o name | wc -l)" -eq 3 ] && break; sleep 2; done
 ----
 --
 ====
@@ -1123,7 +1143,7 @@ hardened roll: ok=285 dropped=1
 ====
 `maxUnavailable: 0` guarantees *capacity*, not that every in-flight request lands.
 When a pod is retired, its removal from the Service's endpoints propagates through the network layer asynchronously, so for a fraction of a second a request can still be routed to a pod that is already shutting down.
-Four measured runs on this cluster: *1* and *3* drops out of ~285 with the reseed removed, *3* and *4* with the reseed still in place — against ~*15* before any of this exercise's changes.
+Four measured runs on this cluster: *1* and *3* drops out of ~285 with the reseed removed, *3* and *4* with the reseed still in place — against ~*15* before any of this exercise's changes. (A 2026-11-12 run measured *0* of 397: possible, but not something to count on.)
 Read the shape, not the digit: the cause you removed was structural (every new pod re-seeded the shared database on boot), and what is left is the ordinary, bounded cost of retiring a pod.
 Chasing it to a true zero is a different technique — a `preStop` hook plus graceful shutdown, so the pod keeps serving while it is being de-registered.
 ====
@@ -1139,6 +1159,7 @@ A clean number only counts if the roll actually happened — always confirm it l
 [source,sh,role=execute]
 ----
 oc rollout status deploy/parasol-claims -n $NS --timeout=180s
+for i in $(seq 1 45); do [ "$(oc get pods -n $NS -l app=parasol-claims -o name | wc -l)" -eq 3 ] && break; sleep 2; done
 ----
 
 .Expected output
@@ -1213,7 +1234,7 @@ That is the budget a node drain spends. In exercise 6 you spend it yourself, thr
 
 [.checkpoint]
 ****
-✔ *Verify:* You traced the drops to a *boot-time reseed* of the shared database (a planted `CLM-1001` value reverted to its seed after one pod restart), fixed it at the source with `schema-management=none` (the value now *survives* a restart), gave the cold-start headroom with a raised CPU limit that still fits the namespace's `limits.cpu` quota, held *available replicas flat at 3* through a roll (18/18 samples) *and confirmed the roll actually landed* with `oc rollout status`, re-measured the drop count *lower than the default roll* (and understood why it is not zero), and protected the service with a `PodDisruptionBudget` that reports `ALLOWED DISRUPTIONS: 2`.
+✔ *Verify:* You traced the drops to a *boot-time reseed* of the shared database (a planted `CLM-1001` value reverted to its seed after one pod restart), fixed it at the source with `schema-management=none` (the value now *survives* a restart), gave the cold-start headroom with a raised CPU limit that still fits the namespace's `limits.cpu` quota, held *available replicas flat at 3* through a roll (18/18 samples) *and confirmed the roll actually landed* with `oc rollout status`, re-measured the drop count *lower than the default roll* (and understood why it is not guaranteed to be zero), and protected the service with a `PodDisruptionBudget` that reports `ALLOWED DISRUPTIONS: 2`.
 ****
 
 == 6. Read how the platform shapes the cluster, then drain through your budget
@@ -1347,7 +1368,7 @@ done
 oc get pods -n $NS -l app=parasol-claims -o wide
 ----
 
-.Expected output (a refusal or two, then accepted once the replacements are `Ready` — 12 s on the build cluster)
+.Expected output (one or more refusals, then accepted once the replacements are `Ready` — 10 to 16 s in our runs)
 [source,texinfo]
 ----
 02:21:48 Error from server (TooManyRequests): Cannot evict pod as it would violate the pod's disruption budget. (retry in 5s)
@@ -1361,10 +1382,11 @@ parasol-claims-6745f45b89-xr6dn   1/1     Running             control-plane-3
 
 // Seen by the 2026-11 smoke run in `oc get pods`, and caught as user2 on 2026-11-12 by polling an evicted
 // pod: phase=Failed exitCode=143 reason=Error, gone ~3 s after the eviction.
-A fourth row may show for a second or two — the pod you just evicted, as `0/1 Error`:
+A fourth row may show for a few seconds — the pod you just evicted, as `1/1 Terminating` while it shuts down, or as `0/1 Error` once it has stopped:
 
 [source,texinfo]
 ----
+parasol-claims-5ffbccb8b5-twxjz   1/1     Terminating         control-plane-3
 parasol-claims-57b86c4d4f-8fzsq   0/1     Error               control-plane-1
 ----
 

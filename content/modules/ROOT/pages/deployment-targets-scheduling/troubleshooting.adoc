@@ -120,6 +120,20 @@ oc patch pdb parasol-claims -n $NS --type=merge -p '{"spec":{"minAvailable":1}}'
 `minAvailable` must be *strictly less* than the replica count (`1` of `3`) so a disruption can proceed while the service stays up.
 In exercise 6 the third refusal is the lesson, not a fault: the retry loop is accepted once the replacements are `Ready`.
 
+// Seen by the 2026-11-12 smoke (as user12) in exercises 2, 3 and 5; the wait lines that fix it were
+// re-proven as user7 the same day.
+== Right after a rollout: an extra `Terminating` pod, four replicas for three, or `NotFound` on a restart
+
+Symptom:: Straight after `oc rollout status` printed `successfully rolled out`, a pod listing shows one row more than the replica count (a `Terminating` pod), the exercise 3 zone readout prints four nodes for three replicas, or exercise 5's "restart one pod" prints `Error from server (NotFound): pods "parasol-claims-…" not found` — and the claim status that follows proves nothing, because no pod restarted.
+Cause:: `rollout status` returns as soon as the new pods are ready. The pods they replaced stay `Terminating` for up to their 30-second grace period, still listed, and still in phase `Running`, so `--field-selector=status.phase=Running` matches them and `{.items[0]}` can pick one.
+Fix:: The lab's blocks end every such rollout with a wait until only the desired number of pods is listed, and pick the pod to restart as the newest one. If you typed a block by hand without them, wait and re-run it:
++
+[source,sh,role=execute]
+----
+for i in $(seq 1 45); do [ "$(oc get pods -n $NS -l app=parasol-claims -o name | wc -l)" -eq 3 ] && break; sleep 2; done
+oc get pods -n $NS -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}{"\n"}'
+----
+
 // Captured live as user2 on OCP 4.22.22, 2026-11-12, by re-running the retry loop after it had succeeded.
 == Exercise 6's retry loop prints `NotFound` for every try
 
@@ -205,7 +219,7 @@ Fix:: Confirm the signature, then stop pods rebuilding shared state on boot (`sc
 # signature: write a non-seed status, restart ONE pod, watch it revert (CLM-1001 seeds as UnderReview)
 oc exec deploy/claims-load -n $NS -- curl -s -X PUT http://parasol-claims:8080/api/claims/CLM-1001/status \
   -H 'Content-Type: application/json' -d '{"status":"Approved"}' -o /dev/null -w 'wrote %{http_code}\n'
-oc delete pod -n $NS "$(oc get pods -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')"
+oc delete pod -n $NS "$(oc get pods -n $NS -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')"
 sleep 3; oc wait --for=condition=Ready pod -l app=parasol-claims -n $NS --timeout=180s
 oc exec deploy/claims-load -n $NS -- curl -s http://parasol-claims:8080/api/claims/CLM-1001 | grep -o '"status":"[^"]*"'
 # reverted to "UnderReview" ⇒ the boot-time reseed is the cause. The primary fix:
