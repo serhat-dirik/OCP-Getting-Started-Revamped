@@ -42,7 +42,7 @@ Total hands-on: *~33 min* (add ~8 min of concept up front — the two-supply-cha
 | 2 | Tag and promote an image | ~5 min | `oc tag` *~0.9 s*; the digest-equality read is instant — the *point* is reading that `prod` == `1.0` by `sha256`
 | 3 | Scheduled import + break-and-fix | ~5 min | `oc import-image --scheduled` *~1.5 s*; the bad-ref import returns its error in *~1 s*; re-import *~1.5 s*
 | 4 | Pull from a private registry | ~5 min | `oc secrets link` instant; the pull-secret Deployment rolls out in *~7 s* (public `ubi-minimal` image, first pull on the node)
-| 5 | Publish a catalog Template | ~5 min | `oc apply` the Template *~4 s*; `oc process \| oc apply` + rollout *~5 s*
+| 5 | Publish a catalog Template | ~5 min | `oc apply` the Template *~2 s*; `oc process \| oc apply` + rollout *~62 s* — about 33 s for the service to pass its readiness probe, then the Template's `minReadySeconds: 30`
 | 6 | Hit the import allowlist | ~5 min | the refused import *~1.0 s* (admission, no node involved); the approved `nginx-124` import *~1.4 s* — the time is reading the policy and the refusal
 | 7 | Read retention and the catalog supply | ~3 min | view-only, *~2.5 s* for the reads — the time is reading
 |===
@@ -54,6 +54,7 @@ On the build cluster (OCP 4.21.22, Kubernetes 1.34) on 2026-07-13, every attende
 The `oc` commands themselves return in about a second — `oc tag` in *~0.9 s*, `oc import-image` in *~1.5 s*, the pull-secret Deployment rollout in *~1.5 s* (the internal claims image is already pull-through-cached), the Template `oc apply` in *~4 s* and `oc process | oc apply` + rollout in *~5 s*.
 There are *no* long waits in this module — nothing reboots, nothing drains. *Attendee time is dominated by reading*: the digests, the import status, the governance objects. Budget the time for comprehension, not command latency.
 Re-run on 2026-11-12 as `user9` (OCP 4.22.22): `oc tag` *~1.1 s*, `oc import-image` *~1.7 s*, the pull-secret rollout *~7 s* (first pull of a public image), Template `oc apply` *~1.8 s*, `oc process | oc apply` + rollout *~5 s*, the exercise-6 approved import *~1.4 s*, the exercise-7 reads *~2.5 s*. The exercise-6 *refusal* returns in *~1.0 s* — an admission rejection with no node involved.
+Re-run twice from a cold start on 2026-11-12 as `user2` (OCP 4.22.22), in the attendee's cockpit terminal: every command but one still returns in about a second (each timed run adds ~5 s of terminal overhead, subtracted here). The exception is deliberate: exercise 5's `oc rollout status` now takes *~62 s*, because the quickstart Template waits for the service to answer its readiness probe and then to stay ready for 30 s. Scripted end to end with no reading time, each run took about 6.5 minutes, including a deliberate 2-minute watch on the quickstart, which stayed `1/1 Running` with `0` restarts for over 3.5 minutes both times. `ws verify` passed 12/12 in both.
 ====
 
 == How to know the room can move on
@@ -189,7 +190,7 @@ Talk track: `skippedImagestreams` / `skippedTemplates` remove *one* sample from 
 Beyond the Say/Show/Do arc in the demo flavor:
 
 * *Run the demo from the entry state, not `adm solve`.*
-The story is *building* the governed supply chain from the seeded stream. `adm solve registry-images-catalog-governance` renders the finished end state (promoted tag, scheduled import, Template, pull-secret Deployment, the approved `nginx` import) — use it to *show the destination* or pre-stage, never as the demo's start.
+The story is *building* the governed supply chain from the seeded stream. `adm solve registry-images-catalog-governance` renders the finished end state (promoted tag, scheduled import, Template and the running quickstart instantiated from it, pull-secret Deployment, the approved `nginx` import) — use it to *show the destination* or pre-stage, never as the demo's start.
 * *Land the digest-equality line (beat 1).*
 "Same `sha256` on both — production runs the image we tested, and I can prove it." Say it while the two identical digest lines are on screen. That equality *is* the point of an ImageStream promotion.
 * *The allowed-registries beat (beat 2) changes nothing.*
@@ -215,6 +216,9 @@ No — the sample host (`registry.parasol.example.com`) is an *inert placeholder
 No, and that is the lesson. `allowedRegistriesForImport` is one cluster-wide list the install set before the session; it refuses imports from any other registry for *everyone*, cluster-admin included, and changing it would change it for every attendee. It is a validation error (`422`), not a permission, so no role grant helps either. The answer a platform team gives is the one exercise 6 shows: find the image on an approved registry (Red Hat builds nginx), or make the case for adding a registry to the list. *Never* reach for `registrySources` or IDMS/ITMS to answer this — those re-render every node and roll the pool.
 
 == Watchouts
+
+* *The exercise-5 quickstart runs without a database, on purpose.*
+The `parasol-claims` image connects to a `parasol-db` Service at startup unless `QUARKUS_DATASOURCE_ACTIVE` and `QUARKUS_HIBERNATE_ORM_ACTIVE` are `false`. The lab's Template sets both, so the service answers and its claims API stays off. An attendee who types the Template by hand and drops them gets a pod that crashes within a minute (`UnknownHostException: parasol-db`). Its readiness probe keeps `rollout status` from reporting success, and `ws verify` flags it. The troubleshooting page has the one-line `oc set env` fix.
 
 * *`oc import-image` uses the current project, not a `namespace/` prefix.*
 The single most common stumble (question 2). The lab uses `-n $NS`; if a user's stream vanishes, check `oc get is ext-ubi -n default` (or wherever their `oc project` points). Harmless, but confusing — pre-empt it if you see it.
