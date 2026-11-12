@@ -17,6 +17,10 @@ include::partial$version-attributes.adoc[]
 // Exercise 1's eviction beat was PERFORMED on OCP 4.22.22 on 2026-11-12 as user3 (impersonated, attendee
 // groups): the Terminal 2 loop + the two Terminal 1 blocks verbatim — 201, 429, budget back in ~10 s, 201,
 // loop DONE: 345 served, 0 failed. The two eviction outputs are from an earlier run of the same blocks.
+// Exercises 1-3 were re-run end to end on OCP 4.22 / Istio 1.28.6 on 2026-11-12 as user12 in the attendee's
+// terminal pod, twice from adm reset. Without retryRemoteLocalities the client logged one 503 at +32 s and
+// +98 s of a 125 s outage (retries stayed on the dead site-a locality); with it, zero errors. The token
+// block waits for the Link to exist before waiting for Ready: the Link appears ~2 s after the AccessToken.
 // Console click-paths for mesh CRs are dual-path [tabs]; the client-log tail and curl reads are terminal-only.
 
 ifndef::demo[]
@@ -46,7 +50,7 @@ In this lab you *prove* the service survives a pod loss (in-site resiliency), th
 ====
 Where you apply a mesh custom resource you get two tabs: the *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`) to import YAML, and the *CLI* tab uses `oc` in the *Terminal* beside these instructions. Pick a path once — the tabs stay in sync across the page.
 Two things are terminal-only on purpose: *tailing the client's live log* (`oc logs -f`) and the *`curl`-style reads* from inside a pod — the console can't do those.
-Namespaces in the output below render with *your* user (`{user}`). Everything else — pod names, IP addresses, node names, timestamps — comes from one real capture on a since-deleted cluster and *will* differ on yours: read the *shape*, not the exact values.
+Namespaces in the output below render with *your* user (`{user}`). Everything else — pod names, IP addresses, node names, timestamps — comes from real captures on since-deleted clusters and *will* differ on yours: read the *shape*, not the exact values.
 ====
 endif::demo[]
 
@@ -95,9 +99,9 @@ Keep a second terminal tailing the client log for the whole demo — the flip in
 oc logs -f deploy/claims-client -n {user}-client --tail=5
 ----
 
-NOTE: Step 2 is timing-dependent. Outlier detection sweeps the endpoints every five seconds and the measured flip took about four seconds, so a one- or two-second gap between the last `A` line and the first `B` line is expected and worth naming — that request took a retry hop. If nothing has moved after fifteen seconds, stop watching the stream and pull the answer instead, with the `curl` in step 2. If the tail dies or the output scrolls past the transition, it is still in the log's history: `oc logs deploy/claims-client -n $CLIENT --tail=30` re-shows it.
+NOTE: Step 2 is timing-dependent. The measured flip took about a second, so a one- or two-second gap between the last `A` line and the first `B` line is expected and worth naming — that request took a retry hop. If nothing has moved after fifteen seconds, stop watching the stream and pull the answer instead, with the `curl` in step 2. If the tail dies or the output scrolls past the transition, it is still in the log's history: `oc logs deploy/claims-client -n $CLIENT --tail=30` re-shows it.
 
-CAUTION: After rehearsing the failure, scale site A back to three replicas and wait for the log to read `served-by-site=A` again. A world left failed over starts with the client already on site B, and step 2's transition has already happened. Leave `baseEjectionTime` at its 30-second value as well: a shorter ejection re-probes the dead primary during the outage and shows a visible blip, and the four-second failover below was measured at 30 seconds.
+CAUTION: After rehearsing the failure, scale site A back to three replicas and wait for the log to read `served-by-site=A` again. A world left failed over starts with the client already on site B, and step 2's transition has already happened. Leave `baseEjectionTime` at its 30-second value as well: the failover and failback timings below were measured with it.
 ====
 
 === Brief
@@ -112,7 +116,7 @@ A whole site going dark — a data center, a cluster, in this demo a namespace �
 
 *Cross-site failover with Service Mesh*
 
-OpenShift Service Mesh puts an ingress gateway in front of both sites as one stable endpoint, and three small traffic rules do the rest. A `ServiceEntry` declares the two sites and tags each with its locality. A `DestinationRule` turns on locality-aware load balancing, so the primary is preferred, and outlier detection, so a site whose requests start failing is ejected from the pool. A `VirtualService` routes the stable endpoint through that host with retries.
+OpenShift Service Mesh puts an ingress gateway in front of both sites as one stable endpoint, and three small traffic rules do the rest. A `ServiceEntry` declares the two sites and tags each with its locality. A `DestinationRule` turns on locality-aware load balancing, so the primary is preferred, and outlier detection, so a site whose requests start failing is ejected from the pool. A `VirtualService` routes the stable endpoint through that host with retries that are allowed to move to the other site.
 
 Nothing about the client changes. It calls the same address before, during and after the failure — and the requests that would have been dropped at the moment of failure are the ones the retries carry across to the second site.
 
@@ -169,11 +173,11 @@ oc exec deploy/claims-client -n $CLIENT -- curl -s -m3 http://claims-stable/
 
 *What just happened*
 
-The primary site is gone and the client did not drop a request. Outlier detection noticed site A failing and ejected it from the pool, so new requests went to site B; the retries caught the handful of in-flight requests that raced the ejection and landed them on site B too. About four seconds, end to end, on the cluster this was measured on.
+The primary site is gone and the client did not drop a request. Outlier detection noticed site A failing and ejected it from the pool, so new requests went to site B; the retries caught the handful of in-flight requests that raced the ejection and landed them on site B too. About a second, end to end, on the cluster this was measured on.
 
 === 3 · Recovery, with nothing changed on the client — 3 min
 
-Site A comes back with three replicas. Once the fresh pods have scheduled and passed readiness — roughly thirty to ninety seconds — the mesh trusts the primary again and traffic returns to it.
+Site A comes back with three replicas. Once the fresh pods are Ready and the mesh's ejection of site A lapses — roughly thirty to ninety seconds — the mesh trusts the primary again and traffic returns to it.
 
 image::resilience-multicluster-dr/resilience-multicluster-dr-02-mesh-failover.svg["The failover path: an external client calling one stable endpoint, a mesh ingress gateway pinned to site A's locality, a bold arrow to site A's three claims replicas as the normal locality-preferred path, and a dashed arrow to site B's replicas labeled: on A failure, outlier detection ejects A and retries flip to B."]
 
@@ -194,7 +198,7 @@ Failover and failback, both automatic, both invisible to the client. If site A w
 == Frequently asked questions
 
 *The whole primary site went to zero — how did the client not drop a single request?*::
-Two mesh features cooperate. Outlier detection on the `DestinationRule` notices site A's requests failing and ejects it from the load-balancing pool, so new requests go to site B. Retries on the `VirtualService` catch the handful of in-flight requests that raced the ejection: a request that lands on the just-failed site is retried and answered by site B. Without the retries there would be a brief burst of errors at the moment of failure; with them, the failover drops nothing.
+Two mesh features cooperate. Outlier detection on the `DestinationRule` notices site A's requests failing and ejects it from the load-balancing pool, so new requests go to site B. Retries on the `VirtualService`, which are allowed to move to the other site, catch the handful of in-flight requests that raced the ejection: a request that lands on the just-failed site is retried and answered by site B. Without the retries there would be a brief burst of errors at the moment of failure; with them, the failover drops nothing.
 
 *Why does traffic prefer site A instead of splitting evenly across both sites?*::
 Because the ingress gateway is pinned to site A's locality and the `DestinationRule` turns on locality-aware load balancing. Istio sends traffic to the nearest locality first — site A at priority 0, site B as the failover at priority 1 — which is primary/backup by design. Remove the locality pin and the same three resources round-robin both sites instead.
@@ -227,7 +231,7 @@ Console::
 In the {ocp_console_url}[OpenShift web console^] (project `{user}-site-a`), open *Workloads → Deployments*. You'll see `parasol-claims` at *3 of 3* pods. Open it and note its *Pods* land on *different nodes*. Under *Workloads*, the `parasol-claims` *HorizontalPodAutoscaler* and *PodDisruptionBudget* show the resilience policy.
 The *CLI* tab reads the same facts — use it to capture the exact fields.
 
-image::resilience-multicluster-dr/resilience-multicluster-dr-02-resilient-site.png["The OpenShift console Deployments list for the user4-site-a project, with one row for parasol-claims: Status \"3 of 3 pods\", and labels app=parasol-claims, site=A, workshop.redhat.com/module=resilience-multicluster-dr, and workshop.redhat.com/owner=ogsr. Notice the Status column — 3 of 3 pods confirms every replica is up; this list view alone doesn't show the PodDisruptionBudget or HorizontalPodAutoscaler, which live on their own pages."]
+image::resilience-multicluster-dr/resilience-multicluster-dr-02-resilient-site.png["The OpenShift console Deployments list for the {user}-site-a project, with one row for parasol-claims: Status \"3 of 3 pods\", and labels app=parasol-claims, site=A, workshop.redhat.com/module=resilience-multicluster-dr, and workshop.redhat.com/owner=ogsr. Notice the Status column — 3 of 3 pods confirms every replica is up; this list view alone doesn't show the PodDisruptionBudget or HorizontalPodAutoscaler, which live on their own pages."]
 --
 CLI::
 +
@@ -409,7 +413,7 @@ The gateway is up, but it has *no route* — it doesn't yet know about your two 
 
 * a *ServiceEntry* that declares one logical claims host whose two endpoints are site A and site B, each tagged with its *locality*;
 * a *DestinationRule* that turns on *locality-aware load balancing* (prefer the primary) and *outlier detection* (eject a failing site);
-* a *VirtualService* on the gateway that routes the stable endpoint to that host, with *retries* so failover drops no requests.
+* a *VirtualService* on the gateway that routes the stable endpoint to that host, with *retries* that may move to the other site (`retryRemoteLocalities: true`), so failover drops no requests.
 
 All three carry `exportTo: ["."]`, and that one field is load-bearing. It scopes a mesh resource to *its own namespace*; leave it out and Istio defaults to `+exportTo: ["*"]+`, publishing the resource *mesh-wide*. `claims.parasol.internal` is deliberately a single, stable, global service name — that is the lesson — but on this shared control plane *every* attendee declares that same host, so un-scoped definitions get merged and your gateway could resolve to *someone else's* sites. `["."]` keeps your logical claims host yours. The same discipline applies in production: on a shared mesh, export only what other namespaces genuinely need to reach.
 
@@ -497,7 +501,7 @@ spec:
   gateways: [claims-gateway]
   http:
     - route: [{destination: {host: claims.parasol.internal, port: {number: 8080}}}]
-      retries: {attempts: 3, perTryTimeout: 2s, retryOn: "connect-failure,refused-stream,reset,gateway-error,5xx"}
+      retries: {attempts: 3, perTryTimeout: 2s, retryOn: "connect-failure,refused-stream,reset,gateway-error,5xx", retryRemoteLocalities: true}
 EOF
 ----
 --
@@ -585,23 +589,25 @@ Then, back in *Terminal 1*, *fail the entire primary site* — scale site A to z
 oc scale deploy/parasol-claims -n $SITEA --replicas=0
 ----
 
-Watch the tailing log. Within a few seconds the site marker *flips from A to B* — and *every line is still `HTTP 200`*:
+Watch the tailing log. Within a few seconds the site marker *flips from A to B* — and *every line is still `HTTP 200`*. Leave site A down for a minute or two and keep watching: the log stays on `B` with no error line.
 
 .Expected output (the live client log across the failover — the whole primary site is gone, not one request dropped)
 [source,texinfo]
 ----
-10:27:12  HTTP 200  served-by-site=A
-10:27:13  HTTP 200  served-by-site=A     <- site A scaled to 0 here
-10:27:16  HTTP 200  served-by-site=B     <- failover: the client flips to site B
-10:27:17  HTTP 200  served-by-site=B
-10:27:18  HTTP 200  served-by-site=B
+17:34:25  HTTP 200  served-by-site=A
+17:34:26  HTTP 200  served-by-site=A
+17:34:27  HTTP 200  served-by-site=A     <- the last answer from site A as it scales to 0
+17:34:28  HTTP 200  served-by-site=B     <- failover: the client flips to site B
+17:34:29  HTTP 200  served-by-site=B
+...
+17:36:46  HTTP 200  served-by-site=B     <- still site B, still 200, after 140 s of outage
 ----
 
 image::resilience-multicluster-dr/resilience-multicluster-dr-01-failover-log-flip.png["A terminal tailing the claims-client log, with the oc scale --replicas=0 command on site A visible above it. Nine consecutive lines read HTTP 200 served-by-site=A, then every following line reads HTTP 200 served-by-site=B. Notice that every response on both sides of the flip is still HTTP 200 — the whole primary site went away and no request was dropped."]
 
 That is *automatic cross-site failover*. The client never changed its address; the mesh detected site A's requests failing, *ejected* it (outlier detection), and *retried* the in-flight requests onto site B — so the client saw a clean flip from A to B, not an outage. The whole primary site vanished and *no request was dropped*.
 
-Now *recover*. Bring site A back. Traffic *returns to the primary* once the three fresh site-A pods reschedule, pull their image, and pass their readiness probes, and the locality-aware load balancer re-adds them as the preferred site — *about 30–90 seconds*, depending on how quickly the new pods become Ready:
+Now *recover*. Bring site A back. Traffic *returns to the primary* once the three fresh site-A pods are Ready *and* site A's current ejection from the pool lapses, and the locality-aware load balancer re-adds it as the preferred site — *about 30–90 seconds*, longer after a longer outage:
 
 [source,sh,role=execute]
 ----
@@ -614,9 +620,9 @@ Back in the tailing log, watch the marker flip *back to A*:
 .Expected output (failback — traffic returns to the recovered primary, still all 200)
 [source,texinfo]
 ----
-10:27:45  HTTP 200  served-by-site=B
-10:27:47  HTTP 200  served-by-site=A     <- site A recovered; traffic returns to the primary
-10:27:48  HTTP 200  served-by-site=A
+17:37:40  HTTP 200  served-by-site=B
+17:37:41  HTTP 200  served-by-site=A     <- site A recovered; traffic returns to the primary
+17:37:42  HTTP 200  served-by-site=A
 ----
 
 Stop the tail in Terminal 2 (`Ctrl-C`). You just failed and recovered a whole site with the client none the wiser.
@@ -624,7 +630,12 @@ Stop the tail in Terminal 2 (`Ctrl-C`). You just failed and recovered a whole si
 [NOTE]
 .Why the brief pause, and why no `404`/`503`
 ====
-Between the last `A` and the first `B` you may see a *one- or two-second gap* in the log (the failover request took a retry hop, so the once-a-second loop skipped a beat) — but *no error line*. That's the retries doing their job: the request that raced site A's ejection was retried onto site B and returned `200`. Tune `baseEjectionTime` up and the failed primary stays ejected longer (fewer re-probes mid-outage); tune it down and traffic returns to the primary faster after recovery. Thirty seconds is a good middle.
+Between the last `A` and the first `B` you may see a *one- or two-second gap* in the log (the failover request took a retry hop, so the once-a-second loop skipped a beat) — but *no error line*, however long site A stays down. Two settings make that true:
+
+* Outlier detection does not eject site A for good. Each ejection lasts `baseEjectionTime` times the number of ejections so far (30 s, then 60 s, then 90 s), and when one lapses the gateway sends a single request to site A to see whether it is back. During the outage that request fails.
+* `retryRemoteLocalities: true` lets the retry of that request move to site B. Without it, Envoy retries only inside site A's locality, every attempt hits the dead site, and the client logs one `HTTP 503  served-by-site=none` each time an ejection lapses: about 30 s into the outage, and again about 100 s in.
+
+The same timer sets the failback. Traffic returns to site A when its current ejection lapses after the new pods are Ready, so failback takes tens of seconds and grows with the length of the outage.
 ====
 
 [.checkpoint]
@@ -746,15 +757,19 @@ CA=$(oc get accessgrant dc-a-grant -n $SITEA -o jsonpath='{.status.ca}')
   echo "  ca: |"
   echo "$CA" | sed 's/^/    /'
 } | oc apply -f -
+oc wait --for=create link/dc-a-token -n $SITEB --timeout=60s
 oc wait --for=condition=Ready link/dc-a-token -n $SITEB --timeout=120s
 ----
 
-.Expected output (the token is redeemed and the Link forms — the two DCs are now one VAN)
+.Expected output (the token is redeemed, the Link appears a couple of seconds later, then turns Ready — the two DCs are now one VAN)
 [source,texinfo]
 ----
 accesstoken.skupper.io/dc-a-token created
 link.skupper.io/dc-a-token condition met
+link.skupper.io/dc-a-token condition met
 ----
+
+The controller redeems the token in the background and only then creates the `Link`, so the block waits twice: first for the `Link` to exist, then for it to be `Ready`. Each wait prints `condition met`. A single wait on `Ready` straight after the apply fails with `NotFound`, because the `Link` does not exist yet.
 
 Confirm the VAN is wired end-to-end — the Connector and Listener found each other across the link, and both DCs are in one network:
 
@@ -790,8 +805,8 @@ fi
 .Expected output (the remote address serves SITE=B — DC-A is reading DC-B's service over the VAN — vs the local SITE=A; each response also carries the responder's own `served` request counter and serving `pod` name)
 [source,texinfo]
 ----
-remote over the VAN (claims-remote): {"site":"B","service":"parasol-claims","served":172,"pod":"parasol-claims-6b9c4f8d77-jcthw"}
-local in DC-A (claims):              {"site":"A","service":"parasol-claims","served":224,"pod":"parasol-claims-65d8cc85fd-z5r22"}
+remote over the VAN (claims-remote): {"site":"B","service":"parasol-claims","served":201,"pod":"parasol-claims-5b4fb7cd45-4bvrg"}
+local in DC-A (claims):              {"site":"A","service":"parasol-claims","served":64,"pod":"parasol-claims-5b546d46bc-fcrp8"}
 ----
 
 If the *remote* line prints `NO-RESPONSE` instead, the link is not carrying traffic — work through xref:resilience-multicluster-dr/troubleshooting.adoc[the troubleshooting page] (the `claims-remote` and `Link` entries) before moving on.
@@ -828,7 +843,7 @@ You have the mechanics. Try these on your own:
 
 * *Fail over the RHSI VAN too.* You linked DC-A → DC-B. Add a *second* Connector in DC-A on the *same* routing key, so the Listener has two backends across the VAN, then fail one and reason about how RHSI load-balances and fails over across sites — the cross-*cluster* analog of the mesh failover you built in exercise 2.
 * *Break the token redemption on purpose.* In the RHSI section, create the `AccessToken` with a *truncated* `ca` and watch the `Link` never reach `Ready` — then fix it. This is the single most common RHSI support case; feel it once.
-* *Tune the failover window.* Change the `DestinationRule` `outlierDetection.baseEjectionTime` to `5s` and to `120s`, fail site A each time, and reason about the trade-off: a short ejection returns to the primary fast but re-probes the dead site (a brief blip); a long one keeps the service available during the outage but slow to fail back.
+* *Tune the failover window.* Change the `DestinationRule` `outlierDetection.baseEjectionTime` to `5s` and to `120s`, fail site A each time, and time the failback after you recover it. Then delete `retryRemoteLocalities: true` from the `VirtualService`, keep site A down for a full minute, and find the `503` that appears when the ejection lapses.
 * *Header-pin a site.* Add a `VirtualService` `match` on a header (for example `x-parasol-site: b`) that routes *explicitly* to site B regardless of health — the "send my test traffic to the DR site" pattern — on top of the automatic failover.
 
 When you are done, run `ws verify {module-id}` in the Terminal — or run `ws prep {module-id} --yes` to return your world to the entry state (the resilient sites and the client up, the failover routing and any RHSI objects removed).

@@ -6,7 +6,8 @@ include::partial$version-attributes.adoc[]
 // / user1-site-b, plus known failure-mode seeds. Format: Symptom / Cause / Fix. Commands use
 // CLIENT={user}-client, SITEA={user}-site-a, SITEB={user}-site-b (set them once). NAMESPACE in output is the
 // sample user user1. Several entries were hit while building the module (the client 404 before routing; the
-// A/B split when the gateway locality was missing; the mid-outage 503 with a short baseEjectionTime; the
+// A/B split when the gateway locality was missing; the mid-outage 503 when retries could not leave site-a's
+// locality (re-measured 2026-11-12 as user12: +32 s and +98 s); the token re-create blocked by its Secret; the
 // Skupper router quota rejection; the token-redemption Link). The rest are known traps.
 
 Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
@@ -49,6 +50,12 @@ oc get events -n $SITEA --sort-by=.lastTimestamp | tail -5
 +
 A `Pending` pod with `exceeded quota` or `Insufficient cpu` in the events cannot be fixed from your namespace; tell your instructor.
 
+== The autoscaler shows `cpu: <unknown>/80%`
+
+Symptom:: The first `oc get deploy,pdb,hpa` in exercise 1 shows `TARGETS` as `cpu: <unknown>/80%` instead of a percentage.
+Cause:: Your sites were created less than a minute ago, and the metrics pipeline has not reported the pods' CPU yet. On 2026-11-12 it read `<unknown>` 20 s after the reset and `2%` by 60 s.
+Fix:: Nothing to fix. Wait a minute and run the command again; the autoscaler holds the floor at three replicas either way.
+
 == The client log shows `HTTP 404 served-by-site=none`
 
 Symptom:: `oc logs deploy/claims-client -n $CLIENT` prints `HTTP 404 served-by-site=none` once a second.
@@ -76,18 +83,18 @@ oc get pod -n $CLIENT -l istio=claims-gateway -o jsonpath='{.items[0].metadata.l
 +
 The label must be present *at pod creation* (the injector reads it then); editing a running pod's label won't take — restart the gateway (or `ws reset`).
 
-== The failover happens, but there's a brief `503` during a long outage
+== The failover happens, but a `503` appears during the outage
 
-Symptom:: After scaling site A to 0, the client flips to B and serves ``200``s, but *once* — around 15–20 s into the outage — a single `HTTP 503 served-by-site=none` appears, then it's back to B.
-Cause:: `outlierDetection.baseEjectionTime` expired and the mesh *re-probed* the dead primary (site A is priority 0, so Envoy periodically re-checks it). That one probe hit the still-down site and returned `503` before being re-ejected.
-Fix:: Lengthen `baseEjectionTime` so the failed primary stays ejected through a typical outage (the entry chart uses `30s`, which covers a ~25 s failover drill with no re-probe). It's a trade-off — a longer ejection keeps the service available during the outage but slower to fail *back* after recovery:
+Symptom:: After scaling site A to 0, the client flips to B and serves ``200``s, but about 30 s into the outage a single `HTTP 503  served-by-site=none` appears, and another about 100 s in. The line after each one is back on `B`.
+Cause:: The `VirtualService` retries lack `retryRemoteLocalities: true`. Outlier detection ejects site A for `baseEjectionTime` times the number of ejections so far (30 s, then 60 s), and when an ejection lapses the gateway sends one request to site A to see whether it is back. Site A is the preferred locality, so without that field every retry of that request stays on the dead site and the client gets the `503`.
+Fix:: Read the field:
 +
 [source,sh,role=execute]
 ----
-oc get destinationrule claims-global -n $CLIENT -o jsonpath='baseEjectionTime={.spec.trafficPolicy.outlierDetection.baseEjectionTime}{"\n"}'
+oc get virtualservice claims-edge -n $CLIENT -o jsonpath='retryRemoteLocalities={.spec.http[0].retries.retryRemoteLocalities}{"\n"}'
 ----
 +
-A single transient `503` on a re-probe is cosmetic (the very next request is served by B); tune it to your outage profile.
+`retryRemoteLocalities=true` is correct. An empty value means the field is missing: re-apply the three resources exactly as exercise 2 writes them. A longer `baseEjectionTime` does not fix this; it only moves the `503` later and slows failback after site A recovers.
 
 == Site A scaled to 0 but the client keeps showing `A` for ~30 s
 
@@ -164,22 +171,24 @@ If `used` is at (or above) `hard`, the quota is the blocker — widen `limits.cp
 
 == `[ADD-ON]` The RHSI `AccessToken` won't form a `Link`
 
-Symptom:: You created the `AccessToken` in DC-B, but `oc get link -n $SITEB` never reaches `Ready` (stays blank or `False`).
-Cause:: The token redemption is incomplete or wrong. The `AccessToken` needs the grant's *url*, *code*, and *ca* copied *exactly* — and the `ca` is a *multi-line* PEM certificate that's easily truncated or mis-indented when copied by hand.
-Fix:: Confirm the grant is `Ready` and re-run the *scripted* copy (it re-indents the CA correctly), then wait on the link:
+Symptom:: You created the `AccessToken` in DC-B, but the first `oc wait` ends with `error: timed out waiting for the condition` and `oc get link -n $SITEB` shows no `Link`, or one that never reaches `Ready`.
+Cause:: Two possibilities. (1) The token redemption is incomplete or wrong. The `AccessToken` needs the grant's *url*, *code*, and *ca* copied *exactly*, and the `ca` is a *multi-line* PEM certificate that's easily truncated or mis-indented when copied by hand. (2) You deleted the `AccessToken` and created it again. The first redemption created a Secret named `dc-a-token` in DC-B, and deleting the token leaves it behind, so `oc get accesstoken dc-a-token -n $SITEB` shows `Error` with `Controller could not create received secret: secrets "dc-a-token" already exists` and no `Link` is created.
+Fix:: Confirm the grant is `Ready`, delete the token, its `Link` and its Secret, and re-run the *scripted* copy (it re-indents the CA correctly), then wait on the link:
 +
 [source,sh,role=execute]
 ----
 oc get accessgrant dc-a-grant -n $SITEA -o jsonpath='grant Ready={.status.conditions[?(@.type=="Ready")].status}{"\n"}'
+oc delete accesstoken,link,secret dc-a-token -n $SITEB --ignore-not-found
 URL=$(oc get accessgrant dc-a-grant -n $SITEA -o jsonpath='{.status.url}')
 CODE=$(oc get accessgrant dc-a-grant -n $SITEA -o jsonpath='{.status.code}')
 CA=$(oc get accessgrant dc-a-grant -n $SITEA -o jsonpath='{.status.ca}')
 { echo "apiVersion: skupper.io/v2alpha1"; echo "kind: AccessToken"; echo "metadata: {name: dc-a-token, namespace: $SITEB}";
   echo "spec:"; echo "  url: $URL"; echo "  code: $CODE"; echo "  ca: |"; echo "$CA" | sed 's/^/    /'; } | oc apply -f -
-oc get link dc-a-token -n $SITEB
+oc wait --for=create link/dc-a-token -n $SITEB --timeout=60s
+oc wait --for=condition=Ready link/dc-a-token -n $SITEB --timeout=120s
 ----
 +
-Never hand-type the CA. If the grant has *expired* (past its `expirationWindow`) or hit `redemptionsAllowed`, recreate the `AccessGrant` first.
+Each run redeems the grant once. Never hand-type the CA. If the grant has *expired* (past its `expirationWindow`) or hit `redemptionsAllowed`, recreate the `AccessGrant` first.
 
 == `[ADD-ON]` `curl` to `claims-remote` fails even though the sites are linked
 

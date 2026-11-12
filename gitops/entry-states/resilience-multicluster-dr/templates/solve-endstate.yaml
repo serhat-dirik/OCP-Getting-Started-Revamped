@@ -70,14 +70,19 @@ spec:
       consecutive5xxErrors: 1
       consecutiveGatewayErrors: 1
       interval: 5s
-      # 30s keeps the failed primary ejected through a typical outage (no mid-outage re-probe blip), yet
-      # returns traffic to site-a within ~30s of its recovery.
+      # Each ejection lasts 30s x the number of times site-a has been ejected, so a dead primary is
+      # re-admitted at ~+30s, ~+100s, ... of an outage; one request then probes it and fails. The
+      # VirtualService's retryRemoteLocalities carries that request to site-b, so the probe never
+      # surfaces as a 503. Failback waits for the current ejection to lapse (measured 35-65s).
       baseEjectionTime: 30s
       maxEjectionPercent: 100
 ---
 # why: attach to the ingress Gateway and route the stable endpoint to the claims host. retries make the
 # failover transition seamless — a request that hits the just-failed site is retried onto the healthy one,
 # so the external client never sees an error, only the SITE marker flipping A -> B.
+# retryRemoteLocalities is load-bearing: without it Envoy's retries stay in the request's own locality
+# (previous_hosts only), so a re-admitted dead site-a absorbs all 4 attempts and the client logs one
+# HTTP 503 per re-admission (measured 2026-11-12: +32s and +98s into a 125s outage).
 apiVersion: networking.istio.io/v1
 kind: VirtualService
 metadata:
@@ -105,6 +110,7 @@ spec:
         attempts: 3
         perTryTimeout: 2s
         retryOn: "connect-failure,refused-stream,reset,gateway-error,5xx"
+        retryRemoteLocalities: true
 ---
 # ws solve END-STATE marker — attendee-visible proof the failover exercise completed. Verify's END mode
 # asserts it alongside the live failover proof. Entry omits it.
