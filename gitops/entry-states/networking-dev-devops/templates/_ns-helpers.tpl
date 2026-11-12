@@ -12,7 +12,7 @@ workshop.redhat.com/owner: ogsr
 
 {{/*
 user-namespace.assertInputs — fail LOUDLY (never render a half/empty object) when `user` or
-`suffix` is missing or `suffix` isn't one of the 13 suffixes
+`suffix` is missing or `suffix` isn't one of the 11 suffixes
 gitops/workshop-config/templates/per-user-*.yaml render today (dev/stage/prod/cicd from
 per-user-namespaces.yaml, the rest one suffix per per-user-<module>.yaml — keep this list in
 lockstep with that catalog). Called with the root context ($) at the top of every resource
@@ -26,7 +26,7 @@ believe the namespace exists.
 {{- if not .Values.suffixes -}}
 {{- fail "user-namespace: --set suffixes=<comma-separated-suffixes> is required (got empty), e.g. --set suffixes=dev,stage,prod. `suffixes` is a SCALAR STRING the chart splits itself — NOT a Helm list parameter: Argo CD's helm.parameters does not expand {a,b,c} list literals the way the helm CLI does, so a list-typed parameter silently renders wrong from Argo (see CLAUDE.md session notes)." -}}
 {{- end -}}
-{{- $valid := list "dev" "stage" "prod" "cicd" "ai" "batch" "mesh" "modernize" "partner" "gitops" "client" "site-a" "site-b" -}}
+{{- $valid := list "dev" "stage" "prod" "cicd" "batch" "mesh" "partner" "gitops" "client" "site-a" "site-b" -}}
 {{- range $raw := splitList "," .Values.suffixes -}}
 {{- $s := trim $raw -}}
 {{- if not (has $s $valid) -}}
@@ -39,8 +39,8 @@ believe the namespace exists.
 user-namespace.quotaSpec — per-suffix ResourceQuota `hard` + LimitRange default/defaultRequest
 values, rendered as YAML text so callers do `include "user-namespace.quotaSpec" .Values.suffix |
 fromYaml`. This is the faithful re-encoding of the numbers in
-gitops/workshop-config/templates/per-user-limits.yaml, per-user-ai.yaml, per-user-batch.yaml,
-per-user-mesh.yaml, per-user-modernize.yaml, per-user-partner.yaml,
+gitops/workshop-config/templates/per-user-limits.yaml, per-user-batch.yaml,
+per-user-mesh.yaml, per-user-partner.yaml,
 per-user-gitops-namespace.yaml, and per-user-resilience.yaml — see those files' header comments
 for WHY each number is what it is (the sizing rationale is not repeated here to avoid the two
 copies drifting in prose while staying identical in value).
@@ -98,7 +98,7 @@ limDefaultCpu: 1500m
 limDefaultMem: 2Gi
 limReqCpu: 100m
 limReqMem: 256Mi
-{{- else if or (eq . "ai") (eq . "batch") (eq . "modernize") }}
+{{- else if eq . "batch" }}
 reqCpu: "4"
 reqMem: 8Gi
 limCpu: "8"
