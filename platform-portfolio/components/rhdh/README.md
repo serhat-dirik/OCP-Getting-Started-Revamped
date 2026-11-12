@@ -32,8 +32,9 @@ OIDC against a Keycloak realm, for example:
 |---|---|
 | `APP_CONFIG_auth_environment` | `production` — the sign-in page stops offering Guest |
 | `APP_CONFIG_signInPage` | `oidc` — the only provider on the sign-in page |
+| `APP_CONFIG_auth_session_secret` | a random string, kept stable — the OIDC provider keeps its login state in a session and fails `/start` with *authentication requires session support* without it |
 | `APP_CONFIG_auth_providers_oidc` | `{"production":{"metadataUrl":"<issuer>/.well-known/openid-configuration","clientId":"…","clientSecret":"…","prompt":"auto","signIn":{"resolvers":[{"resolver":"preferredUsernameMatchingUserEntityName","dangerouslyAllowSignInWithoutUserInCatalog":true}]}}}` |
-| `APP_CONFIG_catalog_providers_keycloakOrg` | optional: `{"default":{"baseUrl":"<keycloak>","realm":"…","loginRealm":"…","clientId":"…","clientSecret":"…","schedule":{"frequency":{"minutes":10},"timeout":{"minutes":3}}}}` — imports the realm's users and groups as catalog entities (the client's service account needs realm-management `query-users`, `view-users`, `query-groups`) |
+| `APP_CONFIG_catalog_providers_keycloakOrg` | optional: `{"default":{"baseUrl":"<keycloak>","realm":"…","loginRealm":"…","clientId":"…","clientSecret":"…","schedule":{"frequency":{"minutes":10},"timeout":{"minutes":3}}}}` — imports the realm's users and groups as catalog entities (the client's service account needs realm-management `query-users`, `view-users`, `query-groups`, and on Keycloak 26.6.9+ the `kc-admin-api` default client scope, else the Admin API answers 401) |
 
 The Keycloak client's redirect URI is `https://<rhdh route>/api/auth/oidc/handler/frame`. The pod reads
 env at start: after creating or changing the Secret, delete the `backstage-developer-hub` pod.

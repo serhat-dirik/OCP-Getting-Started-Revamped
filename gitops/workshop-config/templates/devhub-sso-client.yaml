@@ -104,7 +104,7 @@ spec:
               KC_PASS="$(oc get secret "$ADMIN_SECRET" -n "$ADMIN_NS" -o jsonpath='{.data.password}' | base64 -d)"
               export IDP KC_ADMIN KC_PASS
               exec python3 - <<'PY'
-              import base64, json, os, subprocess, time, urllib.parse, urllib.request
+              import base64, json, os, secrets, subprocess, time, urllib.parse, urllib.request
               issuer = json.loads(os.environ["IDP"])["issuer"].rstrip("/")
               public, realm = issuer.split("/realms/")
               KC, R, CLIENT, RHDH = os.environ["KC"] or public, f"/admin/realms/{realm}", "ogsr-devhub", os.environ["RHDH"]
@@ -147,6 +147,11 @@ spec:
               rm = call("GET", f"{R}/clients?clientId=realm-management", tok)[0]["id"]
               roles = [call("GET", f"{R}/clients/{rm}/roles/{n}", tok) for n in ("query-users", "view-users", "query-groups")]
               call("POST", f"{R}/users/{sa['id']}/role-mappings/clients/{rm}", tok, roles)
+              # Keycloak 26.6.9+ (RHBK) admits a token to the Admin API only with this scope's audience
+              # (401 without it, measured on cluster-5vqxc); older realms have no such scope.
+              for s in call("GET", f"{R}/client-scopes", tok):
+                  if s["name"] == "kc-admin-api":
+                      call("PUT", f"{R}/clients/{cid}/default-client-scopes/{s['id']}", tok)
               secret = call("GET", f"{R}/clients/{cid}/client-secret", tok)["value"]
               oidc = {"production": {
                   "metadataUrl": issuer + "/.well-known/openid-configuration", "clientId": CLIENT,
@@ -158,13 +163,16 @@ spec:
               org = {"default": {"baseUrl": public, "loginRealm": realm, "realm": realm, "clientId": CLIENT,
                                  "clientSecret": secret, "schedule": {"frequency": {"minutes": 10},
                                  "timeout": {"minutes": 3}, "initialDelay": {"seconds": 15}}}}
-              data = {"APP_CONFIG_auth_environment": "production", "APP_CONFIG_signInPage": "oidc",
-                      "APP_CONFIG_auth_providers_oidc": json.dumps(oidc, sort_keys=True),
-                      "APP_CONFIG_catalog_providers_keycloakOrg": json.dumps(org, sort_keys=True)}
               live = subprocess.run(["oc", "get", "secret", "rhdh-auth", "-n", "rhdh", "-o", "json"],
                                     capture_output=True, text=True)
               have = {k: base64.b64decode(v).decode() for k, v in
-                      (json.loads(live.stdout).get("data") or {}).items()} if live.returncode == 0 else None
+                      (json.loads(live.stdout).get("data") or {}).items()} if live.returncode == 0 else {}
+              data = {"APP_CONFIG_auth_environment": "production", "APP_CONFIG_signInPage": "oidc",
+                      # the OIDC strategy keeps its login state in an express session; kept stable so a
+                      # re-sync does not restart Dev Hub or sign everyone out.
+                      "APP_CONFIG_auth_session_secret": have.get("APP_CONFIG_auth_session_secret") or secrets.token_hex(32),
+                      "APP_CONFIG_auth_providers_oidc": json.dumps(oidc, sort_keys=True),
+                      "APP_CONFIG_catalog_providers_keycloakOrg": json.dumps(org, sort_keys=True)}
               if have == data:
                   print("✅ Dev Hub already signs in through Keycloak (rhdh-auth unchanged)")
                   raise SystemExit(0)
