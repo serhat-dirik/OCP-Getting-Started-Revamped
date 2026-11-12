@@ -15,8 +15,8 @@ has its own timing table, pre-flight checklist and watchouts.
 
 ## 1. Plan
 
-1. **Pick the agenda** from the [README delivery table](README.md#workshop-content) (half-day,
-   full day, 2-day, 3-day) or choose your own modules. Put the list in `modules_enabled`.
+1. **Pick the modules.** The [README module table](README.md#workshop-content) gives each module's
+   hands-on time. Put the list in `modules_enabled`.
 2. **AI steps need a model endpoint and key at install time.** That covers jobs-batch-kueue's
    batch inference and the OpenShift Lightspeed console assistant.
 3. **Order and size the cluster** with [INSTALL.md › Before you order](INSTALL.md#1-before-you-order).

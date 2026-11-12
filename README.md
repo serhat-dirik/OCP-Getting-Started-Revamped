@@ -38,16 +38,9 @@ The 25 modules are grouped into four blocks:
 | D | M24 | Resilience, Multi-Cluster & DR | Prove a service survives a pod loss with replicas, a PodDisruptionBudget, and an HPA, then scale an entire site to zero and watch the service mesh fail traffic over to a second site with zero dropped requests. As an add-on, connect two sites into one network with Red Hat Service Interconnect. | ~4-6 min | 30 min |
 | D | M25 | Packaging & Distributing Your App (Helm & OLM) | Package the notifications service as a Helm chart, install it, upgrade it, break it on purpose, and roll back to the version that worked. Push the chart to the registry as an OCI artifact, then take apart a real operator's bundle to see what happens when someone clicks Install. | ~4-6 min | 40 min |
 
-**Modules are flexible.** Every module is self-contained: automation materializes its starting environment per attendee, so no module assumes another one ran first. Attendees can start with any module, follow one of the recommended paths, or jump straight to the topic their team needs today.
+**Modules are flexible.** Every module is self-contained: automation materializes its starting environment per attendee, so no module assumes another one ran first. Attendees can start with any module or jump straight to the topic their team needs today.
 
-**Plan a delivery.** The whole catalog is about **17 hours**, so the designated full workshop is **3-4 days covering all 25 modules** — not a selection from them. Shorter formats drop modules rather than rush them. These are **starting points, not prescriptions** — the delivering SA chooses the set with `modules_enabled` in `bootstrap/vars.yaml` (see INSTALL.md):
-
-| Delivery | Modules | Total |
-|---|---|---|
-| Half-day taster | M01 → M02 → M09 → M12 | ~2.5 h |
-| Full-day essentials | M01 → M02 → M03 → M04 → M07 → M09 → M12 | ~4.5 h |
-| 2-day core | everything except M15, M17, M18, M19, M21, M22, M23, M24 | ~12 h |
-| **3-day full workshop** | **all 25** — Day 1 M01–M08 (block A) · Day 2 M09–M20 (B+C) · Day 3 M21–M25 (D) | ~17 h |
+**Pick your modules.** Choose the modules that fit your audience and time; the **Time** column is each module's hands-on time (the whole catalog is about 17 hours). Put the list in `modules_enabled` in `bootstrap/vars.yaml` (see [INSTALL.md](INSTALL.md)).
 
 ## Project Content
 
