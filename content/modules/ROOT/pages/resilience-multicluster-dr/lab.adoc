@@ -22,6 +22,9 @@ include::partial$version-attributes.adoc[]
 // +98 s of a 125 s outage (retries stayed on the dead site-a locality); with it, zero errors. The token
 // block waits for the Link to exist before waiting for Ready: the Link appears ~2 s after the AccessToken.
 // Console click-paths for mesh CRs are dual-path [tabs]; the client-log tail and curl reads are terminal-only.
+// Reconnect safety (audit 2026-11-12): exercises 2 and 3 open with a block that re-sets CLIENT/SITEA/SITEB
+// (exercise 1 uses the page's first block); the eviction retry re-defines evict() and re-derives the
+// refused pod when $P2 is gone; demo steps name their namespaces with {user} instead of shell variables.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -51,6 +54,8 @@ In this lab you *prove* the service survives a pod loss (in-site resiliency), th
 Where you apply a mesh custom resource you get two tabs: the *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`) to import YAML, and the *CLI* tab uses `oc` in the *Terminal* beside these instructions. Pick a path once — the tabs stay in sync across the page.
 Two things are terminal-only on purpose: *tailing the client's live log* (`oc logs -f`) and the *`curl`-style reads* from inside a pod — the console can't do those.
 Namespaces in the output below render with *your* user (`{user}`). Everything else — pod names, IP addresses, node names, timestamps — comes from real captures on since-deleted clusters and *will* differ on yours: read the *shape*, not the exact values.
+Each exercise opens with a block that sets the shell shortcuts it uses, `$CLIENT`, `$SITEA` and `$SITEB`; for exercise 1 it is the block above.
+*If your terminal reconnects, run the exercise's first block again* — a fresh shell has none of those shortcuts.
 ====
 endif::demo[]
 
@@ -99,7 +104,7 @@ Keep a second terminal tailing the client log for the whole demo — the flip in
 oc logs -f deploy/claims-client -n {user}-client --tail=5
 ----
 
-NOTE: Step 2 is timing-dependent. The measured flip took about a second, so a one- or two-second gap between the last `A` line and the first `B` line is expected and worth naming — that request took a retry hop. If nothing has moved after fifteen seconds, stop watching the stream and pull the answer instead, with the `curl` in step 2. If the tail dies or the output scrolls past the transition, it is still in the log's history: `oc logs deploy/claims-client -n $CLIENT --tail=30` re-shows it.
+NOTE: Step 2 is timing-dependent. The measured flip took about a second, so a one- or two-second gap between the last `A` line and the first `B` line is expected and worth naming — that request took a retry hop. If nothing has moved after fifteen seconds, stop watching the stream and pull the answer instead, with the `curl` in step 2. If the tail dies or the output scrolls past the transition, it is still in the log's history: `oc logs deploy/claims-client -n {user}-client --tail=30` re-shows it.
 
 CAUTION: After rehearsing the failure, scale site A back to three replicas and wait for the log to read `served-by-site=A` again. A world left failed over starts with the client already on site B, and step 2's transition has already happened. Leave `baseEjectionTime` at its 30-second value as well: the failover and failback timings below were measured with it.
 ====
@@ -159,16 +164,16 @@ image::resilience-multicluster-dr/resilience-multicluster-dr-01-failover-log-fli
 
 "We have a second data center" and "we fail over to it automatically" are different capabilities, and only one of them survives a bad night. This is the game-day drill that tells them apart — and the routing that produces it is three small resources and no application code.
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
-oc scale deploy/parasol-claims -n $SITEA --replicas=0
+oc scale deploy/parasol-claims -n {user}-site-a --replicas=0
 ----
 
 *On screen* — the tailing client log flips from `served-by-site=A` to `served-by-site=B` within a few seconds, and every line on both sides of the flip is still `HTTP 200`. A single request through the same stable endpoint, answered by whichever site is live, makes the same point on demand:
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
-oc exec deploy/claims-client -n $CLIENT -- curl -s -m3 http://claims-stable/
+oc exec deploy/claims-client -n {user}-client -- curl -s -m3 http://claims-stable/
 ----
 
 *What just happened*
@@ -185,9 +190,9 @@ image::resilience-multicluster-dr/resilience-multicluster-dr-02-mesh-failover.sv
 
 Failover that cannot fail back is a one-way door, and a door nobody wants to open. Here both directions are the same mechanism — locality prefers the primary, outlier detection decides whether it is trustworthy — so returning to normal is not a second procedure to write, test and remember.
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
-oc scale deploy/parasol-claims -n $SITEA --replicas=3
+oc scale deploy/parasol-claims -n {user}-site-a --replicas=3
 # 30-90s later, once the fresh pods are Ready, the client log returns to served-by-site=A
 ----
 
@@ -335,12 +340,16 @@ NAME             MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
 parasol-claims   2               N/A               0                     4m41s
 ----
 
-The budget had room for one disruption, so the first eviction went through (`201`). Its replacement is still starting, so a second eviction would leave fewer than two Ready pods. The API answers `429 TooManyRequests` and `ALLOWED DISRUPTIONS` drops to `0`. A drain that gets this answer does not fail; it waits and retries. Do the same: wait for the budget to reopen, then retry the refused pod:
+The budget had room for one disruption, so the first eviction went through (`201`). Its replacement is still starting, so a second eviction would leave fewer than two Ready pods. The API answers `429 TooManyRequests` and `ALLOWED DISRUPTIONS` drops to `0`. A drain that gets this answer does not fail; it waits and retries. Do the same: wait for the budget to reopen, then retry the refused pod.
+The block defines `evict` again, and if `$P2` is gone (a reconnected terminal) it picks the oldest claims pod that is not already shutting down, so it also works in a fresh shell:
 
 [source,sh,role=execute]
 ----
+evict() { echo '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"'"$1"'"}}' | oc create --raw /api/v1/namespaces/$SITEA/pods/$1/eviction -f - ; echo; }
+[ -n "$P2" ] || P2=$(oc get pod -n $SITEA -l app=parasol-claims --sort-by=.metadata.creationTimestamp --no-headers \
+  -o custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp | awk '$2=="<none>" {print $1; exit}')
 oc wait pdb/parasol-claims -n $SITEA --for=jsonpath='{.status.disruptionsAllowed}'=1 --timeout=90s
-evict $P2
+evict ${P2:?is empty - run the first block of this exercise again}
 oc wait pdb/parasol-claims -n $SITEA --for=jsonpath='{.status.disruptionsAllowed}'=1 --timeout=90s
 oc get deploy,pdb,hpa -n $SITEA
 ----
@@ -393,6 +402,16 @@ The loop stops by itself after three minutes; press `Ctrl-C` in Terminal 2 to st
 ⏱ *~13 min* · wire a stable endpoint that fails over from the primary site to the secondary automatically
 
 This is the module's centerpiece. You'll put a *stable endpoint* in front of both sites, teach the mesh to prefer the primary and *fail over to the secondary automatically*, then *fail the whole primary site* and watch the client keep working.
+
+Set this exercise's shortcuts first (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+CLIENT={user}-client
+SITEA={user}-site-a
+SITEB={user}-site-b
+echo "client: $CLIENT   ·   primary site: $SITEA   ·   secondary site: $SITEB"
+----
 
 First, meet the client and prove the problem. The client calls a *stable endpoint* (`claims-stable`, the mesh ingress gateway) once a second and logs which site answered. Tail its log:
 
@@ -652,6 +671,15 @@ The same timer sets the failback. Traffic returns to site A when its current eje
 Red Hat Service Interconnect is a *separate subscription*. Nothing earlier in this module depends on it. Skip it freely if RHSI isn't part of your engagement. It's included, fully hands-on, because *connecting* separate sites is what makes cross-site failover possible in the first place when the sites are real, distant clusters.
 ====
 
+Set this exercise's shortcuts first (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+SITEA={user}-site-a
+SITEB={user}-site-b
+echo "DC-A: $SITEA   ·   DC-B: $SITEB"
+----
+
 The failover you just built assumes the two sites can *reach* each other. On one cluster that's free. Now treat `{user}-site-a` and `{user}-site-b` as *two separate data centers* — DC-A and DC-B — with *no shared network*, and link them with a *Virtual Application Network* (VAN): a mutual-TLS Layer-7 overlay that connects *just the services that need it*, over a single outbound connection, with no VPN.
 
 Each site becomes a *Site*. Make DC-A *linkable* (`linkAccess: default`) so DC-B can connect to it:
@@ -797,7 +825,9 @@ REMOTE=$(oc exec $PODA -c claims -n $SITEA -- curl -sf -m5 http://claims-remote:
 LOCAL=$(oc exec $PODA -c claims -n $SITEA -- curl -sf -m5 http://claims:8080/ || echo "NO-RESPONSE")
 echo "remote over the VAN (claims-remote): $REMOTE"
 echo "local in DC-A (claims):              $LOCAL"
-if [ "$REMOTE" = "NO-RESPONSE" ]; then
+if [ -z "$PODA" ]; then
+  echo "no DC-A claims pod found — is \$SITEA empty? run the first block of this exercise again, then this one"
+elif [ "$REMOTE" = "NO-RESPONSE" ]; then
   echo "no response over the VAN — link down? see the troubleshooting page"
 fi
 ----
