@@ -1,0 +1,73 @@
+# The attendee's SonarQube project (parasol-claims-{user}) is DELETED on every materialize — ws prep,
+# ws start, ws reset, and before a solve's PostSync run — so the lab's first analysis is the project's
+# first. On a project first analysed on main (an earlier `adm solve`), the seeded PartnerGateway.java
+# is new code: its S1170 smell keeps new_violations red after the lab's SAST fix and the lab cannot
+# finish (reproduced on parasol-claims-user5, 2026-11-12).
+#
+# Deleting a project needs SonarQube admin; the analysis token the pipeline uses cannot. So this runs
+# in the sonarqube namespace, where attendees cannot run pods, and takes the admin password as an env
+# var from that namespace's own sonarqube-admin Secret — no ServiceAccount or Role grants a read of it.
+# Entry syncs are manual (ws triggers each one), so this never fires in the middle of a lab.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: app-security-testing-sonar-reset-{{ .Values.user }}
+  namespace: {{ .Values.sonarqubeNamespace }}
+  labels:
+    workshop.redhat.com/module: app-security-testing
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    # HookSucceeded too: a finished Job in the sonarqube namespace is litter no reset sweeps.
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app: app-security-testing-sonar-reset-{{ .Values.user }}
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      containers:
+        - name: reset
+          # Digest-pinned; el8 `ose-cli:latest` was frozen on v4.15.0 with unapplied Critical errata.
+          image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+          env:
+            - name: SONAR
+              value: "http://sonarqube.{{ .Values.sonarqubeNamespace }}.svc:9000"
+            - name: PROJECT
+              value: "parasol-claims-{{ .Values.user }}"
+            - name: ADMIN_PASS
+              valueFrom:
+                secretKeyRef: {name: sonarqube-admin, key: password}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              # The credential travels in a 0600 curl config written by a builtin, never in argv.
+              umask 077
+              printf 'user = "admin:%s"\n' "$ADMIN_PASS" > /tmp/curl.cfg
+              unset ADMIN_PASS
+              CODE="$(curl -s -o /dev/null -w '%{http_code}' -K /tmp/curl.cfg -X POST \
+                "${SONAR}/api/projects/delete" --data-urlencode "project=${PROJECT}" || true)"
+              case "$CODE" in
+                204) echo "✅ SonarQube project ${PROJECT} deleted — the lab's first analysis starts it fresh" ;;
+                404) echo "✅ SonarQube project ${PROJECT} absent — nothing to reset" ;;
+                *)   echo "❌ could not delete SonarQube project ${PROJECT} (HTTP ${CODE:-none})"
+                     echo "   fix: oc get pods -n {{ .Values.sonarqubeNamespace }}; oc get secret sonarqube-admin -n {{ .Values.sonarqubeNamespace }}"
+                     exit 1 ;;
+              esac
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault

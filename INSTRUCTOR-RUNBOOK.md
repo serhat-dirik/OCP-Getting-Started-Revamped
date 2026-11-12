@@ -105,6 +105,8 @@ oc get applications -n openshift-gitops
 `ogsr-reset.sh` clears all lab work and empties each attendee's terminal home. It keeps the platform
 and every account. It does **not** clear:
 
-- Data inside shared tools: SonarQube projects, Developer Hub catalog entries.
+- Developer Hub catalog entries.
+- SonarQube projects, until the attendee next prepares Application Security Testing (that starts
+  their project fresh).
 - Contents of each attendee's Keycloak realm.
 - Gitea tokens and SSH keys on the kept accounts.

@@ -55,7 +55,7 @@ Why each one is on it (kind list from that same render, 2026-08-01):
                                                                            gitops-fundamentals solve
   openshift-lightspeed Role, RoleBinding                                 — MaaS source secret reads
   openshift-pipelines  Role, RoleBinding                                 — trusted-supply-chain
-  sonarqube            Role, RoleBinding                                 — app-security-testing
+  sonarqube            Job, Role, RoleBinding                            — app-security-testing
   stackrox             Role, RoleBinding                                 — RHACS reads
 */}}
 {{- define "workshop-config.entryDestinationsShared" -}}
