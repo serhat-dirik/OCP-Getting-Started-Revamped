@@ -36,4 +36,4 @@ oc start-build ${{ values.name }} --from-dir=. --follow -n <your-namespace>
 
 - **Quarkus 3.33 LTS** (`quarkus.platform.version = 3.33.3.1`), **Java 21**, `fast-jar`.
 - Health, metrics, and tracing are **on by default** — Parasol convention.
-- UBI9 multi-stage `Containerfile` (`ubi9/openjdk-21:1.23`), runs as non-root USER 185.
+- UBI9 multi-stage `Containerfile` (`ubi9/openjdk-21:1.24`), runs as non-root USER 185.
