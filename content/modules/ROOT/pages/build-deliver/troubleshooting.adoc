@@ -2,7 +2,7 @@
 :module-id: build-deliver
 include::partial$version-attributes.adoc[]
 
-// Real entries from performing the module on OCP 4.21.22 (2026-07-09) plus the
+// Real entries from performing the module on OCP 4.21.22 (2026-07-09) and 4.22.22 (2026-11-12) plus the
 // build-note failure-mode seeds. Format: Symptom / Cause / Fix.
 
 Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
@@ -36,6 +36,18 @@ Confirm the datasource is the complaint before you assume anything else:
 [source,sh,role=execute]
 ----
 oc logs deployment/parasol-claims --tail=20 | grep -iE 'datasource|connection|refused'
+----
+
+== `curl` to a new Route prints "Application is not available", or `jq` reports a parse error
+
+Symptom:: Right after `oc create route`, a `curl` you typed yourself prints an HTML page reading "Application is not available", or a `curl … | jq` fails with `jq: parse error: Invalid numeric literal at line 1, column 7`.
+Cause:: For a few seconds after a Route is created — and while a Pod with no readiness probe is still starting — the router answers `503` with its own HTML error page.
+Plain `curl -s` prints that page as the response, even with `--retry`, and `jq` cannot parse HTML.
+Fix:: Use the lab's form: `-f` makes curl treat the `503` as a failure and print nothing for it, and `--retry-all-errors` keeps retrying until the application answers:
++
+[source,sh,role=execute,subs="attributes"]
+----
+curl -sf --retry 30 --retry-all-errors --retry-delay 2 http://parasol-claims-{user}-dev.{cluster_domain}/ | jq -Sc .
 ----
 
 == `oc new-app --strategy=docker` says "No Dockerfile was found"
@@ -160,9 +172,10 @@ oc delete deploymentconfig --all
 oc process openshift//parasol-postgresql-ephemeral -p APP_NAME=claims-db | oc apply -f -
 ----
 
-== A build's Pod won't start when other builds or Deployments are still around
+== A Pod never appears while other builds and Deployments are running
 
-Symptom:: You start `parasol-claims`, `claims-docker`, and `parasol-notifications` back-to-back instead of letting each finish and roll out, and the newest one's build Pod stays `Pending` (or never appears) while an earlier build or Deployment Pod is still up; `oc describe pod <name> -n {user}-dev` (or `oc get events -n {user}-dev`) names the `workshop-quota` `ResourceQuota`, not an image-pull or node-scheduling problem.
+Symptom:: With several workloads already up — for example in the challenge, an `oc start-build parasol-claims` while a second notifications import is still building — a new Deployment stays at `0/1` with no Pod at all, and `oc get events -n {user}-dev` shows `FailedCreate` with `exceeded quota: workshop-quota, requested: limits.cpu=1500m, used: limits.cpu=7500m, limited: limits.cpu=8`.
+It is the namespace quota refusing the Pod, not an image-pull or node-scheduling problem.
 Cause:: `{user}-dev` carries a per-namespace `ResourceQuota` (`workshop-quota`) of `limits.cpu: 8`, `limits.memory: 12Gi` and `pods: 30`, and its `LimitRange` gives every container that sets no limits of its own a `1500m` CPU and `1Gi` memory limit.
 *CPU runs out first*: eight cores at `1500m` each fit five such containers at once (`7500m`), while memory would fit twelve.
 Every app Pod and every build Pod in this module is one of those containers — `parasol-claims`, `parasol-notifications`, `claims-db`, plus `claims-docker` in exercise 2 and any running build — so a sixth one at the same moment is refused on `limits.cpu`, with memory still far from its ceiling.
@@ -175,8 +188,9 @@ oc describe resourcequota workshop-quota -n {user}-dev
 oc get pods -n {user}-dev
 ----
 +
-Delete a Deployment you no longer need (for example `oc delete deployment,service,buildconfig,imagestream -l app=claims-docker`), or wait for the running build to finish, then retry the stalled one.
+A Deployment recovers on its own: its ReplicaSet keeps retrying and creates the Pod as soon as a running build finishes and frees its `1500m`.
+To make room sooner, delete a workload you no longer need, for example `oc delete deployment,service,buildconfig,imagestream -l app=claims-docker`.
 
 '''
 
-_Last verified on OpenShift 4.21.22 (2026-07-09)._
+_Last verified on OpenShift 4.22.22 (2026-11-12)._

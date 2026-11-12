@@ -2,8 +2,8 @@
 :module-id: build-deliver
 include::partial$version-attributes.adoc[]
 
-// Internal delivery runbook. Timings measured on the build cluster (OCP 4.21.22)
-// as user2 on 2026-07-09; see the "how timing was measured" note below.
+// Internal delivery runbook. Timings measured on cluster-5vqxc (OCP 4.22.22) as user2,
+// in the attendee's own terminal pod, on 2026-11-12; see the "how timing was measured" note below.
 
 This module turns "here is some source code" into a running, database-backed application using both build strategies, in two languages.
 The one idea that must land is that there are *two build strategies and one choice*: Source-to-Image (S2I) is the fast default, the Containerfile/Buildah strategy is a deliberate choice you make when you need control, and knowing which to reach for is the skill. A pipeline is where whichever one they chose goes next — not a third option, and not demonstrated in this module.
@@ -13,26 +13,27 @@ include::partial$prep-before-you-teach.adoc[]
 
 == Timing
 
-Total hands-on: *~35 min*, leaving room for ~15 min of concept up front.
+Total hands-on: *~28 min*, leaving room for ~15 min of concept up front.
 
 `ws prep build-deliver` waits up to *5 minutes* for the entry state to converge (the engine default sync window; this module declares no longer budget in `ws-meta.yaml`). It normally returns well inside that — the ceiling is a timeout, not a duration. Attendees start it themselves from the top of the *concept* page, so deliver the concept at its normal pace and it converges under you.
 
 [cols="1,4,1,2",options="header"]
 |===
-| # | Exercise group | Attendee time | Measured core (as user2, 4.21.22)
+| # | Exercise group | Attendee time | Measured core (as user2, 4.22.22, two cold-start runs)
 
-| 1 | Import claims from Git (S2I) | ~10 min | first S2I build (java-21) → `Complete` in *~67 s* with the in-cluster Maven mirror (cluster-5vqxc, 2026-11-12; previously ~4.5 min warm, up to ~11 min cold), then push
-| 2 | The Dockerfile way + compare | ~10 min | Docker build of the repo `Dockerfile` *~5 min, and budget that every time* — this build uses buildah, not S2I, so it does NOT share exercise 1's incremental Maven cache and re-resolves the dependency tree on every run. Measured 5m16s on a cluster where exercise 1 had just finished. An earlier figure here said ~95 s warm; there is no reachable warm case for this strategy under the pre-flight in this guide (its multi-stage build also pulls the full Maven tree the first time)
-| 3 | Polyglot notifications (Node.js) | ~5 min | Node S2I build *~45 s* (zero dependencies, no npm registry)
-| 4 | Browse catalog + deploy database | ~5 min | PostgreSQL 15 rollout *~15–20 s*
-| 5 | Wire claims to its database | ~5 min | rollout to Ready *~15 s*; Route answers 200 immediately
+| 1 | Import claims from Git (S2I) | ~8 min | S2I build (java-21) `Complete` in *1m4s–1m9s*, all ~1,400 Maven downloads from the in-cluster mirror, none from Central; exercise commands *~70 s* in all
+| 2 | The Dockerfile way + compare | ~6 min | Docker build of the repo `Dockerfile` *92–113 s*. This build does NOT use the mirror: `oc new-app --strategy=docker` passes no `MAVEN_MIRROR_URL` build argument, so Maven resolves from Central (`Total time: 01:06 min` inside the build)
+| 3 | Polyglot notifications (Node.js) | ~4 min | Node S2I build *~25 s* (`npm install` runs and finds 1 package); the new Route's `/health` answered on the first `curl`
+| 4 | Browse catalog + deploy database | ~4 min | PostgreSQL 15 rollout *~11 s*
+| 5 | Wire claims to its database | ~6 min | rollout *~3 s* (no readiness probe yet); Quarkus `started in` ~3.4 s; the Route answered `200` on the first `curl`; `ws verify` 11/11 in ~8 s
 |===
 
 [NOTE]
 .How this timing was measured
 ====
-The *Measured core* column is real: each step was executed as a workshop user (`user2`) on the build cluster (OCP 4.21.22) on 2026-07-09 and timed.
-The claims S2I build was measured at the namespace's *default* memory limit (1 Gi from the workshop LimitRange); the current `java-21` (UBI 9 / OpenJDK 21) builder completes there without tuning.
+The *Measured core* column is real: the whole lab was run twice as `user2`, from a cold `adm reset build-deliver --user user2`, inside user2's own terminal pod with the terminal session's identity (`oc whoami` = `user2`), on cluster-5vqxc (OCP 4.22.22) on 2026-11-12.
+Both runs matched every expected output on the lab page; exercises 1–5 took about 4.5 minutes of command time per run.
+The claims S2I build ran at the namespace's *default* limits (1 Gi memory, 1500m CPU from the workshop LimitRange); the current `java-21` (UBI 9 / OpenJDK 21) builder completes there without tuning.
 The *Attendee time* adds reading, console navigation, and checkpoint overhead on top of that core.
 The *first* claims build no longer waits on Maven Central — its dependencies come from the in-cluster mirror the installer warmed.
 ====
@@ -82,7 +83,7 @@ curl -sf -o /dev/null -w '%{http_code}\n' \
 ----
 +
 Expect `200`.
-The source repo ships both `Dockerfile` and the identical `Containerfile`; if this returns `404`, the app-repo seed predates the `Dockerfile` — re-sync the mirror and re-seed (`adm git-refresh`) so forks carry it, or exercise 2 falls back to naming the `Containerfile` path (troubleshooting).
+The source repo ships both `Dockerfile` and the identical `Containerfile`; if this returns `404`, the fork predates the `Dockerfile` — see the *forks do not follow the canonical repo* watchout, or let exercise 2 fall back to naming the `Containerfile` path (troubleshooting).
 
 . *A user can build* (warms the builder image and Maven cache on a node):
 +
@@ -164,9 +165,12 @@ In *Import from Git* the console shows "repository is unreachable" / "Unable to 
 Attendees must pick *Import Strategy → Builder Image → Java 21* (or *Node.js*) and type the *Name* themselves; the lab and troubleshooting both cover it.
 Tell the room up front that they choose the builder by hand — exactly what the CLI's `java-21~<repo>` does — so the warning does not read as "my fork is broken."
 (This is a candidate platform fix — console-to-Gitea reachability — flagged to the platform team.)
-* *First build is the slow step.*
-The initial claims S2I build ran ~4–4.5 min on a warm cluster and ~11 min on a fresh one, almost all of it Maven Central. With the in-cluster Maven mirror it took 67 s on cluster-5vqxc (2026-11-12). If it is slow again, check `oc get deploy maven-mirror -n ogsr-maven-mirror` before anything else.
-Set expectations, and use the wait for the catalog/trusted-content material rather than silence.
+* *The Java builds are short now; the Docker one is the longer of the two.*
+The claims S2I build used to run ~4–4.5 min on a warm cluster and ~11 min on a fresh one, almost all of it Maven Central. With the in-cluster Maven mirror it completes in about 1 min (1m4s–1m9s on cluster-5vqxc, 2026-11-12). If it is slow again, check `oc get deploy maven-mirror -n ogsr-maven-mirror` before anything else.
+The exercise 2 Docker build still resolves from Maven Central (no mirror build argument) and took 92–113 s; use that wait for the S2I-versus-Dockerfile discussion rather than silence.
+* *Forks do not follow the canonical repo.*
+`adm git-refresh` re-seeds `parasol/parasol-claims` and `parasol/parasol-notifications` in Gitea, but an attendee's fork keeps the content it was forked with, and `adm reset` keeps existing forks.
+To give one attendee the current source, delete their fork in Gitea (as the Gitea admin), then run `adm reset build-deliver --user <user>`: the entry state's fork job re-forks it from the canonical repo.
 * *Build memory and the LimitRange.*
 Build Pods inherit the namespace LimitRange default (1 Gi).
 The current `java-21` (UBI 9) builder completes there; note for your own awareness that the *older* stock `java` stream (OpenJDK 17, UBI 8) has hit `OutOfMemoryError` under that 1 Gi default on this same source, and a larger app can too.
@@ -191,5 +195,5 @@ If a fork is missing, `adm start build-deliver --user <user>` re-runs the fork j
 
 == Provenance
 
-All technical steps, the Parasol applications, the PostgreSQL catalog template, and the build flows are freshly built and verified on OpenShift 4.21.22 (2026-07-09).
+All technical steps, the Parasol applications, the PostgreSQL catalog template, and the build flows are freshly built and verified on OpenShift 4.21.22 (2026-07-09), and re-verified end to end as an attendee on OpenShift 4.22.22 (2026-11-12).
 No content ported from the 2020-era labs.
