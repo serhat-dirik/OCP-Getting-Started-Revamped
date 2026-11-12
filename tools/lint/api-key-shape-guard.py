@@ -19,7 +19,8 @@ current tree, and a guard that cries wolf gets deleted:
     tools/lint/credential-redaction-guard.canary.adoc  <sk- + three hex groups; see that file>
 
 (The last three are not keys at all: two are the substring `task-` inside a Tekton Task name, and one
-is a lint fixture whose entire job is to contain a scary-looking string.)
+is a lint fixture whose entire job is to contain a scary-looking string. The first two left the tree
+on 2026-11-12 with the modules that shipped those apps.)
 
 That last row is DESCRIBED rather than reproduced, and the reason is worth the line: writing the
 literal here made this file itself key-shaped, and this guard does not exempt its own source (see
@@ -382,7 +383,7 @@ def self_test(root: pathlib.Path) -> int:
             (CANARY, True),
             (".github/workflows/lint.yml", True),
             ("tools/lint/api-key-shape-guard.py", False),
-            ("apps/parasol-agent/src/test/java/com/parasol/agent/AgentResourceTest.java", False)):
+            ("apps/parasol-claims/src/test/java/com/parasol/claims/DatabaseFreeBootTest.java", False)):
         if excluded(path) != should_exclude:
             failures.append(f"the path exclusion list gave the wrong answer for {path} — it should "
                             f"{'' if should_exclude else 'NOT '}be excluded. Every exclusion is a "

@@ -40,12 +40,10 @@ import jakarta.ws.rs.core.MediaType;
  * the database, the whole app can serve {@code /} with the datasource switched off — set
  * {@code QUARKUS_DATASOURCE_ACTIVE=false} and {@code QUARKUS_HIBERNATE_ORM_ACTIVE=false} and no
  * PostgreSQL is contacted at boot (the {@code /api/claims} data endpoints are inactive in that
- * mode). Two module worlds ship the <em>real</em> image that way — neither of them the
- * resilience one: ai-assisted-development seeds it as its diagnosis target so the only fault in
- * that lab is a wrong readiness path rather than a missing {@code parasol-db}, and
- * app-modernization deploys the modernized service DB-inactive, both in the attendee's own lab
- * step and in the {@code ws solve} end state. The default configuration is unchanged: with a
- * datasource URL set, the datasource is active and the full API is served as before.
+ * mode). No module runs the image that way since 2026-11-12, when its two consumers left the
+ * catalog; {@code DatabaseFreeBootTest} keeps the mode working. The default configuration is
+ * unchanged: with a datasource URL set, the datasource is active and the full API is served as
+ * before.
  */
 @Path("/")
 @Produces(MediaType.APPLICATION_JSON)

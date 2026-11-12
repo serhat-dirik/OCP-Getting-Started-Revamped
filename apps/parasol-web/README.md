@@ -107,6 +107,5 @@ namespace's ServiceAccount group and to the `workshop-attendees` group, scoped t
 None. This service is deliberately simple and correct.
 
 The workshop's deliberate faults live elsewhere: a seeded vulnerable dependency on a
-`parasol-claims` branch (*Trusted Software Supply Chain*), an N+1 query endpoint on
-`parasol-claims` (*Observability, Health & Scale*), and the legacy patterns throughout
-`parasol-legacy-claims` (*Application Modernization*).
+`parasol-claims` branch (*Trusted Software Supply Chain*) and an N+1 query endpoint on
+`parasol-claims` (*Observability, Health & Scale*).

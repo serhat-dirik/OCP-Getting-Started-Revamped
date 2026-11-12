@@ -624,7 +624,7 @@ def self_test(root: pathlib.Path) -> int:
         "metadata": {"name": "canary-devworkspace"},
         "spec": {"template": {"components": [
             {"name": "tools",
-             "container": {"image": f"{INTERNAL_REGISTRY}ogsr-parasol-images/mcp-agent-cli:1.0",
+             "container": {"image": f"{INTERNAL_REGISTRY}ogsr-parasol-images/parasol-claims:1.1",
                            "imagePullPolicy": REQUIRED_POLICY}}]}},
     }
     dw_sites = find_image_sites(devworkspace, "canary-devworkspace")

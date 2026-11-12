@@ -137,11 +137,10 @@ down — and the whole app can serve `/` with **no PostgreSQL at all** when both
 `QUARKUS_DATASOURCE_ACTIVE=false` and `QUARKUS_HIBERNATE_ORM_ACTIVE=false` are set (the
 `/api/claims` endpoints are inactive in that mode).
 
-The database-free boot is what lets two modules ship the real image with no PostgreSQL beside
-it: *AI-Assisted Development* seeds it as its diagnosis target (so the only fault in that lab is
-a wrong readiness path, not a missing `parasol-db`), and *Application Modernization* deploys the
-modernized service DB-inactive — both in the attendee's own lab step and in the `ws solve` end
-state. The default configuration, with a datasource URL set, is unaffected.
+The database-free boot has **no consumer at present**: the two modules that shipped the image
+with no PostgreSQL beside it left the catalog on 2026-11-12. It stays because it is cheap and
+`DatabaseFreeBootTest` keeps it working. The default configuration, with a datasource URL set, is
+unaffected.
 
 The `SITE` marker, by contrast, has **no consumer at present**. It was written for *Resilience,
 Multi-Cluster & DR*, which now runs a small inline Node responder as its per-site service rather

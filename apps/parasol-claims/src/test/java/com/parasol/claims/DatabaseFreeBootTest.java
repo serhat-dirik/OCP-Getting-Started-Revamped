@@ -14,19 +14,10 @@ import io.quarkus.test.junit.TestProfile;
 /**
  * Guards the DB-free drop-in mode: with {@code QUARKUS_DATASOURCE_ACTIVE=false} and
  * {@code QUARKUS_HIBERNATE_ORM_ACTIVE=false} this image must still boot and serve {@code GET /}
- * without contacting a database at all. Two module worlds depend on it, and in BOTH a pod that
- * crash-looped for a database reason would be mistaken for the probe fault the lab is actually
- * about:
- *
- * <ul>
- *   <li><strong>ai-assisted-development</strong> — its seeded diagnosis target runs this image
- *       DB-free so the single deliberate fault is the wrong readiness path, not a missing
- *       {@code parasol-db}. Rendered at ENTRY, on every start, so this is the consumer that
- *       breaks first if the mode regresses.</li>
- *   <li><strong>app-modernization</strong> — the attendee deploys the modernized service
- *       DB-inactive by hand in the lab (the Console and CLI paths both spell the two variables
- *       out), and the {@code ws solve} end state renders the same pair.</li>
- * </ul>
+ * without contacting a database at all. No module uses the mode today: its two consumers
+ * (ai-assisted-development's diagnosis target and app-modernization's modernized service) left the
+ * catalog on 2026-11-12. The mode is kept because it is cheap, and this test keeps it honest for the
+ * next module that wants the real image without a database.
  *
  * <p>resilience-multicluster-dr, which this mode was originally written for, no longer runs this
  * image at all — its per-site services are an inline Node responder, by that chart's own
@@ -42,7 +33,7 @@ import io.quarkus.test.junit.TestProfile;
 @TestProfile(DatabaseFreeBootTest.NoDatabaseProfile.class)
 class DatabaseFreeBootTest {
 
-    /** What the ai-assisted-development / app-modernization Deployments set, as Quarkus config keys. */
+    /** The two DB-free environment variables, as Quarkus config keys. */
     public static class NoDatabaseProfile implements QuarkusTestProfile {
         @Override
         public Map<String, String> getConfigOverrides() {

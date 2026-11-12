@@ -77,7 +77,7 @@ DELIBERATELY OUT OF SCOPE, so nobody reads a green tick as more than it is:
   * Dev Spaces UDI images (`registry.redhat.io/devspaces/**`, 2 of them: an `udiImage` value and a
     devfile). Entitled, but the IDE base image is chosen by the Dev Spaces operator and version-
     tagged to the product release; the workshop pins the Dev Spaces VERSION via versions.yaml. Same
-    reasoning the sibling `apps/parasol-legacy-claims/devfile.yaml` was carved out under.
+    reasoning the app devfiles (`apps/parasol-claims/devfile.yaml` and siblings) are carved out under.
   * everything in `content/**` that is NOT inside a `role=execute` block. That is the whole of
     tier 3's design and it has its own section, next.
 
@@ -258,8 +258,8 @@ ENTITLED_FIELD = _compile(
     re.M)
 
 # Dev Spaces IDE base images. Entitled, but chosen by the Dev Spaces operator and version-tagged to
-# the product release rather than pinned by this repo — the same carve-out the sibling
-# apps/parasol-legacy-claims/devfile.yaml has. See the docstring's out-of-scope list.
+# the product release rather than pinned by this repo — the same carve-out the app devfiles
+# (apps/parasol-claims/devfile.yaml and siblings) have. See the docstring's out-of-scope list.
 DEVSPACES_UDI = _compile("DEVSPACES_UDI", r"^registry\.redhat\.io/devspaces/")
 
 # ── TIER 3's structure patterns. These decide WHERE a reference is, which is the only thing that

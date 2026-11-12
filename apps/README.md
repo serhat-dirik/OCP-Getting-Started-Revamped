@@ -15,11 +15,6 @@ modules teach by inspecting them. Seeded data is deterministic (stable claim IDs
 | **parasol-claims** | Quarkus (Java 21) | The core claims service: REST API on PostgreSQL, owning the `CLM-1001`–`CLM-1030` dataset. The main character — most modules act on this one. | Nearly every module |
 | **parasol-notifications** | Node.js or Python | The polyglot moment: a second runtime, so build strategies can be compared side by side. Kept intentionally simple. | Ways to Build & Deliver Apps · Packaging & Distributing Your App |
 | **parasol-fraud** | Quarkus (Java 21) | A bearer-only fraud-scoring service. It is the token-exchange target that proves an escalation gets refused. | Securing Apps with Keycloak · Service Mesh |
-| **parasol-legacy-claims** | Legacy Java on JBoss Web Server / Tomcat | Deliberately un-modern — servlet-era patterns, hardcoded configuration. This is the thing being migrated. | Application Modernization |
-| **parasol-agent** | Quarkus + LangChain4j | The AI agent: model calls, RAG over policy documents, and MCP tool use. | Agentic AI on OpenShift |
-| **mcp-servers/claims-db** | Quarkus (MCP server) | Exposes the claims dataset to the agent as callable tools. | Agentic AI on OpenShift |
-| **mcp-servers/policy-docs** | Quarkus (MCP server) | Retrieves policy documents, so an answer can be grounded in a source. | Agentic AI on OpenShift |
-| **mcp-agent-cli** | Quarkus + LangChain4j | An assistant-neutral MCP client. Prompts a model with cluster tools bound and prints the full tool-call trace. Read-only unless told otherwise. | AI-Assisted Development |
 | **parasol-service-template** | Backstage template + Quarkus skeleton | Not a running service — the golden-path template that scaffolds a brand-new Parasol service. | Developer Hub & Golden Paths |
 
 Modules are named rather than numbered here on purpose: a module's number is just its position

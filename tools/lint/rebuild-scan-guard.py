@@ -352,7 +352,7 @@ class Recording:
 
 # One printed row. Anchored on the two columns that have a SHAPE — pods `n/m` and a state that runs
 # to end of line — because the five before them are single tokens and the padding between them is
-# not reliable: the IMAGE column is %-40s and `ogsr-parasol-images/parasol-agent@digest` is exactly
+# not reliable: the IMAGE column is %-40s and `ogsr-parasol-images/parasol-fraud@digest` is exactly
 # 40 characters, so it overflows to a SINGLE separating space. Splitting on runs of two-or-more
 # spaces silently dropped that row (and only that row) from this guard's first run.
 ROW = _compile("ROW", r"^\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\d+/\d+)\s+(.+?)\s*$")
