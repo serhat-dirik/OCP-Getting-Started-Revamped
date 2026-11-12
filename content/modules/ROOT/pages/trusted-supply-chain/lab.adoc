@@ -49,7 +49,8 @@ export PATH="$HOME/bin:$PATH"
 echo "working in project: $NS"
 ----
 
-If your terminal reconnects (a page reload opens a fresh shell), re-run this block — your downloaded tools stay in `~/bin`, but the shortcuts do not.
+Every exercise sets the shortcuts it uses again in its first block: *if your terminal reconnects (a page reload opens a fresh shell), run the first block of the exercise you are in again* — in exercise 1 that is this block.
+Your downloaded tools stay in `~/bin`; the shortcuts do not.
 
 In this lab you take Parasol's `parasol-claims` pipeline from "it builds" to "it is *trustworthy*."
 Most of your time is spent on the *trust* controls — the *signature* and *SLSA provenance* that travel with the image, a *transparency-log* record anyone can audit, and the cluster *refusing to run anything unsigned*.
@@ -115,9 +116,13 @@ If the live run has still not reached the scan by the end of step 4, read the ea
 NS="${NS:-$(oc whoami)-cicd}"
 PRESTAGED=$(oc get pipelinerun -n $NS --sort-by=.metadata.creationTimestamp \
   -o name | grep demo-vuln | head -1 | cut -d/ -f2)
-echo "reading the pre-staged run: $PRESTAGED"
-tkn pipelinerun logs "$PRESTAGED" -n $NS \
-  | grep -iE "TOTAL:|log4|CVE-2021-44228|Block Log4Shell|image check FAILED"
+if [ -z "$PRESTAGED" ]; then
+  echo "no demo-vuln run in $NS yet: start step 2's build once (the block in step 2), then run this again"
+else
+  echo "reading the pre-staged run: $PRESTAGED"
+  tkn pipelinerun logs "$PRESTAGED" -n $NS \
+    | grep -iE "TOTAL:|log4|CVE-2021-44228|Block Log4Shell|image check FAILED"
+fi
 ----
 
 Have the fork open at {gitea_url}/{user}/parasol-claims[{user}/parasol-claims^].
@@ -183,8 +188,9 @@ image::trusted-supply-chain/trusted-supply-chain-02-pipelinerun-scan-failed.png[
 
 A known-critical dependency is caught in the developer's own pipeline run, minutes after the commit, rather than in production months later. The image exists but never becomes a trusted tag, so nothing downstream can deploy it by accident.
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-cicd
 oc create -n $NS -f - <<'EOF'
 apiVersion: tekton.dev/v1
 kind: PipelineRun
@@ -235,8 +241,10 @@ image::trusted-supply-chain/trusted-supply-chain-03-imagestream-tags.png["The co
 
 Nobody wired signing into this pipeline. Tekton Chains observes completed builds and signs what they produced, so signing cannot be forgotten under deadline pressure — and verification needs nothing but the public key, anywhere, offline.
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-cicd
+CLI=https://cli-server-trusted-artifact-signer.{cluster_domain}
 mkdir -p ~/bin && curl -ksL $CLI/clients/linux/cosign-amd64.gz | gunzip > ~/bin/cosign && chmod +x ~/bin/cosign
 curl -ksL $CLI/clients/linux/rekor-cli-amd64.gz | gunzip > ~/bin/rekor-cli && chmod +x ~/bin/rekor-cli
 export PATH="$HOME/bin:$PATH"
@@ -261,8 +269,10 @@ image::trusted-supply-chain/trusted-supply-chain-04-rekor-entry.png["The Rekor S
 
 Signing without enforcement is a policy on a wiki. Admission is what turns "we sign our images" into "this cluster will not run an unsigned one", and the transparency log is what turns a signature into a receipt an auditor can read without contacting you.
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-cicd
+REKOR=https://rekor-server-trusted-artifact-signer.{cluster_domain}
 rekor-cli loginfo --rekor_server "$REKOR" | grep 'Tree Size'
 ----
 
@@ -675,8 +685,10 @@ This is the heart of the trust module: *signing* proves the image is _yours_ —
 `cosign` is the tool that _checks_ what Chains _produced_.
 The Showroom terminal does not ship it — but *Red Hat Trusted Artifact Signer* runs a *client-download server*, so fetch `cosign` (and `rekor-cli`, for later) straight from the cluster:
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-cicd
+CLI=https://cli-server-trusted-artifact-signer.{cluster_domain}
 mkdir -p ~/bin
 curl -ksL $CLI/clients/linux/cosign-amd64.gz  | gunzip > ~/bin/cosign
 curl -ksL $CLI/clients/linux/rekor-cli-amd64.gz | gunzip > ~/bin/rekor-cli
@@ -757,6 +769,13 @@ Exercise 5 turns that check into a cluster rule.
 A signature says the image is intact and yours.
 An *attestation* says _how it was built_ — the builder, the build type, the build tool, the timestamps — as a signed *SLSA provenance* statement.
 Chains attached one to your image, stored in the registry beside it as a `.att` tag.
+Set this exercise's shortcuts first:
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-cicd
+IMG=$(oc get istag parasol-claims-trusted:latest -n $NS -o jsonpath='{.image.dockerImageReference}')
+----
 
 First see the artifacts Chains stored — each image plus two tags derived from its digest, in two repositories: the trusted copy, and your own seeded build:
 
@@ -853,8 +872,11 @@ The enterprise alternative is *keyless* signing: *Red Hat Trusted Artifact Signe
 You will sign your *SBOM* keylessly and then find its record in the log.
 First point cosign at the RHTAS trust root, and mint a short-lived *identity token* (a Kubernetes service-account token — the identity Fulcio issues a certificate for):
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-cicd
+REKOR=https://rekor-server-trusted-artifact-signer.{cluster_domain}
+TUF=https://tuf-trusted-artifact-signer.{cluster_domain}
 cosign initialize --mirror=$TUF --root=$TUF/root.json
 TOKEN=$(oc create token pipeline --audience trusted-artifact-signer -n $NS)
 ----
@@ -873,9 +895,9 @@ cosign gets a certificate from Fulcio for your identity, signs, and uploads the 
 [source,sh,role=execute]
 ----
 cd ~/parasol-claims
-cosign sign-blob -y --identity-token="$TOKEN" \
-  --bundle ~/sbom.bundle target/parasol-claims-sbom.json > /dev/null
-echo "signed; bundle written to ~/sbom.bundle"
+cosign sign-blob -y --identity-token="${TOKEN:?is empty - run the trust-root block above again}" \
+  --bundle ~/sbom.bundle target/parasol-claims-sbom.json > /dev/null \
+  && echo "signed; bundle written to ~/sbom.bundle"
 ----
 
 The signature is now in the transparency log.
@@ -956,8 +978,9 @@ You have read access to cluster signature policies:
 // Grounded 2026-11-12 as user11 on cluster-5vqxc (OCP 4.22.22): the install's policy, read with the
 // attendee identity (platform-observer grants get/list on clusterimagepolicies). Output trimmed to
 // the first two scopes and the key shortened; the real list names every attendee's repository (13 here).
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-cicd
 oc get clusterimagepolicy ogsr-signed-parasol-claims -o yaml | sed -n '/^spec:/,$p'
 ----
 
