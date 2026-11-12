@@ -11,6 +11,15 @@ include::partial$version-attributes.adoc[]
 // this repo's apps/parasol-claims; pod names, IP addresses, timestamps and claim numbers in the
 // expected-output blocks are from that run and will differ on yours.
 //
+// Re-proven 2026-11-12 on cluster-5vqxc (OCP 4.22.22), twice from a cold `adm reset`, as user7 in
+// the attendee's own terminal pod. That pass added the wait lines: every rollout block ends with
+// `until … wc -l … -eq 1` plus `sleep 10` (rollout status returns while the replaced pod is still
+// shutting down, and `oc logs deploy/…` then read the OLD pod — a startup count of 9 instead of 336;
+// and for ~5 s after that pod is gone the router still sends requests to its address — measured a
+// 5.9 s stall and a 20 s 503, and one lost record in exercise 3), and both scale-ups wait for three
+// ready endpoints plus `sleep 10` (the router reloads its backend list at most every 5 s; six POSTs
+// sent the second the rollout ended all hit one pod). Keep them.
+//
 // SCOPE: nothing on this page deploys a log store. Cluster log aggregation is concept.adoc's
 // business and is deliberately absent here (owner ruling — see the module spec).
 //
@@ -279,7 +288,6 @@ oc logs deploy/parasol-claims --tail=4
 ----
 NAME                             READY   STATUS    RESTARTS   AGE
 parasol-claims-6485b75f46-p9xqq   1/1     Running   0          3m
-
 2026-08-22 18:59:41,183 INFO  [com.parasol.claims.ClaimNumberSequence] (main) claim_number_seq ready (created at CLM-1031 if it was missing; an existing one is left where it is)
 2026-08-22 18:59:41,462 INFO  [io.quarkus] (main) parasol-claims 1.0.0 on JVM (powered by Quarkus 3.33.3.1) started in 10.4s. Listening on: http://0.0.0.0:8080
 2026-08-22 18:59:41,463 INFO  [io.quarkus] (main) Profile prod activated.
@@ -358,7 +366,6 @@ oc get pods -l app=parasol-claims
 deployment.apps/parasol-claims updated
 Waiting for deployment "parasol-claims" rollout to finish: 1 old replicas are pending termination...
 error: timed out waiting for the condition
-
 NAME                              READY   STATUS    RESTARTS      AGE
 parasol-claims-855cc98d4b-9x6hj   0/1     Error     3 (59s ago)   92s
 parasol-claims-d9bb4f78f-9jdx8    1/1     Running   0             4m5s
@@ -414,19 +421,39 @@ Now fix it and confirm the app is whole:
 ----
 oc set env deploy/parasol-claims QUARKUS_LOG_LEVEL-
 oc rollout status deploy/parasol-claims --timeout=120s
+until [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ]; do sleep 2; done
+sleep 10
 oc get pods -l app=parasol-claims
+----
+
+.Expected output (sample — your pod name and age differ)
+[source,texinfo]
+----
+deployment.apps/parasol-claims updated
+deployment "parasol-claims" successfully rolled out
+NAME                              READY   STATUS    RESTARTS   AGE
+parasol-claims-d9bb4f78f-9jdx8    1/1     Running   0          4m29s
 ----
 
 The rollout returns almost instantly, because removing the variable restores the *previous* pod template — the healthy pod that never went away is already correct.
 
+The two lines after `rollout status` matter more than they look.
+`rollout status` returns the moment the pods it wants are Ready, *not* when the pods it replaced are gone: the crashed pod lingers for a few seconds, and while it does, `oc get pods` still lists it and `oc logs deploy/…` may read it instead of the one you meant.
+The `until` line waits until one pod is left.
+The `sleep 10` is for the router, which rewrites its list of backend pods at most every five seconds: a request sent the moment a replaced pod is gone can still be routed to its address, and it then hangs or fails with a `503` — measured on this workshop's cluster.
+Every rollout on this page ends with the same two lines, so the next read sees one pod, the new one, and the next request reaches it.
+
 === Three replicas, three log streams
 
-Scale up and send six claim submissions through the Route:
+Scale up, wait until the router can actually reach all three replicas, and send six claim submissions through the Route:
 
 [source,sh,role=execute]
 ----
 oc scale deploy/parasol-claims --replicas=3
 oc rollout status deploy/parasol-claims --timeout=300s
+until [ "$(oc get endpointslices -l kubernetes.io/service-name=parasol-claims \
+    -o jsonpath='{.items[*].endpoints[?(@.conditions.ready==true)].addresses[0]}' | wc -w)" -eq 3 ]; do sleep 2; done
+sleep 10
 CLAIMS=$(oc get route parasol-claims -o jsonpath='{.spec.host}')
 for i in 1 2 3 4 5 6; do
   curl -s -o /dev/null -X POST -H 'Content-Type: application/json' \
@@ -451,6 +478,10 @@ oc logs -l app=parasol-claims --prefix --tail=-1 | grep 'claim CLM'
 [pod/parasol-claims-9fd87644f-bqbm9/parasol-claims] ... claim CLM-1036 created type=home amount=96.00
 ----
 
+The two wait lines before the traffic are the same router lesson from the other side: *Ready is not the same as routed*.
+A pod joins the Service's endpoints the moment it is Ready, but the router builds its own backend list from those endpoints and rewrites it at most every five seconds.
+Send traffic in the same second the rollout finishes and every request can land on the one pod the router already knew — measured on this workshop's cluster, all six did.
+
 [NOTE]
 .Three things in that output are worth a second look
 ====
@@ -467,23 +498,26 @@ Dana Whitfield's submission is in there somewhere.
 Nothing in these lines connects them: not to her, not to each other.
 Every exercise from here on is about closing that gap.
 
-Scale back to one replica so the next three exercises are quick; you will come back to three once you can tell them apart:
-
-[source,sh,role=execute]
-----
-oc scale deploy/parasol-claims --replicas=1
-oc rollout status deploy/parasol-claims --timeout=300s
-----
-
 [.checkpoint]
 ****
-✔ *Verify:* `oc logs -l app=parasol-claims --prefix --tail=-1 | grep -c 'claim CLM'` returns *6 or more*, you saw more than one pod name in the prefixes, and you read `Unknown level "VERBOSE"` out of a crashed container's log.
+✔ *Verify:* `oc logs -l app=parasol-claims --prefix --tail=-1 | grep 'claim CLM' | cut -d' ' -f1 | sort | uniq -c` lists *more than one* pod, with counts that add up to *6 or more*, and you read `Unknown level "VERBOSE"` out of a crashed container's log.
 ****
 
 == 2. Make it structured — a log line is data, not a sentence
 ⏱ *~7 min* · free text → JSON, and the first question free text cannot answer
 
-Try to make a program read the log you have:
+Exercise 1 left three replicas running.
+Scale back to one, so the next three exercises read a single log stream; you will come back to three in exercise 5, once you can tell them apart:
+
+[source,sh,role=execute]
+----
+oc scale deploy/parasol-claims --replicas=1
+oc rollout status deploy/parasol-claims --timeout=300s
+until [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ]; do sleep 2; done
+sleep 10
+----
+
+Now try to make a program read the log you have:
 
 [source,sh,role=execute]
 ----
@@ -523,7 +557,7 @@ Console::
 . Go to *Workloads* → *Deployments* → `parasol-claims` → the *Environment* tab.
 . Under *Single values (env)*, click *Add value*.
 . Name `QUARKUS_LOG_CONSOLE_JSON_ENABLED`, value `true`.
-. Click *Save* and wait for the new pod to become ready.
+. Click *Save*, then wait until *Workloads* → *Pods* lists a single `parasol-claims` pod and it is ready.
 --
 CLI::
 +
@@ -532,6 +566,8 @@ CLI::
 ----
 oc set env deploy/parasol-claims QUARKUS_LOG_CONSOLE_JSON_ENABLED=true
 oc rollout status deploy/parasol-claims --timeout=300s
+until [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ]; do sleep 2; done
+sleep 10
 ----
 --
 ====
@@ -671,7 +707,7 @@ Console::
 |===
 +
 . *Create*.
-. Then go to *Workloads* → *Deployments* → `parasol-claims` → *Environment*, remove the single `QUARKUS_LOG_CONSOLE_JSON_ENABLED` value you added in exercise 2, and under *All values from existing ConfigMaps or Secrets (envFrom)* click *Add from ConfigMap or Secret* and pick `claims-logging`. *Save*.
+. Then go to *Workloads* → *Deployments* → `parasol-claims` → *Environment*, remove the single `QUARKUS_LOG_CONSOLE_JSON_ENABLED` value you added in exercise 2, and under *All values from existing ConfigMaps or Secrets (envFrom)* click *Add from ConfigMap or Secret* and pick `claims-logging`. *Save*, then wait until *Workloads* → *Pods* lists a single `parasol-claims` pod and it is ready.
 --
 CLI::
 +
@@ -684,6 +720,8 @@ oc create configmap claims-logging \
 oc set env deploy/parasol-claims QUARKUS_LOG_CONSOLE_JSON_ENABLED-
 oc set env deploy/parasol-claims --from=configmap/claims-logging
 oc rollout status deploy/parasol-claims --timeout=300s
+until [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ]; do sleep 2; done
+sleep 10
 oc set env deploy/parasol-claims --list | tail -2
 ----
 --
@@ -724,6 +762,8 @@ Changing the ConfigMap does not reach a process that is already running; "no reb
 ----
 oc rollout restart deploy/parasol-claims
 oc rollout status deploy/parasol-claims --timeout=300s
+until [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ]; do sleep 2; done
+sleep 10
 for i in 1 2 3; do curl -s -o /dev/null "http://$CLAIMS/api/claims"; done
 curl -s -o /dev/null "http://$CLAIMS/api/claims/CLM-1005"
 oc logs deploy/parasol-claims | jq -r 'select(.loggerName | startswith("com.parasol")) | [.level,.message] | @tsv'
@@ -766,6 +806,8 @@ Then turn the root level up and count again — once after the restart, before a
 ----
 oc set env deploy/parasol-claims QUARKUS_LOG_LEVEL=DEBUG
 oc rollout status deploy/parasol-claims --timeout=300s
+until [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ]; do sleep 2; done
+sleep 10
 echo "records written just to start up:"
 oc logs deploy/parasol-claims | wc -l
 for i in 1 2 3; do curl -s -o /dev/null "http://$CLAIMS/api/claims"; done
@@ -777,20 +819,22 @@ oc logs deploy/parasol-claims | jq -r '.loggerName' | sort | uniq -c | sort -rn 
 
 // Verified live on cluster-m24jn, 2026-08-22, on two separate runs: startup was 336 records both
 // times; the same four requests then took it to 446 on one run and 427 on the other (110 and 91
-// request-attributable records). The prose therefore quotes a RANGE — do not replace it with one
-// number, and do not tighten the checkpoint to a count.
+// request-attributable records). Re-measured on cluster-5vqxc, 2026-11-12, twice: 355 then 446 both
+// times (+91) — the startup count is higher than 336 because the block's `sleep 10` lets ten seconds
+// of readiness probes land in the root-DEBUG log before the count. The prose therefore quotes a
+// RANGE — do not replace it with one number, and do not tighten the checkpoint to a count.
 .Expected output (sample — the ratio is the point, not the exact numbers)
 [source,texinfo]
 ----
 records written just to start up:
-336
+355
 records after the same four requests:
-427
-  98 io.quarkus.micrometer.runtime.binder.vertx.VertxHttpServerMetrics
-  66 org.hibernate.SQL
-  39 io.quarkus.arc.runtime.BeanContainerImpl
-  30 jakarta.json.spi.JsonProvider
-  18 io.smallrye.config
+446
+     98 io.quarkus.micrometer.runtime.binder.vertx.VertxHttpServerMetrics
+     66 org.hibernate.SQL
+     39 io.quarkus.arc.runtime.BeanContainerImpl
+     30 jakarta.json.spi.JsonProvider
+     18 io.smallrye.config
 ----
 
 Eight records became several hundred, and the same four requests cost *ninety to a hundred and ten* records instead of four — measured twice, minutes apart, on the same service.
@@ -814,17 +858,32 @@ Root DEBUG put your database queries in the log.
 On a different service that is where bound parameters, request headers and configuration values land too — none of which anyone decided to retain.
 *Turning up the root level is a disclosure change as much as a volume change*, which is the bridge into the next exercise.
 
-Put it back:
+Put it back, and check with one lookup that only your own dial is still turned up:
 
 [source,sh,role=execute]
 ----
 oc set env deploy/parasol-claims QUARKUS_LOG_LEVEL-
 oc rollout status deploy/parasol-claims --timeout=300s
+until [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ]; do sleep 2; done
+sleep 10
+curl -s -o /dev/null "http://$CLAIMS/api/claims/CLM-1005"
+oc logs deploy/parasol-claims | jq -r '[.level, .loggerName] | @tsv' | sort | uniq -c
 ----
+
+.Expected output (sample)
+[source,texinfo]
+----
+      1 DEBUG	com.parasol.claims.ClaimResource
+      1 INFO	com.parasol.claims.ClaimNumberSequence
+      3 INFO	io.quarkus
+----
+
+Five records: four from the restart, and one `DEBUG` line from your own code for the one lookup.
+The category dial is still up; the root dial is back where it started.
 
 [.checkpoint]
 ****
-✔ *Verify:* `oc get cm claims-logging -o jsonpath='{.data.QUARKUS_LOG_CATEGORY__COM_PARASOL__LEVEL}{"\n"}'` prints `DEBUG`, `oc set env deploy/parasol-claims --list | grep -c claims-logging` returns `2` if you used the CLI (one line per key) or `1` if you used the console (one `envFrom` source line) — either is correct, and your own `com.parasol` DEBUG records are in the log while the root level is back to its default.
+✔ *Verify:* `oc get cm claims-logging -o jsonpath='{.data.QUARKUS_LOG_CATEGORY__COM_PARASOL__LEVEL}{"\n"}'` prints `DEBUG`, `oc set env deploy/parasol-claims --list | grep -c claims-logging` returns `2` if you used the CLI (one line per key) or `1` if you used the console (one `envFrom` source line) — either is correct, and the last block showed a `DEBUG` record from `com.parasol.claims.ClaimResource` among a handful of records, so your category is still turned up while the root level is back to its default.
 ****
 
 == 4. Never log a secret — and never call truncation a fix
@@ -839,6 +898,8 @@ Turn on the HTTP access log, which is a completely reasonable thing to do while 
 ----
 oc set env deploy/parasol-claims QUARKUS_HTTP_ACCESS_LOG_ENABLED=true
 oc rollout status deploy/parasol-claims --timeout=300s
+until [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ]; do sleep 2; done
+sleep 10
 ----
 
 Now make the call the broker portal makes:
@@ -944,6 +1005,8 @@ Turn the access log back off — you switched it on to investigate something, an
 ----
 oc set env deploy/parasol-claims QUARKUS_HTTP_ACCESS_LOG_ENABLED-
 oc rollout status deploy/parasol-claims --timeout=300s
+until [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ]; do sleep 2; done
+sleep 10
 ----
 
 [.checkpoint]
@@ -954,12 +1017,15 @@ oc rollout status deploy/parasol-claims --timeout=300s
 == 5. Follow one request across three replicas
 ⏱ *~8 min* · the answer to the question exercise 1 left hanging
 
-Go back to three replicas:
+Go back to three replicas, and wait — as in exercise 1 — until the router can reach all of them:
 
 [source,sh,role=execute]
 ----
 oc scale deploy/parasol-claims --replicas=3
 oc rollout status deploy/parasol-claims --timeout=300s
+until [ "$(oc get endpointslices -l kubernetes.io/service-name=parasol-claims \
+    -o jsonpath='{.items[*].endpoints[?(@.conditions.ready==true)].addresses[0]}' | wc -w)" -eq 3 ]; do sleep 2; done
+sleep 10
 oc get pods -l app=parasol-claims -o name
 ----
 
@@ -1052,7 +1118,7 @@ With a *label selector*, `oc logs` defaults to the last *10 lines per pod*; with
 A correlation query that quietly reads 10 lines per pod will quietly find nothing.
 
 The second is that the id came from the *caller*, and a caller can put anything in a header — including a newline, which forges a second, entirely fictional log record.
-The claims service neutralizes it before it reaches the logging context; you can read the helper in `apps/parasol-claims/src/main/java/com/parasol/claims/LogSafe.java` and the test that pins it in `RequestIdFilterTest`.
+The claims service neutralizes it before it reaches the logging context; the terminal beside these instructions has the workshop repository at `/showroom/repo`, so you can read the helper in `/showroom/repo/apps/parasol-claims/src/main/java/com/parasol/claims/LogSafe.java` and the test that pins it in `/showroom/repo/apps/parasol-claims/src/test/java/com/parasol/claims/RequestIdFilterTest.java`.
 The rule is the same one as exercise 4: transform *the thing*, at the boundary, before it can do anything.
 
 [.checkpoint]

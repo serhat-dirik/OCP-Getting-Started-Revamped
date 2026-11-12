@@ -31,11 +31,11 @@ Add ~10–12 min of in-room concept discussion up front.
 |===
 | # | Exercise group | Attendee time | Measured core
 
-| 1 | Read what you have; break it; three replicas | ~7 min | pod boot *~10–14 s*; the invalid-level rollout *times out at 90 s* with the new pod at 3 restarts by ~55 s; the fix returns *instantly*; scale 1→3 in *~25 s*
-| 2 | Free text → structured JSON | ~7 min | `oc set env` + rollout *~26–32 s*; every query after that is instant
-| 3 | The level dial, and what the blunt version costs | ~9 min | three rollouts at *~30 s* each; 336 records at startup on root DEBUG, *+91 to +110* for four requests (measured twice)
-| 4 | The credential in the access log | ~8 min | two rollouts at *~32 s* each; the leak is visible on the *first* request
-| 5 | One request across three replicas | ~8 min | scale 1→3 *~25 s*; the correlation query is instant
+| 1 | Read what you have; break it; three replicas | ~7 min | pod boot *~10–14 s*; the invalid-level rollout *times out at 90 s* with the new pod at 3 restarts by ~60 s; the fix plus its wait lines *~13 s*; scale 1→3 with the routing wait and the six POSTs *~25–27 s*
+| 2 | Free text → structured JSON | ~7 min | scale 3→1 *~13 s*; `oc set env` + rollout + wait lines *~25 s*; every query after that is instant
+| 3 | The level dial, and what the blunt version costs | ~9 min | four rollouts at *~26–30 s* each, wait lines included; 336–355 records at startup on root DEBUG, *+91 to +110* for four requests (measured on two clusters)
+| 4 | The credential in the access log | ~8 min | two rollouts at *~26–30 s* each, wait lines included; the leak is visible on the *first* request
+| 5 | One request across three replicas | ~8 min | scale 1→3 with the routing wait *~24 s*; the correlation query is instant
 | 6 | Take-home: logs that outlive the pod | ~3 min | reading only — no checkpoint, nothing to run
 | C | Challenge (optional) | ~5 min | one rollout per attempt
 |===
@@ -53,6 +53,10 @@ The *Measured core* column is the command time of each group; *Attendee time* ad
 * *Exercise 5* took *60 s*, one scale-up plus queries.
 
 The whole *demo arc* was performed separately from the end state: 21 s of commands across five beats, which is what leaves room for the 16 minutes of talking.
+
+*Re-measured 2026-11-12 on cluster-5vqxc (OCP 4.22.22)*, after every rollout gained its wait lines: the whole lab, run twice from a cold `adm reset` as an attendee in that attendee's own terminal, took *383 s* and *407 s* of command time (exercise 1: 132/135 s, 2: 41/41 s, 3: 112/120 s, 4: 54/65 s, 5: 29/30 s), plus 10–11 s for `ws prep` and 5 s for `ws verify`.
+Each rollout block now takes 25–30 s instead of 15–20 s; the extra is the old pod draining and the 10 s router allowance, and it is what made every count on the page come out the same on both runs.
+The cold `adm reset` itself took 163–214 s.
 ====
 
 == Pre-flight checklist
@@ -86,6 +90,7 @@ If the ImageStream tag is missing, nothing in the lab runs — rebuild it (see t
 ----
 oc -n user1-dev set env deploy/parasol-claims QUARKUS_LOG_CONSOLE_JSON_ENABLED=true
 oc -n user1-dev rollout status deploy/parasol-claims --timeout=300s
+until [ "$(oc -n user1-dev get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ]; do sleep 2; done
 oc -n user1-dev logs deploy/parasol-claims --tail=1 | jq -r '.loggerName'
 oc -n user1-dev set env deploy/parasol-claims QUARKUS_LOG_CONSOLE_JSON_ENABLED-
 oc -n user1-dev rollout status deploy/parasol-claims --timeout=300s
@@ -93,6 +98,7 @@ oc -n user1-dev rollout status deploy/parasol-claims --timeout=300s
 +
 Expect a logger name such as `io.quarkus`.
 A `jq: parse error` here means the image predates this module and *exercise 2 will fail in the room* — rebuild before you teach, not during.
+The `until` line is not optional: without it, `oc logs deploy/…` can read the old, still-terminating free-text pod and give you that parse error for an image that is fine.
 
 . *The correlation plumbing is in the image* — one request, one header, one answer.
 +
@@ -158,6 +164,7 @@ The mechanism in this lab is also what you use when there is no tracing at all, 
 
 * *If the image was not rebuilt, exercises 2 and 5 fail silently-ish.* Exercise 2 shows a `jq` parse error where the lab promises an object; exercise 5's query returns nothing. Both look like attendee error and are not. Pre-flight checks 2–4 exist for exactly this; run them.
 * *Scaling the claims service re-seeds its database.* Every new replica runs `drop-and-create` against the same ephemeral PostgreSQL at boot, so claim numbers repeat across pods and the list count jumps. It is documented in the lab and in troubleshooting, and it is harmless here (nothing in this module asserts a claim number), but somebody will notice and ask.
+* *Do not let anyone trim the wait lines.* Every rollout block ends with an `until … wc -l … -eq 1` line plus `sleep 10`, and both scale-ups wait for three ready endpoints plus `sleep 10`. Measured on cluster-5vqxc on 2026-11-12: `rollout status` returns while the replaced pod is still shutting down, and `oc logs deploy/…` then read that old pod (`Found 2 pods, using pod/<old>`), which turned exercise 3's 336-record startup count into 9; and six POSTs sent the second the scale-up finished all landed on the one pod the router already knew, because the router rewrites its backend list at most every five seconds. The same lag works the other way: for a few seconds after a replaced pod is gone the router still sends requests to its address — one stalled 5.9 s, one returned `503` after 20 s, and exercise 3 lost a record. All three looked like attendee error and none was.
 * *Exercise 3 is the rollout-heaviest group.* Three restarts, ~30 s each, and attendees will be tempted to skip the "nothing happened yet" step. Do not let them: that step *is* the lesson about env-from-ConfigMap.
 * *The `--tail=-1` flag is not decoration.* With a label selector, `oc logs` shows the last *10 lines per pod*. An attendee who drops it from the exercise-5 query gets an empty result and concludes the correlation id does not work. It is the first thing to check when someone says "my query returns nothing".
 * *`oc logs deploy/parasol-claims` with three replicas reads ONE pod* and says so on stderr (`Found 3 pods, using pod/…`). Where a step means "all replicas", the lab uses `-l app=parasol-claims`; if someone substitutes the deployment form they will get a confusing partial answer.

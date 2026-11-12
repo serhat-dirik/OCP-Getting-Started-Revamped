@@ -74,6 +74,8 @@ Fix:: Restart the workload, then re-send traffic:
 ----
 oc rollout restart deploy/parasol-claims
 oc rollout status deploy/parasol-claims --timeout=300s
+until [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ]; do sleep 2; done
+sleep 10
 ----
 +
 (Delivered as a *mounted file* instead, the content does update in place — one of the honest reasons to prefer a file, covered in _Config, Secrets & Multi-Environment_, a separate module.)
@@ -130,6 +132,43 @@ Fix:: Use the label selector where you mean all replicas — and remember `--tai
 oc logs -l app=parasol-claims --tail=-1 | jq -r '[.hostName, .message] | @tsv'
 ----
 
+== Right after a rollout, `oc logs deploy/parasol-claims` says `Found 2 pods` and the numbers are wrong
+
+Symptom:: A read straight after `oc rollout status` prints `Found 2 pods, using pod/…` and returns records that do not match the step — a startup count of 9 where the lab shows hundreds, a free-text line where JSON was just switched on, or no `DEBUG` records after the level went up.
+Cause:: `oc rollout status` returns when the *new* pods are Ready, not when the *replaced* pods are gone. The old pod spends a few more seconds shutting down, and while it exists the deployment form of `oc logs` can pick it — it prefers the pod that has been ready longest, which is the old one. Measured on cluster-5vqxc on 2026-11-12.
+Fix:: Wait until only the new pod is left, then read again. Every rollout block in the lab already ends with this line (and a `sleep 10` for the router, see the next entry):
++
+[source,sh,role=execute]
+----
+until [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ]; do sleep 2; done
+oc logs deploy/parasol-claims --tail=1
+----
+
+== A request right after a rollout hangs for seconds, or returns `503`
+
+Symptom:: The first `curl` after a rollout takes five to twenty seconds, or comes back `503`, and the record you expected from it is in nobody's log — exercise 3's restart block, for example, shows two `claim list served` lines instead of three.
+Cause:: The router still has the replaced pod's address. It rebuilds its backend list from the Service's endpoints at most every five seconds, so for a few seconds after the old pod is gone a request can be sent to an address nothing answers on. Measured on cluster-5vqxc on 2026-11-12: one request stalled 5.9 s before the router retried elsewhere, another failed with `503` after 20 s.
+Fix:: Give the router ten seconds after the old pod is gone, then send the traffic again. Every rollout block in the lab ends with these two lines for that reason:
++
+[source,sh,role=execute]
+----
+until [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ]; do sleep 2; done
+sleep 10
+----
+
+== All six claim submissions landed on one pod
+
+Symptom:: In exercise 1 (or exercise 5), traffic sent right after scaling to three replicas shows up under a single pod name.
+Cause:: Ready is not the same as routed. A Ready pod joins the Service's endpoints at once, but the router rebuilds its own backend list from those endpoints at most every five seconds. Traffic sent in the same second as the end of the rollout goes to the pods the router already knew — measured on cluster-5vqxc on 2026-11-12, all six POSTs hit the original pod.
+Fix:: Wait for three ready endpoints, give the router ten seconds, and send the traffic again. The lab's scale-up blocks do exactly this; if you typed the commands yourself, add the two wait lines:
++
+[source,sh,role=execute]
+----
+until [ "$(oc get endpointslices -l kubernetes.io/service-name=parasol-claims \
+    -o jsonpath='{.items[*].endpoints[?(@.conditions.ready==true)].addresses[0]}' | wc -w)" -eq 3 ]; do sleep 2; done
+sleep 10
+----
+
 == Lines from different pods appear out of chronological order
 
 Symptom:: In `oc logs -l …` output, a line with a later timestamp appears above one with an earlier timestamp.
@@ -145,6 +184,8 @@ oc logs -l app=parasol-claims --tail=-1 | jq -r '[.timestamp, .hostName, .messag
 
 Symptom:: After scaling to three replicas, two different pods report creating `CLM-1031`, and `claim list served: N of N` reports a smaller `N` than a moment ago.
 Cause:: Nothing to do with logging. Every replica runs Hibernate's `drop-and-create` schema import against the *same* ephemeral PostgreSQL at boot, so a new pod reloads the 30 seed claims and resets the number sequence underneath the pods that were already running. It is the shared throwaway database being shared, by design (see `apps/parasol-claims/src/main/resources/application.properties`).
++
+The same race is noisy in the log, too. A replica that boots while another is re-creating the schema logs a burst of `WARN` records from `org.hibernate.tool.schema.internal.ExceptionHandlerLoggedImpl` — 40 of them on one pod in the run where they were counted, on cluster-5vqxc on 2026-11-12. That is why exercise 5's `--tail=-1` count came out at 81–91 in three of four runs, instead of the 41 on the lab page.
 Fix:: None needed — no step in this module asserts a claim number, and every log exercise works regardless. If you want stable numbering across a scale-up, that is what persistent storage is for (_Storage & Stateful Apps_, a separate module).
 
 == The access log is full of `/q/health/ready`
@@ -156,7 +197,7 @@ Fix:: It is one of the two reasons the lab turns the access log back off at the 
 == Root DEBUG made the pod slow and the log enormous
 
 Symptom:: After setting `QUARKUS_LOG_LEVEL=DEBUG`, the pod takes noticeably longer to become ready and `oc logs | wc -l` is in the hundreds before any traffic.
-Cause:: That is the measurement exercise 3 asks for: 336 records at startup on this cluster, against 8 with only the application's own category turned up. Every one of them is formatted, written, and (in a real cluster) collected and stored.
+Cause:: That is the measurement exercise 3 asks for: 336 to 355 records at startup on the clusters this was measured on, against 8 with only the application's own category turned up. Every one of them is formatted, written, and (in a real cluster) collected and stored.
 Fix:: Remove the root override and use the category dial instead — that is the exercise's conclusion, not a workaround:
 +
 [source,sh,role=execute]
@@ -184,4 +225,4 @@ On a ConfigMap that already exists, `oc apply` warns that the object is missing 
 
 '''
 
-_Last verified on cluster-m24jn (OCP 4.22.8, Quarkus 3.33.3.1) on 2026-08-22, by performing every lab exercise in order from a pristine entry state and then performing the demo arc from the end state._
+_Last verified on cluster-m24jn (OCP 4.22.8, Quarkus 3.33.3.1) on 2026-08-22, by performing every lab exercise in order from a pristine entry state and then performing the demo arc from the end state. The lab was re-performed twice from a cold start on cluster-5vqxc (OCP 4.22.22) on 2026-11-12, as an attendee in that attendee's own terminal._
