@@ -20,6 +20,10 @@
   `ws reset` (PM decision 2026-07-09). Shape copied from the live openshift-gitops CR: Dex +
   openShiftOAuth (sso.keycloak is Removed in the CRD), edge route, annotation tracking.
 */ -}}
+{{- /* One literal for the Route host: server.host, the dex redirectURI and the OAuthClient all use it. */ -}}
+{{- $argoHost := printf "student-gitops-server-student-gitops.%s" .Values.clusterDomain }}
+{{- $dexClientId := "ogsr-student-gitops-dex" }}
+{{- $dexSecretName := "student-gitops-dex-oauth-client" }}
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -47,11 +51,35 @@ metadata:
     workshop.redhat.com/layer: workshop-config
     {{- include "workshop-config.ownerLabels" . | nindent 4 }}
 spec:
-  # OpenShift OAuth login through Dex — copied verbatim from the live openshift-gitops instance.
+  # OpenShift OAuth login through Dex.
   sso:
     provider: dex
     dex:
+      {{- if .Values.clusterDomain }}
+      # WHY NOT openShiftOAuth: true. That signs in through the dex ServiceAccount as OAuth client, and
+      # SA clients follow the cluster's grantConfig.serviceAccountMethod (prompt) — the "Authorize
+      # Access" page. The cockpit embeds this UI in an iframe and oauth-openshift cannot render in a
+      # frame, so an attendee's first visit was a blank tab. This is the operator's own generated
+      # connector (argocd-operator getOpenShiftDexConfig, read off argocd-cm on GitOps 1.22.3) with ONE
+      # change: a real OAuthClient with grantMethod: auto (created by the hook Job below). Same
+      # connector type → same preferred_username/groups claims → the RBAC policy below is unchanged.
+      config: |
+        connectors:
+          - type: openshift
+            id: openshift
+            name: OpenShift
+            config:
+              issuer: https://kubernetes.default.svc
+              clientID: {{ $dexClientId }}
+              clientSecret: ${{ $dexSecretName }}:clientSecret
+              redirectURI: https://{{ $argoHost }}/api/dex/callback
+              insecureCA: true
+              groups: []
+      {{- else }}
+      # No clusterDomain (local render / BYO): the Route host is operator-derived and unknown here, so
+      # keep the operator's SA-client connector (shows the approval page once per attendee).
       openShiftOAuth: true
+      {{- end }}
       resources:
         requests:
           cpu: 250m
@@ -137,7 +165,7 @@ spec:
     # become student-gitops-server-ogsr-student-gitops.<domain>. Omitted when clusterDomain is
     # empty (local `helm template` / BYO cluster) so the operator just defaults the host there.
     {{- if .Values.clusterDomain }}
-    host: student-gitops-server-student-gitops.{{ .Values.clusterDomain }}
+    host: {{ $argoHost }}
     {{- end }}
     route:
       enabled: true
@@ -193,3 +221,209 @@ spec:
       limits:
         cpu: 500m
         memory: 256Mi
+{{- if .Values.clusterDomain }}
+---
+# ── DEX OAUTH CLIENT BOOTSTRAP (SA + RBAC + Sync hook) ───────────────────────────────────────────
+# The OAuthClient the dex connector above signs in with: grantMethod auto, so no "Authorize Access"
+# page (frames cannot show it). A hook, not a declared object, for the reason showroom-shared.yaml's
+# own client bootstrap gives: the client needs a secret, a secret in the chart is a secret in git, and
+# randAlphaNum would change on every Argo render. So it is minted in-cluster ONCE; the Secret is the
+# source of truth and the OAuthClient converges to it on every sync. Owner-labelled, so
+# bootstrap/ogsr-uninstall.sh's oauthclient sweep removes it.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: student-gitops-dex-oauth-bootstrap
+  namespace: {{ .Values.studentArgoNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+---
+# why: converge exactly ONE cluster-scoped OAuthClient, by name (create cannot be name-scoped).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ogsr-student-gitops-dex-oauth-bootstrap
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+rules:
+  - apiGroups: ["oauth.openshift.io"]
+    resources: ["oauthclients"]
+    verbs: ["get", "patch"]
+    resourceNames: [{{ $dexClientId | quote }}]
+  - apiGroups: ["oauth.openshift.io"]
+    resources: ["oauthclients"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ogsr-student-gitops-dex-oauth-bootstrap
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ogsr-student-gitops-dex-oauth-bootstrap
+subjects:
+  - kind: ServiceAccount
+    name: student-gitops-dex-oauth-bootstrap
+    namespace: {{ .Values.studentArgoNamespace }}
+---
+# why: read/create the ONE Secret holding the client secret; no list, no delete (cannot rotate it).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: student-gitops-dex-oauth-bootstrap
+  namespace: {{ .Values.studentArgoNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames: [{{ $dexSecretName | quote }}]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: student-gitops-dex-oauth-bootstrap
+  namespace: {{ .Values.studentArgoNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: student-gitops-dex-oauth-bootstrap
+subjects:
+  - kind: ServiceAccount
+    name: student-gitops-dex-oauth-bootstrap
+    namespace: {{ .Values.studentArgoNamespace }}
+---
+# Sync hook, wave 1: after the wave-0 namespace + RBAC + ArgoCD CR. If dex starts first it holds an
+# unresolved $secret reference for a few seconds; a new part-of=argocd Secret makes argocd-dex re-render
+# its config and restart dex (probed live 2026-11-12: "Notifying 1 settings subscribers" in the dex
+# log seconds after one appeared). BeforeHookCreation → re-converges every sync.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: student-gitops-dex-oauth-bootstrap
+  namespace: {{ .Values.studentArgoNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app: student-gitops-dex-oauth-bootstrap
+    spec:
+      serviceAccountName: student-gitops-dex-oauth-bootstrap
+      restartPolicy: Never
+      containers:
+        - name: bootstrap
+          image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+          # `oc` OOMs at 256Mi (repo-wide hard-won fact), hence the 512Mi limit.
+          resources:
+            requests: {cpu: 50m, memory: 256Mi}
+            limits: {cpu: 250m, memory: 512Mi}
+          env:
+            - name: NS
+              value: {{ .Values.studentArgoNamespace | quote }}
+            - name: SECRET_NAME
+              value: {{ $dexSecretName | quote }}
+            - name: CLIENT_ID
+              value: {{ $dexClientId | quote }}
+            - name: REDIRECT_URI
+              value: "https://{{ $argoHost }}/api/dex/callback"
+          volumeMounts:
+            # Memory-backed: the plaintext secret never reaches a disk.
+            - name: scratch
+              mountPath: /scratch
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              umask 077
+              T="$(mktemp -d /scratch/dex.XXXXXXXX)"
+              trap 'rm -rf "$T"' EXIT
+              # NOTHING here prints the client secret: it lives in $T files and the two API objects.
+              # The Secret is minted only on a PROVEN NotFound (any other read error is fatal, never
+              # "absent"), and with `oc create`, so a lost race fails and retries instead of rotating.
+              if oc get secret "$SECRET_NAME" -n "$NS" -o jsonpath='{.data.clientSecret}' > "$T/b64" 2>"$T/err"; then
+                if [[ ! -s "$T/b64" ]]; then
+                  echo "❌ ${NS}/${SECRET_NAME} has no clientSecret key. fix: oc delete secret ${SECRET_NAME} -n ${NS}, then re-sync workshop-config" >&2
+                  exit 1
+                fi
+                base64 -d < "$T/b64" > "$T/cs"
+                echo "✅ reusing ${NS}/${SECRET_NAME}"
+              elif grep -qiE 'notfound|not found' "$T/err"; then
+                head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$T/cs"
+                {
+                  echo 'apiVersion: v1'
+                  echo 'kind: Secret'
+                  echo 'metadata:'
+                  echo "  name: ${SECRET_NAME}"
+                  echo "  namespace: ${NS}"
+                  echo '  labels:'
+                  # Argo CD resolves a $<secret>:<key> reference only from Secrets with this label.
+                  echo '    app.kubernetes.io/part-of: argocd'
+                  echo '    workshop.redhat.com/layer: workshop-config'
+                  echo '    workshop.redhat.com/owner: ogsr'
+                  echo 'type: Opaque'
+                  echo 'data:'
+                  echo "  clientSecret: $(base64 < "$T/cs" | tr -d '\n')"
+                } > "$T/secret.yaml"
+                oc create -f "$T/secret.yaml" >/dev/null
+                echo "✅ created ${NS}/${SECRET_NAME} (value not printed)"
+              else
+                echo "❌ cannot read ${NS}/${SECRET_NAME}: $(tr '\n' ' ' < "$T/err")" >&2
+                exit 1
+              fi
+              {
+                echo 'apiVersion: oauth.openshift.io/v1'
+                echo 'kind: OAuthClient'
+                echo 'metadata:'
+                echo "  name: ${CLIENT_ID}"
+                echo '  labels:'
+                echo '    workshop.redhat.com/layer: workshop-config'
+                echo '    workshop.redhat.com/owner: ogsr'
+                # auto = no "Authorize Access" page, which a frame (the cockpit tab) cannot show.
+                echo 'grantMethod: auto'
+                echo 'redirectURIs:'
+                echo "  - ${REDIRECT_URI}"
+                echo "secret: $(<"$T/cs")"
+              } > "$T/client.yaml"
+              # --patch-file / create -f, never -p or apply: the body carries the secret, and an argv or
+              # a last-applied annotation would be a second copy of it.
+              if oc get oauthclients.oauth.openshift.io "$CLIENT_ID" >/dev/null 2>&1; then
+                oc patch oauthclients.oauth.openshift.io "$CLIENT_ID" --type=merge --patch-file "$T/client.yaml" >/dev/null
+              else
+                oc create -f "$T/client.yaml" >/dev/null
+              fi
+              LIVE_H="$(oc get oauthclients.oauth.openshift.io "$CLIENT_ID" -o jsonpath='{.secret}' | sha256sum)"
+              FILE_H="$(sha256sum < "$T/cs")"
+              if [[ "$LIVE_H" != "$FILE_H" ]]; then
+                echo "❌ OAuthClient/${CLIENT_ID}.secret does not match ${NS}/${SECRET_NAME} — every Argo CD login would fail" >&2
+                exit 1
+              fi
+              echo "✅ OAuthClient/${CLIENT_ID}: grantMethod auto, redirect ${REDIRECT_URI}, secret matches (sha256, not printed)"
+      volumes:
+        - name: scratch
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Mi
+{{- end }}

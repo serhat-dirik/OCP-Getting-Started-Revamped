@@ -1,0 +1,112 @@
+{{- /*
+  devspaces-oauth-grant — keeps the Dev Spaces OAuthClient on grantMethod: auto.
+
+  WHY. The cockpit embeds Dev Spaces in an iframe. oauth-openshift is a passthrough route, so its
+  X-Frame-Options survives and NOTHING it renders shows inside a frame. With grantMethod: prompt an
+  attendee's first visit lands on the "Authorize Access" page → a blank tab. auto skips that page
+  (the `console` client already works this way).
+
+  WHY A WATCHER, NOT A ONE-SHOT PATCH. The Dev Spaces operator rebuilds the client with GrantMethod:
+  prompt hard-coded on EVERY CheCluster reconcile (che-operator identity-provider GetOAuthClientSpec),
+  and CheCluster has no field for it (only name, secret, token timeouts). Measured 2026-11-12 on
+  3.31.3: a live patch to auto held 4+ minutes untouched, then an operator restart put prompt back
+  within seconds. The operator does not WATCH OAuthClients, so re-patching does not start a fight loop:
+  each operator reconcile costs one revert and one re-patch, ~1s apart. The CheCluster belongs to
+  platform-portfolio (non-invasive), so the fix lives here. No Dev Spaces installed → the loop idles.
+  On uninstall this Deployment is pruned and the operator's next reconcile restores prompt.
+*/ -}}
+{{- $client := "openshift-devspaces-client" }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: devspaces-oauth-grant
+  namespace: {{ .Values.systemNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+---
+# why: read, watch and patch the ONE Dev Spaces OAuthClient by name — never list all (clients hold secrets).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ogsr-devspaces-oauth-grant
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+rules:
+  - apiGroups: ["oauth.openshift.io"]
+    resources: ["oauthclients"]
+    verbs: ["get", "watch", "patch"]
+    resourceNames: [{{ $client | quote }}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ogsr-devspaces-oauth-grant
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ogsr-devspaces-oauth-grant
+subjects:
+  - kind: ServiceAccount
+    name: devspaces-oauth-grant
+    namespace: {{ .Values.systemNamespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: devspaces-oauth-grant
+  namespace: {{ .Values.systemNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: devspaces-oauth-grant
+  template:
+    metadata:
+      labels:
+        app: devspaces-oauth-grant
+    spec:
+      serviceAccountName: devspaces-oauth-grant
+      containers:
+        - name: keeper
+          image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+          # `oc` OOMs at 256Mi (repo-wide hard-won fact); the request stays small, it only watches.
+          resources:
+            requests: {cpu: 5m, memory: 64Mi}
+            limits: {cpu: 100m, memory: 512Mi}
+          env:
+            - name: CLIENT
+              value: {{ $client | quote }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -uo pipefail
+              converge() {
+                local gm
+                gm="$(oc get oauthclients.oauth.openshift.io "$CLIENT" -o jsonpath='{.grantMethod}' 2>/dev/null)" || return 0
+                if [[ "$gm" != auto ]]; then
+                  if oc patch oauthclients.oauth.openshift.io "$CLIENT" --type=merge -p '{"grantMethod":"auto"}' >/dev/null; then
+                    echo "$(date -u +%FT%TZ) ${CLIENT}: grantMethod ${gm:-unset} -> auto"
+                  fi
+                fi
+                return 0
+              }
+              echo "keeping ${CLIENT} on grantMethod auto"
+              while true; do
+                converge
+                # One line per change to the client (the operator's revert included) → re-check.
+                # --request-timeout bounds the watch so a silently dead connection cannot park the
+                # loop; NotFound (no Dev Spaces) returns at once and the sleep paces the retry.
+                oc get oauthclients.oauth.openshift.io "$CLIENT" --watch-only -o name --request-timeout=300s 2>/dev/null \
+                  | while read -r _; do converge; done
+                sleep 10
+              done
