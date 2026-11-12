@@ -1,0 +1,54 @@
+# Scrapes every istio-proxy in {user}-mesh into user-workload monitoring, so Kiali's graph and the
+# tenancy metrics query see this attendee's traffic the moment they enroll a workload — no admin step.
+# OpenShift monitoring ignores namespaceSelector, so each mesh namespace needs its own copy of the
+# PodMonitor the platform puts in istio-system (platform-portfolio/components/kiali/monitoring.yaml —
+# keep the two specs identical). Inert until a pod carries the istio-proxy sidecar. The attendee never
+# edits it (their namespace admin role has no monitoring.coreos.com rights in {user}-mesh), and
+# ws reset leaves it in place — the entry state owns it at both entry and solve.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: istio-proxies-monitor
+  namespace: {{ .Values.user }}-mesh
+  labels:
+    workshop.redhat.com/module: service-mesh-advanced-gateways
+    workshop.redhat.com/owner: ogsr
+spec:
+  selector:
+    matchExpressions:
+      - key: istio-prometheus-ignore
+        operator: DoesNotExist
+  podMetricsEndpoints:
+    - path: /stats/prometheus
+      interval: 30s
+      relabelings:
+        - action: keep
+          sourceLabels: [__meta_kubernetes_pod_container_name]
+          regex: "istio-proxy"
+        - action: keep
+          sourceLabels: [__meta_kubernetes_pod_annotationpresent_prometheus_io_scrape]
+        - action: replace
+          regex: (\d+);(([A-Fa-f0-9]{1,4}::?){1,7}[A-Fa-f0-9]{1,4})
+          replacement: '[$2]:$1'
+          sourceLabels: [__meta_kubernetes_pod_annotation_prometheus_io_port, __meta_kubernetes_pod_ip]
+          targetLabel: __address__
+        - action: replace
+          regex: (\d+);((([0-9]+?)(\.|$)){4})
+          replacement: '$2:$1'
+          sourceLabels: [__meta_kubernetes_pod_annotation_prometheus_io_port, __meta_kubernetes_pod_ip]
+          targetLabel: __address__
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_name, __meta_kubernetes_pod_label_app]
+          separator: ";"
+          targetLabel: app
+          action: replace
+          regex: "(.+);.*|.*;(.+)"
+          replacement: "${1}${2}"
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_version, __meta_kubernetes_pod_label_version]
+          separator: ";"
+          targetLabel: version
+          action: replace
+          regex: "(.+);.*|.*;(.+)"
+          replacement: "${1}${2}"
+        - sourceLabels: [__meta_kubernetes_namespace]
+          action: replace
+          targetLabel: namespace

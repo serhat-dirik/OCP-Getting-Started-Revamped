@@ -1,0 +1,97 @@
+# Mesh metrics for Kiali, the OpenShift Service Mesh 3 way: user-workload monitoring (UWM) scrapes the
+# mesh and Kiali reads it back through the cluster's Thanos querier (kiali.yaml external_services).
+# Source: openshift-docs service-mesh-docs-3.5, ossm-config-openshift-monitoring-only.adoc +
+# ossm-config-openshift-monitoring-kiali.adoc. Prerequisite, NOT done here: UWM enabled
+# (cluster-monitoring-config enableUserWorkload: true) — the portfolio never edits cluster monitoring.
+# Each mesh namespace other than istio-system needs its OWN istio-proxies-monitor PodMonitor (OpenShift
+# monitoring ignores namespaceSelector); tenant namespaces get theirs from whoever creates them.
+---
+# Lets Kiali's own ServiceAccount query the Thanos querier (port 9091 needs cluster-monitoring-view).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kiali-cluster-monitoring-view
+  annotations:
+    # Wave -1 = prerequisite: in place before the Kiali CR (wave 2), removed after it.
+    argocd.argoproj.io/sync-wave: "-1"
+  labels:
+    portfolio.redhat.com/component: kiali
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-monitoring-view
+subjects:
+  - kind: ServiceAccount
+    name: kiali-service-account
+    namespace: istio-system
+---
+# Scrapes istiod (control-plane metrics: pushes, xDS, config errors) on its http-monitoring port.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: istiod-monitor
+  namespace: istio-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    portfolio.redhat.com/component: kiali
+spec:
+  targetLabels:
+    - app
+  selector:
+    matchLabels:
+      istio: pilot
+  endpoints:
+    - port: http-monitoring
+      interval: 30s
+---
+# Scrapes every istio-proxy (sidecar or gateway) in istio-system — the data-plane telemetry
+# (istio_requests_total …) Kiali's graph is drawn from. Copy this into each mesh namespace.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: istio-proxies-monitor
+  namespace: istio-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    portfolio.redhat.com/component: kiali
+spec:
+  selector:
+    matchExpressions:
+      - key: istio-prometheus-ignore
+        operator: DoesNotExist
+  podMetricsEndpoints:
+    - path: /stats/prometheus
+      interval: 30s
+      relabelings:
+        - action: keep
+          sourceLabels: [__meta_kubernetes_pod_container_name]
+          regex: "istio-proxy"
+        - action: keep
+          sourceLabels: [__meta_kubernetes_pod_annotationpresent_prometheus_io_scrape]
+        - action: replace
+          regex: (\d+);(([A-Fa-f0-9]{1,4}::?){1,7}[A-Fa-f0-9]{1,4})
+          replacement: '[$2]:$1'
+          sourceLabels: [__meta_kubernetes_pod_annotation_prometheus_io_port, __meta_kubernetes_pod_ip]
+          targetLabel: __address__
+        - action: replace
+          regex: (\d+);((([0-9]+?)(\.|$)){4})
+          replacement: '$2:$1'
+          sourceLabels: [__meta_kubernetes_pod_annotation_prometheus_io_port, __meta_kubernetes_pod_ip]
+          targetLabel: __address__
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_name, __meta_kubernetes_pod_label_app]
+          separator: ";"
+          targetLabel: app
+          action: replace
+          regex: "(.+);.*|.*;(.+)"
+          replacement: "${1}${2}"
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_version, __meta_kubernetes_pod_label_version]
+          separator: ";"
+          targetLabel: version
+          action: replace
+          regex: "(.+);.*|.*;(.+)"
+          replacement: "${1}${2}"
+        - sourceLabels: [__meta_kubernetes_namespace]
+          action: replace
+          targetLabel: namespace
