@@ -27,7 +27,7 @@ has its own timing table, pre-flight checklist and watchouts.
 
 1. **Install and verify:** [INSTALL.md › Install](INSTALL.md#2-install), steps 1–7.
 2. **Run the pre-flight checklist** on the instructor page of every module in your agenda.
-3. **Changed the AI model?** See [Appendix: module preparation](#appendix-module-preparation).
+3. **Changed the AI model?** Run `tools/ws/adm maas show`: every attendee must read `working`.
 
 ---
 
@@ -56,22 +56,8 @@ No login refresh is needed. Each attendee's terminal logs in from their own brow
 
 - The stated time is for a mixed room. Confident attendees finish in about half; newcomers need
   about a third longer.
-- A module that runs long is almost always waiting on a cold image, build or workspace. That is
-  what [module preparation](#appendix-module-preparation) prevents.
-
-**Instructor-only exercises.** Eight modules have one exercise you perform yourself, because it
-changes something cluster-wide. Attendees see the result.
-
-| Module | You demonstrate |
-|---|---|
-| Deployment Targets & Scheduling | Cluster-wide scheduling settings |
-| Networking for Dev & DevOps | Gateway API (the GatewayClass is cluster-wide) |
-| Multi-Tenancy & Workload Security | Cluster-wide platform settings and a scoped SCC exception, reverted afterwards |
-| Registry, Images & Catalog Governance | Import blocking, mirroring, sample curation |
-| Serverless Zero-to-Hero | Building a Function with `kn func` (the attendee terminal cannot build images) |
-| Resilience, Multi-Cluster & DR | Draining a node while a PodDisruptionBudget paces it |
-| Trusted Software Supply Chain | The cluster refusing an unsigned image (cluster-wide `ImagePolicy`) |
-| Securing Apps with Keycloak | The same Keycloak backing the OpenShift console login |
+- The install pre-pulls images and mirrors Maven, so first runs are fast. A module that still runs
+  long is usually waiting on a build; its instructor page says how long to expect.
 
 **Switching modules.** No module depends on another. But starting a module **discards** the state of
 a module that shares its namespaces:
@@ -122,13 +108,3 @@ oc get applications -n openshift-gitops
 - Contents of each attendee's Keycloak realm.
 - Attendee home directories in the cockpit.
 - Gitea tokens and SSH keys on the kept accounts.
-
----
-
-## Appendix: module preparation
-
-Only these modules need anything from you before the session.
-
-| Module | When | Do this |
-|---|---|---|
-| Ways to Build, Pipelines Fundamentals, Application Security Testing, Trusted Software Supply Chain, Dev Spaces | Until the install pre-warms them (in progress) | Run each once as a sample user the day before (`tools/ws/adm solve <slug> --user <u>`). The first build or workspace start is several minutes slower. |
