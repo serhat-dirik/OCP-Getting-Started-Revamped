@@ -317,7 +317,7 @@ else
     check "a Helm release is recorded in ${NS} (the chart was installed, not hand-created)" helm_release_present \
       || hint "not done yet — a Deployment on its own is not a release: the lesson is the chart. Scaffold and install it (exercises 1-3): helm create parasol-notifications, shape it, then helm install parasol-notifications ./parasol-notifications -n ${NS}. Already installed? Check it landed in the right namespace — helm list -n ${NS}"
     check "the Helm release carries more than one revision (exercise 4: upgrade -> broken probe -> rollback)" helm_release_upgraded \
-      || hint "not done yet — exercise 4 is the release-lifecycle beat, and revision 1 means only the install ran: helm upgrade parasol-notifications ./parasol-notifications -n ${NS} --set replicaCount=2, then the deliberate broken-probe upgrade, then helm rollback. Verify with: helm history parasol-notifications -n ${NS}"
+      || hint "not done yet — exercise 4 is the release-lifecycle beat, and revision 1 means only the install ran: helm upgrade parasol-notifications ./parasol-notifications -n ${NS} --set replicaCount=2, then the deliberate broken-probe upgrade, then helm rollback. Did the Challenge's reinstall from the registry? helm uninstall erased the history — finish that bullet with its helm upgrade (oci://… --version 0.2.0). Verify with: helm history parasol-notifications -n ${NS}"
   fi
 fi
 
