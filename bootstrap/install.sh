@@ -58,6 +58,9 @@ COMPONENTS_LIB="${SCRIPT_DIR}/../platform-portfolio/argocd-bootstrap/lib-compone
 [[ -f "$COMPONENTS_LIB" ]] || die "missing ${COMPONENTS_LIB} — the shared stack reader; a checkout without it cannot tell which apps a stack ships"
 # shellcheck disable=SC1090  # runtime-derived path; lib-components.sh is linted standalone
 . "$COMPONENTS_LIB"
+# The cockpit_tool_tabs `auto` rule, shared with `adm doctor` (tools/lint/tool-tabs-auto-guard.sh drives it).
+# shellcheck source=bootstrap/ogsr-tool-tabs-lib.sh
+. "${SCRIPT_DIR}/ogsr-tool-tabs-lib.sh"
 
 v() { yq "$1" "$VARS" 2>/dev/null || true; }
 
@@ -101,6 +104,9 @@ export OGSR_ADOPTED_ARGOCD_MEMORY="${OGSR_ADOPTED_ARGOCD_MEMORY:-apply}"
 # Console plugins default ON (owner 2026-07-19: mostly console links). Explicit `false` opts out; the
 # workshop-config hook stays append-if-absent and skips any name without a matching ConsolePlugin CR.
 CONSOLE_PLUGINS="$(v '.console_plugins')"; [[ "$CONSOLE_PLUGINS" == "false" ]] || CONSOLE_PLUGINS="true"
+# Cockpit tool tabs: auto (default) | embedded | external. auto is resolved just before step 5.
+COCKPIT_TOOL_TABS="$(v '.cockpit_tool_tabs')"; [[ -n "$COCKPIT_TOOL_TABS" && "$COCKPIT_TOOL_TABS" != "null" ]] || COCKPIT_TOOL_TABS="auto"
+case "$COCKPIT_TOOL_TABS" in auto|embedded|external) ;; *) die "cockpit_tool_tabs: '${COCKPIT_TOOL_TABS}' — use auto, embedded or external";; esac
 
 # ── module selection → platform stacks (the deployer interface) ────────────────────────────
 # The deployer lists modules_disabled (mNN like m13, or slugs); we install the UNION of stacks the
@@ -1521,6 +1527,19 @@ if [[ "$PORTAL" == "true" ]]; then
   fi
 fi
 
+# ── cockpit tool tabs ─────────────────────────────────────────────────────────
+# auto: embedded when oauth-openshift only ever redirects (one redirect IdP, no kubeadmin; the legacy
+# workshop-users IdP is ignored, step 6b retires it); otherwise mixed: Console, Dev Spaces and Argo CD
+# open in a new browser tab, because no frame shows OpenShift's own sign-in page. Re-running re-resolves.
+if [[ "$COCKPIT_TOOL_TABS" == "auto" ]]; then
+  _tt="$(cockpit_tool_tabs_auto)" || true
+  TOOL_TABS="${_tt%%$'\t'*}"; _tt_why="${_tt#*$'\t'}"
+  [[ "$TOOL_TABS" == "embedded" ]] || TOOL_TABS="mixed"
+else
+  TOOL_TABS="$COCKPIT_TOOL_TABS"; _tt_why="cockpit_tool_tabs: ${COCKPIT_TOOL_TABS} in vars.yaml"
+fi
+ok "cockpit tool tabs: ${TOOL_TABS} (${_tt_why})"
+
 # ── 5. materialize the workshop layer from the LOCAL mirror ───────────────────
 info "[5/6] materializing the workshop layer (Argo Application workshop-config)"
 cat <<EOF | oc apply -f - >/dev/null
@@ -1594,6 +1613,9 @@ spec:
           value: "${MAAS_MODEL}"
         - name: showroom.maasEndpoint
           value: "${MAAS_ENDPOINT}"
+        # Cockpit tool tabs: embedded | external | mixed (cockpit_tool_tabs, resolved above).
+        - name: showroom.toolTabs
+          value: "${TOOL_TABS}"
         # The two in-cluster BuildConfigs (Parasol images, showroom antora-ext) clone the workshop
         # source directly, so they follow repo_url too — otherwise a fork install would quietly
         # build its cockpit and app images from the upstream project. Scalars only: Argo's
@@ -1664,8 +1686,8 @@ if [[ "${WORKSHOP_LAYER_OK:-true}" == "true" ]]; then
 fi
 _other_idps="$(oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}' 2>/dev/null | tr ' ' '\n' | grep -vx "$CIDP_NAME" | grep -vx workshop-users | xargs || true)"
 oc get secret kubeadmin -n kube-system >/dev/null 2>&1 && _other_idps="${_other_idps:+${_other_idps} }kube:admin"
-if [[ -n "$_other_idps" ]]; then
-  warn "other sign-in options remain beside '${CIDP_NAME}': ${_other_idps} — oauth-openshift shows a chooser page and the cockpit's Console/Dev Spaces/Argo CD tabs cannot sign in inside their frame. On a cluster dedicated to the workshop, remove them (INSTALL.md §6)."
+if [[ -n "$_other_idps" && "$TOOL_TABS" == "embedded" ]]; then
+  warn "other sign-in options remain beside '${CIDP_NAME}': ${_other_idps} — oauth-openshift shows a chooser page and the cockpit's Console/Dev Spaces/Argo CD tabs cannot sign in inside their frame. Remove them, or set cockpit_tool_tabs: auto (INSTALL.md §6)."
 fi
 
 # ── credentials summary + next steps ──────────────────────────────────────────

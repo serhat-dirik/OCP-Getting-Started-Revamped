@@ -461,8 +461,12 @@ operators and the workshop's own namespaces, it changes these cluster-wide setti
 
 - **Identity:** attendees sign in through the cluster's Keycloak identity provider (RHDP: `rhbk`); the
   install adds `user1..userN` to its realm. A cluster without one gets the workshop's own (`ogsr-sso`,
-  auth stack). Keep no other identity provider and no `kubeadmin`: OpenShift then shows a chooser page,
-  and the cockpit's Console, Dev Spaces and Argo CD tabs cannot sign in inside their frame.
+  auth stack). Another identity provider or a `kubeadmin` Secret makes OpenShift show its own sign-in
+  page, which no frame shows; `cockpit_tool_tabs` below handles that.
+- **Cockpit tool tabs** (`cockpit_tool_tabs` in `vars.yaml`, default `auto`): `embedded` shows every
+  tool inside the cockpit, `external` opens each in a new browser tab. `auto` embeds when the cluster has
+  exactly one redirect sign-in provider and no `kubeadmin`; otherwise Console, Dev Spaces and Argo CD open
+  in a new browser tab. Re-run the install after the identity providers change; `adm doctor` shows the mode.
 - **Nodes:** labels every node with a synthetic zone (`workshop.redhat.com/zone`) and labels and taints
   one worker as the batch pool (`workshop.redhat.com/pool=batch:NoSchedule`).
 - **Console:** enables the operators' console plugins.

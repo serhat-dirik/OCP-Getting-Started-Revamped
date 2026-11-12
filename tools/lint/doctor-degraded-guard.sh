@@ -112,6 +112,9 @@ prepare_sandbox() {  # <ws-source> <dir> → 0, or 2 if the sandbox cannot be bu
   cp "$src" "${dir}/${WS}" || return 2
   chmod +x "${dir}/${WS}" || return 2
   cp "$STUB" "${dir}/bin/cmd-stub.py" || return 2
+  # The one repo file doctor sources: its cockpit tool tabs row grades with the install's own rule.
+  mkdir -p "${dir}/bootstrap" || return 2
+  cp "${REPO_ROOT}/bootstrap/ogsr-tool-tabs-lib.sh" "${dir}/bootstrap/" || return 2
   for tool in oc curl; do
     # `--as <tool>`: the stub answers as whichever command it was invoked for, and saying which one
     # explicitly beats inferring it from argv[0] — a shim that execs python3 passes the SCRIPT's name,

@@ -134,3 +134,37 @@ like it was working: a guard that cannot fire is worse than no guard.
 {{- end -}}
 {{- if not (has $slug $disabled) -}}true{{- end -}}
 {{- end -}}
+
+{{/*
+The cockpit's six tool tabs — ONE list for showroom-shared.yaml, showroom.yaml and showroom-demos.yaml.
+Rendered as nookbag tab entries; callers `include … | nindent` it under `tabs:` after the terminal tab.
+
+showroom.toolTabs (bootstrap/vars.yaml cockpit_tool_tabs, resolved by bootstrap/install.sh):
+  embedded  every tab is a pane inside the cockpit (the default)
+  external  every tab opens in a new browser tab (nookbag `external: true`)
+  mixed     OCP Console, Dev Spaces and Argo CD open in a new browser tab: they sign in through
+            OpenShift OAuth, and on this cluster oauth-openshift renders its own chooser/login page,
+            which (passthrough route) no browser shows in a frame. Gitea, Dev Hub and SonarQube have
+            their own logins and stay embedded.
+Dev Spaces and Argo CD point at their sign-in START endpoints, which work as new-tab links too.
+*/}}
+{{- define "workshop-config.toolTabs" -}}
+{{- $mode := .Values.showroom.toolTabs | default "embedded" -}}
+{{- if not (has $mode (list "embedded" "external" "mixed")) -}}
+{{- fail (printf "showroom.toolTabs: %q — use embedded, external or mixed" $mode) -}}
+{{- end -}}
+{{- $d := .Values.clusterDomain -}}
+{{- range $t := list
+  (list "OCP Console" (printf "https://console-openshift-console.%s" $d) true)
+  (list "Gitea" (printf "https://gitea-%s.%s" $.Values.giteaNamespace $d) false)
+  (list "Dev Spaces" (printf "https://devspaces.%s/oauth/start?rd=%%2Fdashboard%%2F" $d) true)
+  (list "Argo CD" (printf "https://student-gitops-server-student-gitops.%s/auth/login?return_url=https%%3A%%2F%%2Fstudent-gitops-server-student-gitops.%s%%2Fapplications" $d $d) true)
+  (list "Dev Hub" (printf "https://backstage-developer-hub-rhdh.%s" $d) false)
+  (list "SonarQube" (printf "https://sonarqube-sonarqube.%s" $d) false) }}
+- name: {{ index $t 0 }}
+  url: {{ index $t 1 }}
+{{- if or (eq $mode "external") (and (eq $mode "mixed") (index $t 2)) }}
+  external: true
+{{- end }}
+{{- end }}
+{{- end -}}

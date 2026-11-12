@@ -74,6 +74,8 @@ spec:
               value: {{ (.Values.showroom | default dict).ocpVersion | default "" | quote }}
             - name: MAAS_ON
               value: {{ include "ogsr-bootstrap.lightspeedEnabled" . | quote }}
+            - name: DECLARED_TABS
+              value: {{ include "ogsr-bootstrap.cockpitToolTabs" . | quote }}
           args:
             - |
               set -euo pipefail
@@ -156,6 +158,47 @@ spec:
                 else
                   ok "{maas_endpoint} = ${DECLARED_ENDPOINT}"
                 fi
+              fi
+
+              # ── cockpit tool tabs ────────────────────────────────────────────────────────────────
+              # cockpit_tool_tabs=auto renders embedded on this path (values.yaml). Graded here with the
+              # same rule bootstrap/install.sh resolves auto with — a copy of bootstrap/ogsr-tool-tabs-lib.sh
+              # (this image has no repo); tools/lint/tool-tabs-auto-guard.sh runs both against one table.
+              cockpit_tool_tabs_auto() {
+                local out rc=0 n t count=0 names="" pw="" ka="" why
+                out="$(oc get oauth cluster -o jsonpath='{range .spec.identityProviders[*]}{.name}{"\t"}{.type}{"\n"}{end}' 2>&1)" || rc=$?
+                if [[ "$rc" -ne 0 ]]; then printf 'unknown\tOAuth config not readable: %s\n' "${out%%$'\n'*}"; return 2; fi
+                while IFS=$'\t' read -r n t; do
+                  [[ -n "$n" && "$n" != workshop-users ]] || continue
+                  count=$((count + 1)); names="${names:+${names}, }${n} (${t})"
+                  case "$t" in HTPasswd|LDAP|Keystone|BasicAuth) pw="$n" ;; esac
+                done <<< "$out"
+                rc=0; out="$(oc get secret kubeadmin -n kube-system -o name 2>&1)" || rc=$?
+                if [[ "$rc" -eq 0 ]]; then ka="yes"
+                elif ! grep -qiE 'not ?found' <<< "$out"; then printf 'unknown\tkubeadmin Secret not readable: %s\n' "${out%%$'\n'*}"; return 2
+                fi
+                if [[ "$count" -eq 1 && -z "$pw" && -z "$ka" ]]; then
+                  printf 'embedded\tone redirect sign-in, %s, and no kubeadmin\n' "$names"; return 0
+                fi
+                if [[ "$count" -eq 0 ]]; then why="no identity provider"
+                elif [[ "$count" -gt 1 ]]; then why="${count} identity providers: ${names}"
+                elif [[ -n "$pw" ]]; then why="${names} is a password form"
+                else why="$names"; fi
+                [[ -z "$ka" ]] || why="${why} + kubeadmin"
+                printf 'mixed\t%s, so OpenShift shows its own sign-in page, which no frame shows\n' "$why"
+              }
+              if [[ "$DECLARED_TABS" == "external" ]]; then
+                ok "cockpit tool tabs: external — every tool tab opens in a new browser tab"
+              else
+                TT="$(cockpit_tool_tabs_auto)" || true
+                case "${TT%%$'\t'*}" in
+                  embedded) ok "cockpit tool tabs: embedded — ${TT#*$'\t'}" ;;
+                  mixed)
+                    err "cockpit tool tabs: embedded, but ${TT#*$'\t'} — the Console, Dev Spaces and Argo CD tabs go blank"
+                    err "   fix: set cockpit_tool_tabs=external on the order, then re-sync field-content"
+                    GAPS=$((GAPS + 1)) ;;
+                  *) warn "cockpit tool tabs: embedded, not graded — ${TT#*$'\t'}"; GAPS=$((GAPS + 1)) ;;
+                esac
               fi
 
               # Exit 0 either way — see the header. The verdict is the log, not the status.

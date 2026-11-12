@@ -3572,6 +3572,12 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
       nok "${d_what}: ${d_names} — detail: ${WS_CMD} rebuild-images --check${d_fix}"; fail=1
     fi
   fi
+  # The cockpit tool-tab mode workshop-config renders (bootstrap/vars.yaml cockpit_tool_tabs, resolved by
+  # install.sh). Read first: the IdP row below grades "several sign-in options" against it. Empty = an
+  # install that predates the setting, i.e. the chart default, embedded.
+  local tt_mode tt_rc=0 tt_live="" tt_why=""
+  tt_mode="$(oc get application workshop-config -n "$ARGO_NS" -o jsonpath='{.spec.source.helm.parameters[?(@.name=="showroom.toolTabs")].value}' 2>&1)" || tt_rc=$?
+  [[ "$tt_rc" -ne 0 || -n "$tt_mode" ]] || tt_mode="embedded"
   printf "  %-28s" "workshop IdP"
   # Real-read-then-branch, not `oc auth can-i` — see the "user namespaces" row below for the measurement
   # and the full reasoning. oauths.config.openshift.io is cluster-scoped, which is precisely the shape
@@ -3591,10 +3597,34 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
     nok "no Keycloak (OpenID) IdP — re-run bootstrap/install.sh"; fail=1
   elif grep -qw 'workshop-users:HTPasswd' <<< "$idp_out"; then
     nok "legacy workshop-users IdP still present — run bootstrap/ogsr-idp-migrate.sh"; fail=1
-  elif [[ "$(wc -w <<< "$idp_out" | tr -d ' ')" -gt 1 ]]; then
+  elif [[ "$(wc -w <<< "$idp_out" | tr -d ' ')" -gt 1 && "$tt_mode" != "mixed" && "$tt_mode" != "external" ]]; then
     nok "several sign-in options (${idp_out% }) — a chooser page breaks the cockpit's embedded tabs; keep only the Keycloak one"; fail=1
+  elif [[ "$(wc -w <<< "$idp_out" | tr -d ' ')" -gt 1 ]]; then
+    ok "several sign-in options (${idp_out% }) — the cockpit's OAuth tabs open in a new browser tab"
   else
     ok "single sign-in: ${idp_out%%:*} (Keycloak)"
+  fi
+  printf "  %-28s" "cockpit tool tabs"
+  # Mode in force + why, from the same rule install.sh resolves `auto` with. A cluster whose sign-in setup
+  # changed after install can contradict an embedded mode: those tabs then go blank, so that is the ❌.
+  if [[ "$tt_rc" -ne 0 ]]; then
+    unknown "not checked (the workshop-config Application is not readable — needs instructor/admin access)"
+  else
+    if [[ -f "${REPO_ROOT}/bootstrap/ogsr-tool-tabs-lib.sh" ]]; then
+      # shellcheck source=bootstrap/ogsr-tool-tabs-lib.sh
+      source "${REPO_ROOT}/bootstrap/ogsr-tool-tabs-lib.sh"
+      tt_live="$(cockpit_tool_tabs_auto)" || true
+    fi
+    tt_why="${tt_live#*$'\t'}"; tt_live="${tt_live%%$'\t'*}"
+    case "${tt_mode}:${tt_live}" in
+      external:*)       ok "external — every tool tab opens in a new browser tab (cockpit_tool_tabs: external)";;
+      mixed:embedded)   ok "mixed — Console, Dev Spaces, Argo CD open in a new browser tab; this cluster now allows embedding (${tt_why}): re-run bootstrap/install.sh to embed them";;
+      mixed:mixed)      ok "mixed — Console, Dev Spaces, Argo CD open in a new browser tab: ${tt_why}";;
+      embedded:embedded) ok "embedded — ${tt_why}";;
+      embedded:mixed)   nok "embedded, but ${tt_why} — the Console, Dev Spaces and Argo CD tabs go blank; re-run bootstrap/install.sh (cockpit_tool_tabs: auto)"; fail=1;;
+      embedded:*|mixed:*) unknown "${tt_mode} (sign-in setup not checked: ${tt_why:-rule not found})";;
+      *)                nok "showroom.toolTabs='${tt_mode}' is not embedded, external or mixed — re-run bootstrap/install.sh"; fail=1;;
+    esac
   fi
   printf "  %-28s" "image import allowlist"
   # bootstrap/install.sh step 2a'' limits ImageStream imports to the workshop's registries; without it

@@ -186,6 +186,18 @@ in-cluster by job-maas-secret and no render-time input can know its name.
 {{- end -}}
 {{- end -}}
 
+{{/*
+showroom.toolTabs for workshop-config from cockpit_tool_tabs: external → external; auto and embedded →
+embedded (auto is not resolvable at render on this path; see values.yaml).
+*/}}
+{{- define "ogsr-bootstrap.cockpitToolTabs" -}}
+{{- $s := .Values.cockpit_tool_tabs | default "auto" -}}
+{{- if not (has $s (list "auto" "embedded" "external")) -}}
+{{- fail (printf "cockpit_tool_tabs: %q — use auto, embedded or external" $s) -}}
+{{- end -}}
+{{- if eq $s "external" -}}external{{- else -}}embedded{{- end -}}
+{{- end -}}
+
 {{- define "ogsr-bootstrap.cockpitMaasModel" -}}
 {{- if eq (include "ogsr-bootstrap.lightspeedEnabled" .) "true" -}}
 {{- trim (toString ((.Values.litemaas | default dict).model | default "")) -}}
