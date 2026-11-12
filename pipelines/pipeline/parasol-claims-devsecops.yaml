@@ -7,9 +7,10 @@
 # trivy-scan, roxctl-deployment-check, zap-baseline, k6-load-test). Nothing is copy-pasted — every taskRef is a
 # CLUSTER RESOLVER into the shared parasol-tasks library or openshift-pipelines.
 #
-#   fetch → SAST(sonar) → SCA(trivy) → unit-test → build-image → acs-image-check ┐
-#                                                                 → image-report   ├→ deploy-check → deploy(+Route) → DAST(zap) → perf(k6)
-#                                                                 → sign-check ─────┘
+#   fetch → SAST(sonar) → SCA(trivy) ┬→ build-image → acs-image-check ┐
+#                                    │              → image-report   ├→ deploy-check → deploy(+Route) → DAST(zap) → perf(k6)
+#                                    │              → sign-check ────┤
+#                                    └→ unit-test ───────────────────┘
 #
 # GATES: sonar-scan (qualitygate.wait), trivy-scan (HIGH/CRITICAL + copyleft), unit-test, acs-image-check
 # (Block-Log4Shell), sign-check (unsigned = fail), roxctl-deployment-check (enforced deploy policy),
@@ -62,8 +63,12 @@
 # dependency cache competes with that: the intra-run Maven repository tried on 2026-08-13 changed
 # unit-test by 6 seconds (see the workspaces block). If this capstone needs to be faster, raise the
 # namespace default — and check the {user}-cicd ResourceQuota when you do, because a step limit of
-# D gives sast-sonar's three-step pod 3×D against a `limits.cpu: 6` quota, so D above ~1900m stops
-# the pod being admitted at all.
+# D gives every step of a multi-step pod D against the namespace's `limits.cpu` quota.
+# QUOTA STALLS ARE A COST OF THEIR OWN (measured 2026-11-12, cluster-5vqxc, quota 8 CPU): with the
+# app and claims-db deployed, a just-finished TaskRun's pod is still counted for a few seconds, so
+# the next stage's pod is refused (`exceeded quota`) and Tekton retries it — 10-69s per stage. The
+# trivial steps (generate-settings, sign-check, image-size-report, the two roxctl checks) therefore
+# carry explicit small limits instead of inheriting 1500m/2Gi each.
 #
 # LOCKSTEP: this is the CANONICAL copy; the app-security-testing entry state ships the same Pipeline
 # at gitops/entry-states/app-security-testing/templates/pipeline.yaml. NOT byte-identical — that copy
@@ -229,6 +234,13 @@ spec:
     #    not cancel an in-flight sibling — Tekton finalizes the PipelineRun only when the running
     #    TaskRuns finish — so parallelising would make that 3-4 minute beat wait out an 8-minute
     #    unit-test before it reads Failed. 25s of a green run is not worth 5 minutes of every red one.
+    #    IN PARALLEL WITH build-image (since 2026-11-12). Both only need the checkout, and the build
+    #    does not read the test output, so the two longest stages share the same ~80s instead of
+    #    queueing for ~170s; measured on cluster-5vqxc, a green run went 378s -> 220s with this plus
+    #    the ZAP/k6/limit changes below. Nothing downstream may run before the tests pass:
+    #    deployment-check waits on unit-test, so a red test still stops the run before deploy. What
+    #    changes is that a failing test no longer prevents the image from being BUILT, pushed to
+    #    :latest and Chains-signed — it is never deployed, and the next green run overwrites it.
     - name: unit-test
       runAfter: [sast-sonar, sca-trivy]
       taskRef:
@@ -248,8 +260,9 @@ spec:
     # 5) Build the image from the Containerfile; Tekton Chains SIGNS this TaskRun's image automatically.
     #    NO REPORT-MODE TOGGLE: the bundled buildah task has none, and a build that does not build has
     #    nothing downstream to report on. This stage stops even a report run.
+    #    Runs beside unit-test, not after it — see the unit-test stage above.
     - name: build-image
-      runAfter: [unit-test]
+      runAfter: [sca-trivy]
       taskRef:
         resolver: cluster
         params:
@@ -306,6 +319,11 @@ spec:
           - name: verify-signed
             # Digest-pinned; el8 `ose-cli:latest` was frozen on v4.15.0 with unapplied Critical errata.
             image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+            # An `oc get` poll: explicit small limits, or it is charged the {user}-cicd default (1500m/2Gi)
+            # against the namespace quota while the real work waits for room (2026-11-12).
+            computeResources:
+              requests: {cpu: 50m, memory: 64Mi}
+              limits: {cpu: 200m, memory: 256Mi}
             env:
               - name: PR_NAME
                 value: $(context.pipelineRun.name)
@@ -329,7 +347,7 @@ spec:
     #    task reads deploy/parasol-claims-deployment.yaml from the checkout (source workspace) and fails
     #    on a deploy-policy violation — the seeded insecure manifest trips it; the hardened one passes.
     - name: deployment-check
-      runAfter: [image-scan, sign-check]
+      runAfter: [image-scan, sign-check, unit-test]
       taskRef:
         resolver: cluster
         params:
@@ -437,5 +455,8 @@ spec:
         # Was the literal "true"; the param defaults to "true", so an unset run is unchanged.
         # Same result-overwrite caveat as dast-zap above — see that stage's ⚠️ note.
         - {name: FAIL_ON_THRESHOLD, value: $(params.enforce-gates)}
+        # 15s, not the Task's 30s default: 10 VUs for 15s is ~150 iterations, plenty for a p95, and the
+        # gate sits on the critical path of every green run (2026-11-12).
+        - {name: DURATION, value: "15s"}
       workspaces:
         - {name: k6-work, workspace: k6-work}

@@ -249,7 +249,7 @@ Log4shell is not a declared dependency here: the `Containerfile` bakes the `log4
 The built-in Sonar way gate is Clean-as-You-Code: every condition is about *new* code, and a project's first analysis has no new-code baseline — so a brand-new project passes even with a hard-coded credential in it. This pipeline uses a gate keyed on overall `vulnerabilities > 0`, which fails on the first scan and passes once the vulnerability is gone. In a long-lived project you would keep the Clean-as-You-Code gate and seed a baseline analysis instead.
 
 *Every fix means a full rebuild — do the gates have to run in sequence?*::
-The order is deliberate: each gate must pass before the next runs, so nothing reaches the image gate until the source and its dependencies are clean, and the failure reported is always the earliest one. Nothing is cached between runs here either, which keeps the teaching honest rather than fast — a production pipeline would cache its dependency layer and run the checks that do not depend on each other concurrently.
+The order is deliberate: each gate must pass before the next runs, so nothing reaches the image gate until the source and its dependencies are clean, and the failure reported is always the earliest one. The two stages that do not depend on each other — the unit tests and the image build — already run side by side, and nothing is deployed until both pass. Nothing is cached between runs, which keeps the teaching honest rather than fast — a production pipeline would also cache its dependency layer.
 
 *Can developers read these findings without an RHACS login?*::
 Yes, and that is how the attendee lab works. RHACS Central keeps its own user database and rejects OpenShift tokens, so console access is granted separately from cluster access. Every verdict the console shows is also written to the `image-scan` and `deployment-check` TaskRun logs, which anyone with access to the project can read.
@@ -732,14 +732,12 @@ oc get taskrun -n $NS -l tekton.dev/pipelineTask=dast-zap --sort-by=.metadata.cr
   -o name | tail -1 | cut -d/ -f2 | xargs -I{} tkn taskrun logs -n $NS {} | grep -iE "WARN-NEW|FAIL-NEW|DAST FAILED"
 ----
 
-.Expected output (ZAP flags missing headers on the RUNNING app — a check only possible post-deploy. Unlike the CVEs in the earlier gates, *which rules fire and the exact counts move with ZAP's shipped ruleset* — read the rule names in your own output, not these)
+.Expected output (ZAP flags missing headers on the RUNNING app — a check only possible post-deploy. Unlike the CVEs in the earlier gates, *which rules fire and the exact counts move with the ZAP image's ruleset* — read the rule names in your own output, not these)
 [source,texinfo]
 ----
-WARN-NEW: Content Security Policy (CSP) Header Not Set [10038] x 3
-WARN-NEW: Permissions Policy Header Not Set [10063] x 3
-WARN-NEW: X-Content-Type-Options Header Missing [10021] x 3
-WARN-NEW: Cross-Origin-Resource-Policy Header Missing or Invalid [90004] x 1
-FAIL-NEW: 0   WARN-NEW: 4   INFO: 0   IGNORE: 0   PASS: 62
+WARN-NEW: X-Content-Type-Options Header Missing [10021] x 1
+WARN-NEW: Content Security Policy (CSP) Header Not Set [10038] x 2
+FAIL-NEW: 0   WARN-NEW: 2   INFO: 0   IGNORE: 0   PASS: 59
 ❌ DAST FAILED — ZAP reported a gating alert on the running app.
 ----
 
@@ -783,7 +781,7 @@ TIP: That last push is the one that prompts. Enter your Gitea username (`{user}`
 image::app-security-testing/app-security-testing-02-pipeline-green-run.png["The same OpenShift Pipelines console PipelineRun details page after the five fixes, status Succeeded. Every stage in the graph is green-ticked — fetch-source, sast-sonar now at 2/2, sca-trivy, unit-test, build-image, image-scan, sign-check, image-report, deployment-check, deploy, dast-zap, and perf-k6 — where the earlier run stopped red at sast-sonar. The details panel shows a completed run with a duration of 18 minutes 48 seconds."]
 
 The graph doesn't stop at `dast-zap`, though: one more stage runs after it, `perf-k6`.
-It isn't a security check — it's a *performance* gate, a short k6 load test (10 virtual users for 30 seconds) against the same running Service, exercising `/api/claims` and the health endpoint and failing the build if p95 latency exceeds 800ms or the error rate exceeds 1%.
+It isn't a security check — it's a *performance* gate, a short k6 load test (10 virtual users for 15 seconds) against the same running Service, exercising `/api/claims` and the health endpoint and failing the build if p95 latency exceeds 800ms or the error rate exceeds 1%.
 It sits alongside the security gates because the same discipline applies to speed as to safety: a change can pass every security check and still make the app too slow or too flaky under load, and this gate catches that before it ships.
 The seeded app has no performance regression, so `perf-k6` passes without a fix — watch for it going green after `dast-zap`, and read the p95 and error-rate numbers in its *TaskRun log*, which is where the summary is printed.
 

@@ -146,6 +146,8 @@ spec:
     #    so parallelising would make the lab's "red at sca-trivy, ~3-4 min" beat wait out unit-test.
     #    NO REPORT-MODE TOGGLE: maven-jdk21 declares none, and a failing test is a broken build, not
     #    a finding to tour. This stage stops even a report run.
+    #    Runs BESIDE build-image (both after sca-trivy; 2026-11-12): deployment-check waits on it, so
+    #    a red test still stops the run before deploy — but the image is built and pushed regardless.
     - name: unit-test
       runAfter: [sast-sonar, sca-trivy]
       taskRef:
@@ -164,8 +166,9 @@ spec:
     # 5) Build the image from the Containerfile; Tekton Chains SIGNS this TaskRun's image automatically.
     #    NO REPORT-MODE TOGGLE: the bundled buildah task has none, and a build that does not build has
     #    nothing downstream to report on. This stage stops even a report run.
+    #    Parallel with unit-test — see the canonical file for the measurement.
     - name: build-image
-      runAfter: [unit-test]
+      runAfter: [sca-trivy]
       taskRef:
         resolver: cluster
         params:
@@ -221,6 +224,11 @@ spec:
           - name: verify-signed
             # Digest-pinned; el8 `ose-cli:latest` was frozen on v4.15.0 with unapplied Critical errata.
             image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+            # An `oc get` poll: explicit small limits, or it is charged the {user}-cicd default (1500m/2Gi)
+            # against the namespace quota while the real work waits for room (2026-11-12).
+            computeResources:
+              requests: {cpu: 50m, memory: 64Mi}
+              limits: {cpu: 200m, memory: 256Mi}
             env:
               - name: PR_NAME
                 value: $(context.pipelineRun.name)
@@ -244,7 +252,7 @@ spec:
     #    task reads deploy/parasol-claims-deployment.yaml from the checkout (source workspace) and fails
     #    on a deploy-policy violation — the seeded insecure manifest trips it; the hardened one passes.
     - name: deployment-check
-      runAfter: [image-scan, sign-check]
+      runAfter: [image-scan, sign-check, unit-test]
       taskRef:
         resolver: cluster
         params:
@@ -345,5 +353,8 @@ spec:
         # Was the literal "true"; the param defaults to "true", so an unset run is unchanged.
         # Same result-overwrite caveat as dast-zap above — see that stage's ⚠️ note.
         - {name: FAIL_ON_THRESHOLD, value: $(params.enforce-gates)}
+        # 15s, not the Task's 30s default: 10 VUs for 15s is ~150 iterations, plenty for a p95, and the
+        # gate sits on the critical path of every green run (2026-11-12).
+        - {name: DURATION, value: "15s"}
       workspaces:
         - {name: k6-work, workspace: k6-work}
