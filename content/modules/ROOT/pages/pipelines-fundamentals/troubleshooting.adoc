@@ -13,26 +13,20 @@ include::partial$version-attributes.adoc[]
 Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
 Most terminal commands assume you set `NS={user}-cicd` at the start of the lab.
 
-== The first pipeline run takes 10+ minutes
+== A pipeline run takes several minutes
 
-// The old text here claimed "the next run on the same node is roughly half the time because the
-// artifacts are cached". That was false and had never been measured: the Maven repository lived in
-// the TaskRun container's filesystem, so it died with the Pod and nothing on the node cached
-// anything. Measured 2026-08-06 — two CONSECUTIVE runs, unit-test 11m20s then 11m33s.
-// MEASUREMENT STATUS (settled 2026-08-08): the warm-cache "after" number this entry used to be
-// waiting for was finally measured, and it is not worth quoting as an improvement — 11m10s warm
-// against 11m18s with no cache, three runs on cluster-6xxpf in one namespace. The between-run
-// maven-cache workspace was removed the same day; see the header note in
-// pipelines/pipeline/parasol-claims-build.yaml. Runs measured for this module, all uncached because
-// that is now the only shape: 7m39s red / 13m27s green (OCP 4.22.8, 2026-08-07), 11m18s green
-// (cluster-6xxpf, 2026-08-08), 20m49s green (build cluster, 2026-08-06).
-Symptom:: `tkn pipelinerun logs --last -f` sits for a long time on `unit-test`, then again on `build-image`, before the run finishes — 20 minutes or more the first time.
+// Measured 2026-11-12 on cluster-5vqxc as user8, every run uncached (the between-run Maven cache was
+// tried and removed 2026-08-08; see the header of pipelines/pipeline/parasol-claims-build.yaml):
+// 3m53s green, 2m13s red, 3m21s green, 3m32s PaC push. Both Maven resolutions pull from the
+// in-cluster mirror; before it, runs took 10m22s-20m49s depending on the cluster's egress.
+Symptom:: `tkn pipelinerun logs --last -f` sits on `unit-test` for a minute or two, then again on `build-image`, and the run takes about 4 minutes.
 Cause:: This is *expected*.
-The pipeline builds `parasol-claims` from source, so Maven resolves its dependency tree — *twice*, once for the test Task and once inside the image build, which runs its own `mvn` in the `Containerfile`.
-Fix:: Nothing is wrong — let it run (start exercise 2 while it builds).
+The pipeline builds `parasol-claims` from source: Maven resolves its dependency tree *twice*, once for the test Task and once inside the image build, which runs its own `mvn` in the `Containerfile`, then compiles the application and runs its test suite.
+The dependencies come from the platform team's in-cluster Maven mirror, so what remains is compile and test time.
+Fix:: Nothing is wrong, so let it run.
 Expect a later run to take about as long as the first.
-That was tested rather than assumed: a run with every dependency already cached finished within eight seconds of one that cached nothing, because the compile and the 30-test suite are the cost, not the download.
 You can confirm progress at any point with `tkn pipelinerun describe --last -n $NS` (it shows which Task is running).
+If a run is still going after 15 minutes, read the step it is on with `tkn pipelinerun logs --last -f -n $NS`: a build stuck downloading means the mirror is unreachable, so tell your instructor.
 
 == The run fails in seconds: `more than one PersistentVolumeClaim is bound`
 
@@ -193,11 +187,46 @@ A green check with response `202` means PaC accepted it; a red delivery or `4xx/
 ----
 # (a) the Repository must carry git_provider details:
 oc get repository parasol-claims -n $NS -o jsonpath='git_provider: {.spec.git_provider.type}{"\n"}'
-# (b) the secret must exist with BOTH keys:
-oc get secret gitea-pac-secret -n $NS -o jsonpath='keys: {.data.token}{" / "}{.data.webhook-secret}{"\n"}' 2>/dev/null && echo "(both present)"
+# (b) the secret must exist with BOTH keys (describe prints key names and sizes, never the values):
+oc describe secret gitea-pac-secret -n $NS | sed -n '/^Data/,$p'
+----
++
+.Expected output
+[source,texinfo]
+----
+Data
+====
+token:           40 bytes
+webhook-secret:  20 bytes
 ----
 +
 `git_provider` empty → re-apply the entry state (`ws prep {module-id} --yes`), which ships it; a missing secret or key → re-create `gitea-pac-secret` (exercise 4).
+A `webhook-secret` of only 8 bytes is the bare `parasol-` prefix: the command that generated the rest failed, so re-run exercise 4's Secret step and paste the new value into the webhook's *Secret* field.
+
+== Doing exercise 4 again: Gitea refuses the token name, or every push starts two runs
+
+// Measured 2026-11-12 as user8: after `ws reset`, POST /users/user8/tokens {"name":"pac"} answered
+// HTTP 400 "access token name has been used already", and the leftover webhook logged two
+// RepositorySecretMissing warnings on reset's own seed commits. Deleting the old token and webhook,
+// then repeating the exercise, gave exactly one PaC run per push.
+Symptom:: You are repeating exercise 4 after `ws reset` or `ws prep {module-id} --yes`, and Gitea will not generate the token: it reports that the access token name has been used already.
+Or each push now starts *two* `parasol-claims-pull-request-…` runs.
+`oc get events -n $NS` may also show `RepositorySecretMissing` warnings from the moment you reset.
+Cause:: A reset rebuilds `{user}-cicd` but never touches your fork's Gitea settings, so the first pass's `pac` token and its webhook are still there.
+Gitea allows one token per name, and a second webhook delivers every push a second time.
+The `RepositorySecretMissing` warnings are the old webhook firing on the reset's own commits while `gitea-pac-secret` did not exist yet; they are harmless.
+Fix:: Delete what the first pass left, then do exercise 4 again from the token step:
++
+. Avatar → *Settings* → *Applications*: *Delete* beside the `pac` token.
+. Your fork → *Settings* → *Webhooks*: open each `pipelines-as-code-controller` entry and *Delete Webhook*, so that none is left.
+
+== `tkn` prints `Failed to watch … context canceled` or `failed to get logs` in the log stream
+
+Symptom:: While `tkn pipelinerun logs -f` (or `tkn pipeline start … --showlog`) streams, lines like `E… reflector.go:200] "Failed to watch" err="… context canceled"` appear between the step logs.
+A run that fails a test also ends with `failed to get logs for task unit-test : container step-mvn-goals has failed`.
+Cause:: Both come from the `tkn` client, not from the pipeline.
+The first is the client closing its watch on a step that has finished; the second is `tkn` reporting the failed step a second time.
+Fix:: Nothing to fix. Read the pipeline's state from `tkn pipelinerun describe --last -n $NS`, not from these lines.
 
 == Pipelines-as-Code fires but the run errors: `cannot find referenced pipeline`
 
@@ -276,4 +305,4 @@ The pipeline's `deploy` step wires the app to `claims-db` automatically when the
 
 '''
 
-_Last verified on OpenShift 4.21.22 / OpenShift Pipelines 1.22.4 (2026-07-15)._
+_Last verified on OpenShift 4.22.22 / OpenShift Pipelines 1.24.3, `tkn` 0.42.0 (2026-11-12)._

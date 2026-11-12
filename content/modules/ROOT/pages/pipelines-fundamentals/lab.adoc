@@ -62,10 +62,11 @@ adm solve pipelines-fundamentals
 
 It runs the build-test-deploy pipeline to completion and leaves a finished green run beside a healthy `parasol-claims` deployment — the run step 1 reads.
 
-Staging blocks for a whole pipeline run — *7 minutes 45 seconds* measured, *20 minutes 49 seconds* on a slower cluster — so start it at least *25 minutes* ahead.
+Staging blocks for a whole pipeline run: *5 minutes 16 seconds* measured on 2026-11-12, so start it at least *15 minutes* ahead.
 
 *Wire the Pipelines-as-Code webhook on the fork.* Steps 3 and 4 are a live Git push, and without the webhook nothing fires at all; this is lab exercise 4's setup done ahead of time.
 In Gitea: avatar → *Settings* → *Applications* → *Manage Access Tokens* → name a token `pac`, scope *write:repository*, *Generate Token*, and copy it.
+If Gitea refuses the name because a `pac` token already exists, delete the old one on the same page first, and delete the fork's old PaC webhook too (a reset never touches Gitea, and a second webhook delivers every push twice).
 Then store it alongside a webhook secret you invent:
 
 [source,sh,role=execute,subs="attributes"]
@@ -76,7 +77,7 @@ read -rsp "paste your Gitea token, then press Enter: " GITEA_TOKEN; echo
 
 [source,sh,role=execute,subs="attributes"]
 ----
-WEBHOOK_SECRET="parasol-$(openssl rand -hex 6)"
+WEBHOOK_SECRET="parasol-$(python3 -c 'import secrets; print(secrets.token_hex(6))')"
 echo "webhook secret — paste this into the Gitea form: $WEBHOOK_SECRET"
 echo "target URL     — https://pipelines-as-code-controller-openshift-pipelines.{cluster_domain}"
 oc delete secret gitea-pac-secret -n $NS --ignore-not-found=true
@@ -260,8 +261,8 @@ The same mechanism, green this time: the test passed, the image built, the deplo
 
 == Frequently asked questions
 
-*Why did the first run take twelve minutes when pipelines are supposed to be fast?*::
-Almost all of it is Maven downloading the dependency tree — twice, once for the test step and once inside the image build. On a cold node that is nine to eleven minutes of it; a second run on the same node is faster because the artifacts are cached. A real setup adds a persistent Maven cache or an internal mirror and pays that cost once. It is a first-time dependency download, not the pipeline machinery.
+*Why does a run take four minutes when pipelines are supposed to be fast?*::
+It builds the service from source. Maven resolves the dependency tree twice, once for the test step and once inside the image build, and both pull from the platform team's in-cluster Maven mirror rather than the internet. What is left is compiling the Quarkus application and running its test suite, and that is the honest cost of a build that proves the code works. The pipeline machinery itself adds seconds.
 
 *Why curate a `maven-jdk21` Task when OpenShift ships a `maven` Task?*::
 Because the shipped one cannot build this application: its build step is pinned to a Java 17 runner image, and the `JAVA_VERSION` parameter it exposes does not repoint that image. Rather than have every team patch its own copy, the platform team publishes one correct Task into a shared library and every pipeline references it. That single, concrete gap is the argument for an organization library — fix it once, everyone inherits the fix.
@@ -282,7 +283,7 @@ endif::demo[]
 ifndef::demo[]
 
 == 1. Run the build-test-deploy pipeline from the console
-⏱ *the module's longest wait* · start it early, then read how it is wired while it builds
+⏱ *~10 min* · read how the pipeline is wired, run it (about 4 minutes), then call the app it deployed
 
 Your project already has a Pipeline — `parasol-claims-build-test-deploy` — that the platform team seeded.
 Before you run it, read what it is: the same five-Task anatomy from the concept, made concrete.
@@ -370,13 +371,13 @@ image-report -> resolver=cluster image-size-report/ogsr-parasol-tasks
 deploy -> resolver=cluster openshift-client/openshift-pipelines
 ----
 
-Every Task is a `resolver: cluster` reference: three from the shipped catalog (`openshift-pipelines`) and two from Parasol's curated library (`parasol-tasks`).
+Every Task is a `resolver: cluster` reference: three from the shipped catalog (`openshift-pipelines`) and two from Parasol's curated library (`ogsr-parasol-tasks`).
 That is the three reuse layers from the concept, in one output — and you explore both libraries in the next exercise.
 
 image::pipelines-fundamentals/pipelines-fundamentals-05-pipeline-details-graph.png["Pipeline details page for parasol-claims-build-test-deploy: the topology graph showing fetch-source, unit-test, build-image, image-report and deploy left to right, and below it the Tasks list naming each resolved Task in parentheses — unit-test (maven-jdk21), image-report (image-size-report) — plus a Workspaces entry reading shared-workspace"]
 
 Now *run* it — straight from the console, no hand-built YAML.
-A PipelineRun is one execution: the *Start* form pre-fills the Pipeline's four parameters and asks for its two *workspaces* — the shared one that carries the checkout from Task to Task, and the Maven cache.
+A PipelineRun is one execution: the *Start* form pre-fills the Pipeline's four parameters and asks for its one *workspace*, the shared volume that carries the checkout from Task to Task.
 
 // Grounded 2026-07-30 on OCP 4.22.5, signed in as an attendee (user1), viewport 1600x1000.
 // Opened via Actions -> Start on the live parasol-claims-build-test-deploy Pipeline in
@@ -439,28 +440,14 @@ This Pipeline wants the first kind — the checkout is this run's, not something
 --
 ====
 
-// MEASUREMENT STATUS (settled 2026-08-08). Every number on this page is an UNCACHED run, which is
-// now the only kind this pipeline does — the between-run Maven cache added 2026-08-07 was removed
-// again on 2026-08-08. Two reasons, both measured, both recorded in the header of
-// pipelines/pipeline/parasol-claims-build.yaml: bound alongside shared-workspace it gave unit-test
-// a second PVC-backed workspace and Tekton's Affinity Assistant rejected every run in 27 seconds;
-// and with the cluster mode changed so it COULD run, three runs on cluster-6xxpf 2026-08-08 gave
-// cold 13m26s / warm 11m10s / no cache 11m18s. A warm cache was worth 1.2% and the cold run every
-// attendee actually pays cost 19% MORE than none.
-//
-// So the four figures quoted below are directly comparable and all real:
-//   20m49s   build cluster, 2026-08-06     (the CEILING — plan to this)
-//   13m27s   a third cluster
-//   11m18s   cluster-6xxpf, 2026-08-08     (measured with the shape this page now teaches)
-//   10m22s   a faster cluster
-// The 4-minute spread across clusters is egress speed, not caching. Do not "improve" these by
-// interpolation, and do not quote a cached figure — there is nothing left to cache.
-// The same 2026-08-06 session timed `unit-test` at 11m20s then 11m33s on two CONSECUTIVE runs and
-// read the matching numbers as "nothing is warming"; the 2026-08-08 runs show what that pair could
-// not, which is that warming it was worth about six seconds.
-This first run is the slow one, and it resolves Maven's dependency tree *twice*: once in `unit-test`, and once more inside the image build, which runs its own `mvn` in the `Containerfile` and shares nothing with the Task before it.
-On the build cluster a first run took *20m49s*; the same run finished in *13m27s* on a second cluster, *11m18s* on a third, and *10m22s* on a fourth.
-All four are real — how fast the dependencies arrive is a property of the cluster you are on, not of anything you can set here.
+// MEASURED 2026-11-12 on cluster-5vqxc as user8 in the attendee's own terminal pod, every run uncached
+// (the between-run Maven cache was tried and removed 2026-08-08 — see the header of
+// pipelines/pipeline/parasol-claims-build.yaml). Both Maven resolutions now pull from the in-cluster
+// mirror (MAVEN_MIRROR_URL), which took egress out of the run length: ex1 3m53s (fetch-source 15s,
+// unit-test 1m36s, build-image 1m28s, image-report 8s, deploy 22s), ex3 red 2m13s, ex3 green 3m21s,
+// ex4 PaC push 3m32s. Before the mirror the same pipeline took 10m22s-20m49s across clusters.
+This run resolves Maven's dependency tree *twice*: once in `unit-test`, and once more inside the image build, which runs its own `mvn` in the `Containerfile` and shares nothing with the Task before it.
+Both pull from the platform team's in-cluster Maven mirror, so the run takes about *4 minutes*, most of it compiling the application and running its tests.
 If your run fails within seconds instead of building, see xref:pipelines-fundamentals/troubleshooting.adoc[the troubleshooting page] before you retry.
 Watch it fill in on the console graph, or stream the step logs from the terminal — clicking a Task node shows exactly what that Task is doing:
 
@@ -494,12 +481,13 @@ tkn pipelinerun logs --last -f -n $NS
 image::pipelines-fundamentals/pipelines-fundamentals-01-pipelinerun-graph.png["A finished PipelineRun's Details page: the five-Task graph drawn left to right — fetch-source, unit-test, build-image, image-report, deploy — each node green-ticked and reading 1/1, above the tab row Details / YAML / Parameters / Logs / Events / Output / TaskRuns. The run is badged Succeeded and the right-hand column reports Status Succeeded, the Pipeline it came from (parasol-claims-build-test-deploy) and a duration of 10 minutes 22 seconds. Your own run is still filling in while it works: a Task that has not started yet reads 0/1"]
 
 [TIP]
-.Use the wait — do exercise 2 now
+.Stream it, or read ahead
 ====
-This is a real build, and it is the longest wait in the module.
-Rather than watch dependencies download, *leave this streaming* (or press *Ctrl-C* — it keeps running) and start *exercise 2* below, which explores the very Tasks this run is using.
-Come back when the logs show `deploy` finishing.
-You can re-attach any time with `tkn pipelinerun logs --last -f -n $NS`, or watch the steps in the console under *Pipelines → PipelineRuns*.
+The log stream ends on its own when `deploy` prints `parasol-claims is live at https://…`.
+Pressing *Ctrl-C* stops only the stream, not the run: you can read ahead into exercise 2, which explores the Tasks this run is using, and re-attach any time with `tkn pipelinerun logs --last -f -n $NS`.
+
+`tkn` mixes a few lines of its own into the stream: they start with `E` and a timestamp and read `reflector.go:200] "Failed to watch" err="… context canceled"`.
+They are the client closing its watch on a finished step, not a pipeline error, so ignore them.
 ====
 
 When the run finishes, read what it produced — you never leave the run's page.
@@ -511,10 +499,10 @@ First the *results* — the data the pipeline published, not just the image:
 // Real run: image-size-mb = 391, image-within-budget = true. Total run time 12m — an UNCACHED run,
 // like every run of this pipeline measured so far (the page no longer promises a range; see the
 // MEASUREMENT STATUS note at the first Start step for why uncached figures are the ones we ship).
-// Re-measured 2026-08-07 on cluster-6xxpf (OCP 4.22.8 / Pipelines 1.23.1): image-size-mb = 392,
-// image-within-budget = true — so the value DRIFTS with the UBI base image and the body's "a
-// number in the high 300s" hedge is the right way to state it. The 391 in the captured block and
-// in the screenshot alt-text below is left exactly as captured; do not retro-fit it to 392.
+// Re-measured 2026-08-07 on cluster-6xxpf (OCP 4.22.8 / Pipelines 1.23.1): image-size-mb = 392, and
+// 2026-11-12 on cluster-5vqxc as user8: 394 — the value DRIFTS with the UBI base image, so the body's
+// "a number in the high 300s" hedge is the right way to state it. The block below is the 2026-11-12
+// capture; the screenshot alt-text keeps the 391 its image shows.
 [tabs]
 ====
 Console::
@@ -537,7 +525,7 @@ tkn pipelinerun describe --last -n $NS | sed -n '/Results/,$p' | head -n 5
 Results
 
  NAME                  VALUE
- image-size-mb         391
+ image-size-mb         394
  image-within-budget   true
 ----
 --
@@ -591,7 +579,7 @@ A service that you built, tested, and deployed with *one pipeline* — and that 
 ****
 
 == 2. Explore the company task library
-⏱ *~10 min* · the three reuse layers, and why Parasol curates its own Tasks
+⏱ *~5 min* · the three reuse layers, and why Parasol curates its own Tasks
 
 You just saw the Pipeline reference five Tasks by cluster resolver.
 This exercise looks at the two *curated* ones — and the concrete reason they exist.
@@ -613,16 +601,21 @@ oc get tasks.tekton.dev -n ogsr-parasol-tasks
 
 (Fully qualified as `tasks.tekton.dev`: on a full-catalog cluster another operator also serves a bare `tasks`, so the short name can resolve to the *wrong* API — the same collision the packaging module flags for `subscriptions`.)
 
-.Expected output (an extract — the shared library grows as teams curate their own Tasks; the two this pipeline uses:)
+.Expected output (the list grows as other teams curate their own Tasks)
 [source,texinfo]
 ----
-NAME                AGE
-image-size-report   ...
-maven-jdk21         ...
-...
+NAME                      AGE
+acs-image-check           ...
+image-size-report         ...
+k6-load-test              ...
+maven-jdk21               ...
+roxctl-deployment-check   ...
+sonar-scan                ...
+trivy-scan                ...
+zap-baseline              ...
 ----
 
-The shared library holds several curated Tasks — teams add their own over time — and two of them fill gaps in *this* pipeline.
+The shared library holds several curated Tasks, and two of them fill gaps in *this* pipeline: `maven-jdk21` and `image-size-report`.
 Now the *why*.
 The Pipeline's `unit-test` step runs Maven — and OpenShift Pipelines *ships* a `maven` Task, so the obvious choice is to use that shipped one.
 Look at what it actually runs:
@@ -660,7 +653,7 @@ oc get tasks.tekton.dev maven-jdk21 -n ogsr-parasol-tasks -o jsonpath='  {.spec.
 [source,texinfo]
 ----
 curated maven-jdk21, build step image:
-  registry.access.redhat.com/ubi9/openjdk-21:latest
+  registry.access.redhat.com/ubi9/openjdk-21@sha256:...
 ----
 
 A *Java 21* runner image — the guaranteed runtime the shipped Task's `JAVA_VERSION` knob could not actually deliver.
@@ -696,12 +689,12 @@ The *cluster resolver* you have been reading — `resolver: cluster` with `name`
 
 [.checkpoint]
 ****
-✔ *Verify:* You can list `ogsr-parasol-tasks` (two Tasks); you confirmed the shipped `maven` Task runs on a Java 17 image with no image parameter, while `maven-jdk21` runs on Java 21; and you read the parameters and results of `image-size-report`.
+✔ *Verify:* You can list `ogsr-parasol-tasks` and find `maven-jdk21` and `image-size-report` in it; you confirmed the shipped `maven` Task runs on a Java 17 image with no image parameter, while `maven-jdk21` runs on Java 21; and you read the parameters and results of `image-size-report`.
 You can explain why the platform team curated the library.
 ****
 
 == 3. Break the build: a failing test stops the pipeline
-⏱ *~10 min of your hands, but budget ~20 — it is two more full pipeline runs* · edit a test in your fork, watch the pipeline refuse the bad change, then fix it
+⏱ *~10 min* · edit a test in your fork, watch the pipeline refuse the bad change (a 2-minute run), then fix it (a 4-minute run)
 
 A pipeline that tests but ships anyway is theater.
 The value is that a *failing test stops the build* — a broken change never becomes a deployed image.
@@ -801,13 +794,17 @@ The `unit-test` step goes red with a readable message (your claim number and the
 // assignAdjusterBeforeApproval to false in user2's Gitea fork and starting the pipeline against
 // that fork — i.e. exercise 3 performed exactly as written. The run Failed at unit-test in 7m39s
 // wall clock, and the claim the test opened that run was CLM-2000.
+// RE-CAPTURED 2026-11-12 on cluster-5vqxc as user8 (run …-qb6wr, Failed in 2m13s): same message,
+// claim CLM-2000 again, `Time elapsed: 0.043 s`, and the suite now runs 33 tests — the block below
+// carries that count. tkn 0.42 also ends this stream with `failed to get logs for task unit-test :
+// container step-mvn-goals has failed`, which the text after the block explains.
 // Superseded provenance: until this capture the block was taken from a local `mvn -B -ntp test`
 // on apps/parasol-claims (the same goal set this pipeline's unit-test task runs — GOALS:
 // [ -B, -ntp, test ]) and validated against a field tester's earlier verbatim PipelineRun count.
 // The in-cluster run confirms every line of it, and corrects one: surefire 3.5.2 prints
 // `-- Time elapsed: N s` in the per-test FAILURE header, which the local capture had dropped.
-// Do NOT "correct" the 30 against a count of @Test annotations in apps/parasol-claims: that
-// counts 35, because surefire's "Tests run" reflects what the Maven invocation actually executes,
+// Do NOT "correct" the 33 against a count of @Test annotations in apps/parasol-claims: that
+// counts 38 (2026-11-12), because surefire's "Tests run" reflects what the Maven invocation actually executes,
 // not every annotation in the tree.
 //
 // WHAT CHANGED, and why the old text is gone: until 2026-08-07 this block quoted
@@ -833,18 +830,19 @@ The `unit-test` step goes red with a readable message (your claim number and the
 // whole point is that it is verbatim.
 [source,texinfo,subs="-callouts"]
 ----
-[ERROR] com.parasol.claims.ClaimResourceTest.approvingAClaimRequiresAnAssignedAdjuster -- Time elapsed: 0.409 s <<< FAILURE!
+[ERROR] com.parasol.claims.ClaimResourceTest.approvingAClaimRequiresAnAssignedAdjuster -- Time elapsed: 0.043 s <<< FAILURE!
 org.opentest4j.AssertionFailedError: Parasol rule enforced: the API refused to approve claim
 CLM-XXXX while its adjuster was Unassigned - an adjuster must own a claim before it can be
 approved. PUT /api/claims/CLM-XXXX/status answered 409 {"error":"claim CLM-XXXX cannot be
 Approved while its adjuster is Unassigned - assign an adjuster before approving it"}
 ==> expected: <200> but was: <409>
-[ERROR] Tests run: 30, Failures: 1, Errors: 0, Skipped: 0
+[ERROR] Tests run: 33, Failures: 1, Errors: 0, Skipped: 0
 [INFO] BUILD FAILURE
 ----
 
 Read that message once more, because it is the whole point of a test in a pipeline: the `409` and the `{"error":...}` beside it are the *claims service's own words*.
 The test did not invent a rule — it asked the running API to approve an unowned claim, and the API refused.
+(The stream then ends with `failed to get logs for task unit-test : container step-mvn-goals has failed`: that is `tkn` reporting the same failed step, not a second problem.)
 
 Now confirm the important part — the build and deploy *never ran*.
 
@@ -1018,8 +1016,8 @@ Console::
 --
 In the navigation, choose *Pipelines* → *Repositories* (project `{user}-cicd`) and click `parasol-claims`.
 Its *Details* page shows the repository *URL* pointing at your fork, and the `gitea-pac-secret` Secret behind both *Git access token* and *Webhook secret* — the credentials PaC uses to talk to Gitea.
-The *Succeeded* / *StartTime* fields read `-` for now: they track the *last* run PaC fired, and nothing has pushed yet.
-Once pushes start firing later in this exercise, those runs appear on this page's *PipelineRuns* tab.
+The *Succeeded* / *StartTime* fields read `-`, and they can stay `-` even after PaC has run the pipeline, so do not read them as a sign that nothing fired.
+Once pushes start firing later in this exercise, those runs appear on this page's *PipelineRuns* tab, which is the place to look.
 NOTE: the *Repositories* page is badged *Dev preview* — that is expected, and does not mean anything is misconfigured.
 --
 CLI::
@@ -1046,6 +1044,21 @@ Two pieces remain: create that Secret, and create the webhook that feeds it.
 *First*, give PaC a Gitea token (to read your repo and report status) and a *webhook secret* (a shared string that lets PaC trust the incoming push).
 Create the token in Gitea, then store both in the `gitea-pac-secret` the `Repository` already expects:
 
+// Measured 2026-11-12 as user8 after `ws reset`: Gitea kept the first pass's `pac` token and its
+// webhook (a reset never touches the fork's settings). Re-creating `pac` answered HTTP 400 "access
+// token name has been used already"; the leftover webhook fired on reset's own seed commits and logged
+// RepositorySecretMissing warnings. Deleting both first, then repeating the exercise, gave one token,
+// one webhook and exactly one PaC run per push.
+[NOTE]
+.Doing this exercise a second time?
+====
+Gitea keeps what your last pass created, because `ws reset` never touches your fork's settings.
+Delete both before you start, or Gitea refuses the token name `pac` and every push is delivered twice:
+
+* the old `pac` token: avatar → *Settings* → *Applications*, then *Delete* beside `pac`;
+* the old webhook: your fork → *Settings* → *Webhooks*, open the `pipelines-as-code-controller` entry and *Delete Webhook*.
+====
+
 . In Gitea, click your avatar (top right) → *Settings* → *Applications*.
 . Under *Manage Access Tokens*, name a token `pac`, and under *Select scopes* choose *write:repository*.
 Click *Generate Token* and *copy the value* (Gitea shows it once).
@@ -1070,7 +1083,7 @@ Now generate the webhook secret and create the Secret from both values:
 +
 [source,sh,role=execute]
 ----
-WEBHOOK_SECRET="parasol-$(openssl rand -hex 6)"
+WEBHOOK_SECRET="parasol-$(python3 -c 'import secrets; print(secrets.token_hex(6))')"
 echo "your webhook secret is: $WEBHOOK_SECRET"
 echo "  ^ copy it — you paste it into the Gitea webhook form next"
 # `adm start` does NOT clear a leftover Secret from a prior pass on this same cluster (only
@@ -1167,6 +1180,9 @@ Within a few seconds PaC creates a run:
 // Succeeded/StartTime columns) as evidence that PaC fired; those columns read "-" even on a
 // namespace whose webhook demonstrably works. Confirm from the PipelineRuns tab and the
 // pipelinesascode.tekton.dev labels instead, which is what this exercise now tells you to do.
+// Re-checked 2026-11-12 as user8 after a Succeeded PaC run: `.status` and `.pipelinerun_status` on
+// the Repository were both still empty, while `tkn pac describe` printed Status Succeeded with the
+// run, event and commit — it reads the labelled PipelineRuns, not the Repository's own status.
 [tabs]
 ====
 Console::
@@ -1178,17 +1194,27 @@ Open it to watch it build.
 CLI::
 +
 --
+// `tkn pipelinerun list` has no watch flag (tkn 0.42: `-w` is "unknown shorthand flag"), so the
+// watch is `oc get -w`, alone in its block because it never returns by itself (house pattern, as in
+// jobs-batch-kueue). Captured 2026-11-12 as user8: the PaC run was listed within 5 s of the README
+// commit and reached Running about 15 s later.
 [source,sh,role=execute]
 ----
-# watch for a new PipelineRun to appear on its own
-tkn pipelinerun list -n $NS -w
+oc get pipelinerun -n $NS -w
 ----
 
-.Expected output — a run named for the push appears
+Your earlier runs are listed first; the new one is added below them as it arrives.
+Press *Ctrl-C* once a `parasol-claims-pull-request-…` line reads `Running`.
+
+.Expected output (abridged) — a run named for the push appears
 [source,texinfo]
 ----
-NAME                             STARTED         DURATION   STATUS
-parasol-claims-pull-request-...  4 seconds ago   ---        Running
+NAME                                         SUCCEEDED   REASON      STARTTIME   COMPLETIONTIME
+parasol-claims-build-test-deploy-run-...     True        Succeeded   4m40s       79s
+...
+parasol-claims-pull-request-...
+parasol-claims-pull-request-...              Unknown     ResolvingPipelineRef   0s
+parasol-claims-pull-request-...              Unknown     Running                1s
 ----
 --
 ====
