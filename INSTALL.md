@@ -49,6 +49,9 @@ Memory = 58 Gi + attendees × 2 Gi + 20%
 - Prefer fewer, larger workers. Below 16 vCPU per worker, capacity is stranded.
 - Size on requests, never on a `top` reading — a cluster that looks idle can still refuse a pod.
 - RHACS alone is 11 CPU / 25 Gi. To order lean, disable the modules that use it (`modules_disabled`).
+- The attendees' shared Argo CD controller sizes itself from `userCount`: limit = 1536 Mi + 32 Mi ×
+  attendees, request = half (13 → 1952 Mi, 30 → 2496 Mi). Tune in `gitops/workshop-config/values.yaml`
+  (`studentArgo.controller`).
 
 Workers needed **by capacity** (allocatable ≈ vCPU − 2):
 
