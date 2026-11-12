@@ -1,6 +1,6 @@
 # component: openshift-lightspeed
 
-OpenShift Lightspeed — the in-console AI assistant — subscribed cluster-wide and bound to an
+OpenShift Lightspeed — the in-console AI assistant — subscribed in its own namespace (2.x supports only OwnNamespace) and bound to an
 external LLM served via **Models-as-a-Service (MaaS)**, an OpenAI-compatible vLLM endpoint
 (`OLSConfig.spec.llm.providers[].type: rhoai_vllm`).
 
@@ -9,7 +9,7 @@ external LLM served via **Models-as-a-Service (MaaS)**, an OpenAI-compatible vLL
 | File | Why |
 |---|---|
 | `namespace.yaml` | `openshift-lightspeed` — operator + `OLSConfig` + Secret live here |
-| `operatorgroup.yaml` | all-namespaces OperatorGroup (no `targetNamespaces`) |
+| `operatorgroup.yaml` | OwnNamespace OperatorGroup (`targetNamespaces: [openshift-lightspeed]`) — 2.x refuses all-namespaces |
 | `subscription.yaml` | `lightspeed-operator`, channel `stable`, `redhat-operators` |
 | `olsconfig.yaml` | the `cluster` OLSConfig (CR name **must** be `cluster`), sync-wave 3 |
 
