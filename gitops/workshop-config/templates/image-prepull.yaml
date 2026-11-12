@@ -24,6 +24,12 @@
                     its lab used to tell attendees to warm it by hand).
     terminal,       whenever the shared cockpit is on — every attendee's terminal pod
     git-cloner      (showroom-shared.yaml) runs them, and a cold start is the attendee's first click.
+    8 task images   app-security-testing — every step image of its capstone Pipeline (ZAP alone is
+                    1.19GB, sonar-scanner 514MB). The Affinity Assistant puts each attendee's run on
+                    whichever node it picks, so a cold node otherwise costs a pull mid-gate. Each digest
+                    is COPIED from the Task that runs it (pipelines/tasks/*.yaml + the bundled buildah
+                    task); bump both together, or the node caches an image nothing runs. Verified
+                    2026-11-12 that all eight run `true` under this pod's securityContext.
   "Schedulable" means what the scheduler means: no tolerations, so a node tainted NoSchedule (the
   batch pool, tainted masters) is skipped — the workloads these images serve cannot land there either.
 
@@ -48,6 +54,7 @@ securityContext:
 {{- range $slug := list "devspaces-inner-loop" }}
 {{- if include "workshop-config.moduleEnabled" (dict "root" $ "slug" $slug) }}{{ $udi = true }}{{ end }}
 {{- end }}
+{{- $appsec := include "workshop-config.moduleEnabled" (dict "root" $ "slug" "app-security-testing") }}
 {{- $tools := false }}
 {{- range $slug := list "multi-tenancy-workload-security" "deployment-targets-scheduling" "eventing-deep-dive" "networking-dev-devops" "resilience-multicluster-dr" "serverless-zero-to-hero" "service-mesh-advanced-gateways" }}
 {{- if include "workshop-config.moduleEnabled" (dict "root" $ "slug" $slug) }}{{ $tools = true }}{{ end }}
@@ -78,7 +85,7 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       {{- $term := and .Values.showroom.enabled .Values.showroom.shared.enabled }}
-      {{- if or $udi $tools $term }}
+      {{- if or $udi $tools $term $appsec }}
       initContainers:
       {{- if $udi }}
         - name: udi
@@ -110,6 +117,22 @@ spec:
           image: {{ .Values.showroom.images.gitCloner | quote }}
           command: ["true"]
           {{- include "workshop-config.prepullContainerSpec" . | nindent 10 }}
+      {{- end }}
+      {{- if $appsec }}
+      {{- range $name, $image := dict
+            "zap-baseline" "ghcr.io/zaproxy/zaproxy:stable@sha256:c558ee87358911ab17278c70991e856f57793e115d9cd0f88ca475cf82907a1a"
+            "sonar-scanner" "docker.io/sonarsource/sonar-scanner-cli:12@sha256:23ca0f137965d9dff2198074043fd48d386280bc5d0ccac8c8349cea4cf096a9"
+            "trivy" "ghcr.io/aquasecurity/trivy:0.67.0@sha256:de2ab931243c724bc5ea97f22027d5cf38f953dd7e806ad3976a42dc5b0174c4"
+            "k6" "docker.io/grafana/k6@sha256:e7eeddf1ce2361df6920d925297f487c0ba549c44be242c6a9c22f28d9b08efa"
+            "roxctl" "registry.redhat.io/advanced-cluster-security/rhacs-roxctl-rhel9@sha256:979f329cbe0d0dd1c41e63b471c246294780c5daf029c239ebd7d48129e75a15"
+            "openjdk-21" "registry.access.redhat.com/ubi9/openjdk-21@sha256:24dad82bd5d25d9b0c85f0e9c976e47ccce787cc73792355462bf54fe03d9a77"
+            "buildah" "registry.redhat.io/rhel9/buildah@sha256:ce2db38cddeedde4489473a689981c532dff4e2e63971d20bb7b3ceca996c18d"
+            "ose-cli" "registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19" }}
+        - name: {{ $name }}
+          image: {{ $image | quote }}
+          command: ["true"]
+          {{- include "workshop-config.prepullContainerSpec" $ | nindent 10 }}
+      {{- end }}
       {{- end }}
       {{- end }}
       containers:
