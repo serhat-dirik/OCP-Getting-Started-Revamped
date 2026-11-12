@@ -73,7 +73,7 @@ kn service update parasol-claims -n $NS --revision-name parasol-claims-v2 --conc
 
 Then leave the service alone until it settles back to *zero* pods — about a minute with no traffic. Steps 1 and 2 both depend on starting from zero: from zero the activator sees the whole burst and adds capacity at once, while a service left warm by an earlier request scales on measured average concurrency and can sit at one pod indefinitely. A second terminal pane running `oc get pods -n $NS -w` shows pods appearing and vanishing while the steps run.
 
-NOTE: The cold start in step 1 is a *range*, not a fixed figure — measured three times on this cluster at 15.27 s, 18.81 s and 26.51 s. Expect *15–30 seconds*, and read the figure off the screen rather than quoting one in advance.
+NOTE: The cold start in step 1 is a *range*, not a fixed figure — measured five times on this cluster at 11.80 s, 12.79 s, 15.27 s, 18.81 s and 26.51 s. Expect *10–30 seconds*, and read the figure off the screen rather than quoting one in advance.
 
 CAUTION: `ws prep serverless-zero-to-hero` is also the reset between runs. It returns the entry state — one scale-to-zero revision, no traffic split, no eventing — so the `parasol-claims-v2` update above has to be run again after each reset.
 ====
@@ -92,7 +92,7 @@ OpenShift Serverless answers with request-driven compute. You create *one* objec
 
 Knative scales on *concurrency* — requests in flight — rather than CPU, and it is the autoscaler that can go all the way to zero: no traffic, no pods, no cost beyond the configuration. A ceiling set per service caps how far a burst can climb, so one tenant cannot exhaust the cluster.
 
-The trade is the *cold start*. The first request into a scaled-to-zero service waits while a pod is scheduled and the runtime boots — 15 to 30 seconds for this JVM service, against about a tenth of a second warm. That is a tunable cost rather than a defect: a `min-scale` floor of one keeps a pod warm for a latency-sensitive path, and a natively compiled build shrinks the start to milliseconds.
+The trade is the *cold start*. The first request into a scaled-to-zero service waits while a pod is scheduled and the runtime boots — 10 to 30 seconds for this JVM service, against about a tenth of a second warm. That is a tunable cost rather than a defect: a `min-scale` floor of one keeps a pod warm for a latency-sensitive path, and a natively compiled build shrinks the start to milliseconds.
 
 *In this demo*
 
@@ -188,7 +188,7 @@ kn revision list -n $NS
 == Frequently asked questions
 
 *The first request took twenty seconds. Is something broken?*::
-No — that is the cold start, and it is the cost of holding zero pods. A scaled-to-zero service has no capacity until a request arrives; the activator buffers that request while a pod is scheduled and the JVM boots, which on this cluster measured between 15 s and 27 s. Every request after it is about 0.1 s. Where the wait is unacceptable, `min-scale: 1` keeps one pod warm, and a natively compiled build cuts the start to tens of milliseconds. It is a tuning decision per service, not a defect.
+No — that is the cold start, and it is the cost of holding zero pods. A scaled-to-zero service has no capacity until a request arrives; the activator buffers that request while a pod is scheduled and the JVM boots, which on this cluster measured between 12 s and 27 s. Every request after it is about 0.1 s. Where the wait is unacceptable, `min-scale: 1` keeps one pod warm, and a natively compiled build cuts the start to tens of milliseconds. It is a tuning decision per service, not a defect.
 
 *Why is a pod still running when nothing is calling the service?*::
 Two Knative defaults add up: the stable window the autoscaler averages over (about 60 s) plus the scale-to-zero grace period (about 30 s). A service settles to zero roughly a minute to a minute and a half after the last request, not the instant traffic stops. Anything that keeps sending traffic — a health checker, a scheduled event source — keeps it awake, which is expected behaviour rather than a leak.
@@ -284,7 +284,7 @@ demo-client-...                1/1     Running   0          8m
 [NOTE]
 .If a `parasol-claims` pod is still here, that's normal — you're just early
 ====
-Right after `adm start` materializes this module, the initial `parasol-claims` pod can still be *Running* for close to a minute (measured 71-84 seconds old on this cluster) before Knative finishes draining it to zero — a normally-paced reader can easily reach this step before that finishes.
+Right after `ws prep` materializes this module, the initial `parasol-claims` pod can still be *Running* for close to a minute (measured 71-84 seconds old on this cluster) before Knative finishes draining it to zero — a normally-paced reader can easily reach this step before that finishes.
 If you see a `parasol-claims-...` pod above, the scale-to-zero claim is still true; the drain is just still in flight.
 Exercise 2 waits for zero pods before timing the cold start — re-run the command above after a minute, or continue on and let that wait catch you up.
 ====
@@ -327,7 +327,9 @@ oc exec deploy/demo-client -n $NS -- curl -s -k -o /dev/null -w "cold start: HTT
 // leaving 3.5s of margin against the slowest. A timeout there prints `HTTP 000`, which is the exact
 // symbol the attendee has just been taught means failure, on the block presented to them as the FIX.
 // Hence `-m 60` and a stated range. Do not re-narrow either to a single observed number.
-.Expected output (a real, honest JVM cold start — expect anywhere from ~15 to ~30 seconds; yours will differ)
+// WIDENED 2026-11-12: two runs came in under 15 s — 12.79 s (user12 smoke) and 11.80 s (user10) — so the
+// range is now ~10-30 s.
+.Expected output (a real, honest JVM cold start — expect anywhere from ~10 to ~30 seconds; yours will differ)
 [source,texinfo]
 ----
 cold start: HTTP 200 in 15.269703s
@@ -366,23 +368,23 @@ Now the deliberate *break-and-fix*, because it teaches the cold start the hard w
 
 [source,sh,role=execute]
 ----
-# wait for scale-to-zero (about a minute of no traffic), then confirm no pod:
-sleep 90
-oc get pods -n $NS -l serving.knative.dev/service=parasol-claims --no-headers 2>/dev/null | wc -l
-# now a request with a 5-second timeout — SHORTER than the ~15s cold start:
+# wait for scale-to-zero (60-100 s of no traffic) — ZERO pods, in any state:
+until [ "$(oc get pods -n $NS -l serving.knative.dev/service=parasol-claims --no-headers 2>/dev/null | wc -l | tr -d ' ')" = 0 ]; do sleep 10; done
+echo "scaled to zero"
+# now a request with a 5-second timeout — SHORTER than the 10-30 s cold start:
 oc exec deploy/demo-client -n $NS -- curl -s -k -m 5 -o /dev/null -w "with -m5: HTTP %{http_code} in %{time_total}s\n" "$URL/api/claims" || echo "curl gave up (exit $?) — the cold start outran the 5s timeout"
 ----
 
 .Expected output (the request is abandoned before the cold start finishes; `curl` exits 28, which `oc exec` surfaces as its own line before the `||` message)
 [source,texinfo]
 ----
-0
+scaled to zero
 with -m5: HTTP 000 in 5.001s
 command terminated with exit code 28
 curl gave up (exit 28) — the cold start outran the 5s timeout
 ----
 
-The client gave up at 5 seconds, before the ~15-second cold start could complete — a classic "why does my first request fail?" trap. *Fix it* the way you would in production: either give the client a realistic timeout, or keep one pod warm so there's *no* cold start on the critical path.
+The client gave up at 5 seconds, before the cold start could complete — a classic "why does my first request fail?" trap. *Fix it* the way you would in production: either give the client a realistic timeout, or keep one pod warm so there's *no* cold start on the critical path.
 
 [source,sh,role=execute]
 ----
@@ -391,24 +393,26 @@ oc exec deploy/demo-client -n $NS -- curl -s -k -m 60 -o /dev/null -w "with -m60
 # fix option B — pin a warm floor so scale-from-zero never hits the critical path.
 # Knative revisions are IMMUTABLE: changing the template (here, the min-scale floor) needs a NEW
 # revision name, or the webhook rejects "changes without a name change" — so name this one.
-# `adm start` does NOT remove revisions a previous pass left in this namespace (only `ws reset`/
-# `ws prep` do), so clear any same-named leftover first — safe even on a first run (no-op if absent):
+# Revisions from an earlier pass stay in this namespace until `ws prep` or `ws reset` clears them,
+# so clear any same-named leftover first — safe even on a first run (no-op if absent):
 oc delete revision parasol-claims-v1-warm -n $NS --ignore-not-found=true >/dev/null 2>&1 || true
 kn service update parasol-claims -n $NS --scale-min 1 --revision-name parasol-claims-v1-warm --no-wait
 ----
 
-.Expected output (option A rides out the cold start; option B keeps one pod always warm)
+.Expected output (option A succeeds; option B keeps one pod always warm)
 [source,texinfo,subs="attributes"]
 ----
-with -m60: HTTP 200 in 22.692900s
+with -m60: HTTP 200 in 4.903990s
 Service 'parasol-claims' updated in namespace '{user}-dev'.
 ----
+
+Option A came back in a few seconds rather than a full cold start: the abandoned `-m5` request had already woken a pod, which was still booting when option A arrived. The point is the timeout — on a true cold start of 10–30 seconds, `-m 60` still has room, and `-m 5` never does.
 
 [NOTE]
 .A stderr warning you'll see on every `kn service update` in this lab
 ====
-`kn service update` also prints a client-side warning to stderr, ahead of the `Service '...' updated` line — something like `Kubernetes default value is insecure, Knative default is more secure` about `securityContext`.
-It's harmless — a client-side lint about pod security defaults, not an error — and the expected-output blocks in this lab capture stdout only, so it won't appear in them.
+`kn service update` also prints a warning to stderr, ahead of the `Service '...' updated` line: `Warning: Kubernetes default value is insecure, Knative may default this to secure in a future release:`, followed by four `securityContext` field paths.
+It's harmless — Knative's note about pod security defaults it may tighten later, not an error — and the expected-output blocks in this lab capture stdout only, so it won't appear in them.
 Expect it on every `kn service update` from here on.
 ====
 
@@ -426,7 +430,7 @@ kn service update parasol-claims -n $NS --scale-min 0 --revision-name parasol-cl
 
 [.checkpoint]
 ****
-✔ *Verify:* You woke the service from zero and *measured* the cold start (`HTTP 200` in ~15 s) against a warm request (~0.1 s), saw the `2/2` pod (app + `queue-proxy`) serve real claims, and hit — then fixed — the cold-start-vs-client-timeout trap (a 5 s timeout fails; a realistic timeout or a `min-scale` warm floor succeeds).
+✔ *Verify:* You woke the service from zero and *measured* the cold start (`HTTP 200` in 10–30 s) against a warm request (~0.1 s), saw the `2/2` pod (app + `queue-proxy`) serve real claims, and hit — then fixed — the cold-start-vs-client-timeout trap (a 5 s timeout fails; a realistic timeout or a `min-scale` warm floor succeeds).
 ****
 
 == 3. Autoscale under load, and tune concurrency
@@ -434,7 +438,7 @@ kn service update parasol-claims -n $NS --scale-min 0 --revision-name parasol-cl
 
 Knative's autoscaler scales on *concurrency* — how many requests are in flight at once — not on CPU. To make that visible, first *tune* the service: cap each pod at a *hard* concurrency of `2` and a *max-scale* of `3`. Changing the template mints a new revision — name it `parasol-claims-v2`.
 
-`adm start` does NOT remove revisions a previous pass left in this namespace (only `ws reset`/`ws prep` do) — a leftover `parasol-claims-v2` from an earlier pass whose content differs even slightly (a rebuilt image, a different concurrency setting) makes *this exact step* fail with `Ready=False` / a rejected "changes without a name change" (or `already exists`) error, and no new revision gets created. Clear it first — safe even on a first run (no-op if absent), and covers both tabs below:
+Revisions from an earlier pass stay in this namespace until `ws prep` or `ws reset` clears them — a leftover `parasol-claims-v2` from an earlier pass whose content differs even slightly (a rebuilt image, a different concurrency setting) makes *this exact step* fail with `Ready=False` / a rejected "changes without a name change" (or `already exists`) error, and no new revision gets created. Clear it first — safe even on a first run (no-op if absent), and covers both tabs below:
 
 [source,sh,role=execute]
 ----
@@ -601,23 +605,29 @@ oc exec deploy/demo-client -n $NS -- sh -c '
   for i in $(seq 1 12); do
     ( while [ $(date +%s) -lt $end ]; do curl -s -k -o /dev/null "'$URL'/api/claims"; done ) &
   done; wait' &
-# ...and watch the autoscaler react (Ctrl-C once you have seen it reach 3):
+# ...and watch the autoscaler react (Ctrl-C once you have seen three pods at 2/2):
 oc get pods -n $NS -l serving.knative.dev/service=parasol-claims -w
 ----
 
-.Expected output (zero → the max-scale ceiling in about a minute)
+// RE-MEASURED 2026-11-12 (user12 smoke, then user10, same shape both times): all three pods were
+// created together at t+3-5 s and were 2/2 by t+16-17 s; two went Terminating at t+77-79 s with the
+// 90 s burst still running, the third at t+155 s. The older capture (one pod, then two more ~45 s
+// later) was a slower cluster; the page now describes the range.
+.Expected output (zero → the max-scale ceiling, usually all three pods at once, within seconds)
 [source,texinfo]
 ----
-NAME                                            READY   STATUS              AGE
-parasol-claims-v2-deployment-...                0/2     Pending             2s
-parasol-claims-v2-deployment-...                2/2     Running             10s
-parasol-claims-v2-deployment-xxxxx-...          2/2     Running             45s
-parasol-claims-v2-deployment-yyyyy-...          2/2     Running             49s
+NAME                                            READY   STATUS              RESTARTS   AGE
+parasol-claims-v2-deployment-...-dp2fc          0/2     Pending             0          0s
+parasol-claims-v2-deployment-...-rptf6          0/2     Pending             0          0s
+parasol-claims-v2-deployment-...-5nh5r          0/2     Pending             0          0s
+parasol-claims-v2-deployment-...-dp2fc          2/2     Running             0          13s
+parasol-claims-v2-deployment-...-rptf6          2/2     Running             0          12s
+parasol-claims-v2-deployment-...-5nh5r          2/2     Running             0          12s
 ----
 
-You saw the replica count go *0 → 1 → 2 → 3*, then hold at *3* — the `max-scale` ceiling you set, so a single bursting service can't exhaust the cluster.
+You saw the replica count go from *0* straight to *3* — the `max-scale` ceiling you set, so a single bursting service can't exhaust the cluster.
 
-Watch the *shape*, not the stopwatch: the first pod arrives in seconds because the activator is holding your requests and needs somewhere to put them, and the next two follow around the 45-second mark once the autoscaler has measured sustained concurrency and decided one pod is not enough. Those are two different mechanisms, and the gap between them is the interesting part.
+Watch the *shape*, not the stopwatch. From zero the activator holds every request in the burst, sees twelve of them waiting against a limit of two per pod, and asks for the ceiling at once — on this cluster all three pods were created within two seconds and serving about 15 seconds into the burst. On a slower or busier cluster you may instead see one pod first and the rest join tens of seconds later, once the autoscaler has measured sustained concurrency. Either way the count stops at 3.
 
 // DELIVERED 2026-08-07, mid-burst, gated on readyReplicas==3 before the shutter fired.
 // THE ALT TEXT DELIBERATELY DOES NOT SAY "3". The media-pass note asked for a ring "showing 3/3
@@ -630,21 +640,27 @@ Watch the *shape*, not the stopwatch: the first pod arrives in seconds because t
 // HOLLOW outline (zero pods, still 100% of traffic), this one is a thick SOLID blue band.
 image::serverless-zero-to-hero/serverless-zero-to-hero-02-topology-scaled-up.png["Topology view of the {user}-dev project during the burst. claims-db, demo-client and the claim-ticker PingSource are drawn alongside the parasol-claims Knative Service, which sits in a dashed grouping box with a REV badge on revision v2 and a 100 percent traffic badge. Its readiness ring is now a thick solid blue band rather than the hollow outline it showed at rest — the revision has scaled up under load and is running pods.",role=lightbox]
 
-When the burst ends, the autoscaler drains back down; watch it return to zero:
+The autoscaler gives capacity back as soon as measured concurrency drops — often before the 90-second burst has ended, because this small client cannot keep three pods busy. Watch it return to zero:
 
 [source,sh,role=execute]
 ----
 oc get pods -n $NS -l serving.knative.dev/service=parasol-claims -w
-# after the load stops you'll see 3 -> 1 -> 0 over about 60-100 seconds; Ctrl-C when it reaches 0
+# measured: two pods start Terminating around t+80 s, the last one about a minute later; Ctrl-C when none are left
 ----
 
-.Expected output (idle → the pods are removed, back to zero)
+.Expected output (pods are removed in steps, back to zero)
 [source,texinfo]
 ----
-parasol-claims-v2-deployment-yyyyy-...          2/2     Terminating         ...
-parasol-claims-v2-deployment-xxxxx-...          2/2     Terminating         ...
-parasol-claims-v2-deployment-...                2/2     Terminating         ...
+parasol-claims-v2-deployment-...-dp2fc          2/2     Terminating         0          76s
+parasol-claims-v2-deployment-...-rptf6          2/2     Terminating         0          74s
+parasol-claims-v2-deployment-...-dp2fc          0/2     Error               0          106s
+parasol-claims-v2-deployment-...-rptf6          0/2     Error               0          104s
+parasol-claims-v2-deployment-...-5nh5r          2/2     Terminating         0          2m30s
+parasol-claims-v2-deployment-...-5nh5r          0/2     Error               0          3m
 ----
+
+// MEASURED 2026-11-12 (user10): on a drained pod the app container exits 143 (Error) and queue-proxy 0.
+A terminating pod ends as `0/2 Error`. That is normal for a drained Knative pod, not a failure: when Knative removes it, the JVM in the `parasol-claims` container answers the shutdown signal with exit code 143, and Kubernetes reports any non-zero exit as `Error`. The `queue-proxy` sidecar exits cleanly.
 
 [NOTE]
 .Why concurrency, and why the *hard* limit here
@@ -654,7 +670,7 @@ Knative's default target is a *soft* concurrency goal (`autoscaling.knative.dev/
 
 [.checkpoint]
 ****
-✔ *Verify:* You *tuned* concurrency (minting revision `parasol-claims-v2` with `containerConcurrency: 2` and `max-scale: 3`), drove a concurrent burst, and watched the autoscaler climb *0 → 2 → 3* on concurrency and hold at the `max-scale` ceiling — then melt back to *zero* when the load stopped.
+✔ *Verify:* You *tuned* concurrency (minting revision `parasol-claims-v2` with `containerConcurrency: 2` and `max-scale: 3`), drove a concurrent burst, and watched the autoscaler climb from *0* to the `max-scale` ceiling of *3* on concurrency and stop there — then melt back to *zero* as the load fell away.
 ****
 
 == 4. Split traffic between revisions
@@ -785,19 +801,21 @@ Now prove the *main* URL really splits across both revisions — send a batch th
 ----
 oc exec deploy/demo-client -n $NS -- sh -c 'for i in $(seq 1 50); do curl -s -k -o /dev/null "'$URL'/api/claims"; done; echo "sent 50"'
 # the candidate revision only gets ~20% of these requests, so it may still be mid cold-start
-# (~15-30s on this cluster) right after the batch — give it a moment before reading READY:
+# (10-30 s on this cluster) right after the batch — give it a moment before reading READY:
 sleep 30
 oc get deploy -n $NS -l serving.knative.dev/service=parasol-claims \
   -o custom-columns='REVISION-DEPLOYMENT:.metadata.name,READY:.status.readyReplicas'
 ----
 
-.Expected output (both revisions received traffic and scaled up — if you read this immediately after the batch instead of waiting, the just-woken candidate revision can still show READY <none> for another ~15-30s; that's the cold start finishing, not a missed delivery)
+.Expected output (v1 and v2 both received traffic and scaled up; the two unrouted revisions from exercise 2 stay at `<none>`. If you read this straight after the batch, the just-woken candidate can still show `<none>` for another 10-30 s — that's the cold start finishing, not a missed delivery)
 [source,texinfo]
 ----
 sent 50
-REVISION-DEPLOYMENT             READY
-parasol-claims-v1-deployment    1
-parasol-claims-v2-deployment    1
+REVISION-DEPLOYMENT                 READY
+parasol-claims-v1-cold-deployment   <none>
+parasol-claims-v1-deployment        1
+parasol-claims-v1-warm-deployment   <none>
+parasol-claims-v2-deployment        1
 ----
 
 Finally, the *rollback* — the reason this model is cheap. Send *100%* back to `stable` in one line; the candidate revision stays put, ready to re-weight:
@@ -826,11 +844,11 @@ kn revision list -n $NS
 // parasol-claims-v1 80%/stable, parasol-claims-v2 20%/candidate via a final `kn revision list -n
 // user1-dev`. This closes the marker: the rollback step is now directly observed on cluster, not
 // inferred.
-.Expected output (all traffic back on stable; candidate retained at 0%)
+.Expected output (all traffic back on stable; candidate retained with its tag — `kn` prints 0% as a blank TRAFFIC cell)
 [source,texinfo]
 ----
 NAME                     SERVICE          TRAFFIC   TAGS        GENERATION   AGE   CONDITIONS   READY   REASON
-parasol-claims-v2        parasol-claims   0%        candidate   4            8m    3 OK / 4     True
+parasol-claims-v2        parasol-claims             candidate   4            8m    4 OK / 4     True
 parasol-claims-v1-cold   parasol-claims                         3            11m   3 OK / 4     True
 parasol-claims-v1-warm   parasol-claims                         2            12m   3 OK / 4     True
 parasol-claims-v1        parasol-claims   100%      stable      1            20m   3 OK / 4     True
@@ -1030,7 +1048,7 @@ cold start: HTTP 200 in 2.481537s
 warm:       HTTP 200 in 0.022012s
 ----
 
-Compare that with exercise 2. The same scale-to-zero, but the function woke in about *2.5 seconds* where `parasol-claims` took 15–30. A cold start is a property of what you deploy: one handler with a handful of extensions boots far faster than a service with a database pool behind it.
+Compare that with exercise 2. The same scale-to-zero, but the function woke in about *2.5 seconds* where `parasol-claims` took 10–30. A cold start is a property of what you deploy: one handler with a handful of extensions boots far faster than a service with a database pool behind it.
 
 [.checkpoint]
 ****
