@@ -2,8 +2,8 @@
 # END state for instructor demos / `ws solve registry-images-catalog-governance` / testing — the objects the attendee produces in the
 # three namespaced, non-disruptive beats (the promoted parasol-claims:{{ .Values.promoteTag }} tag lives
 # INLINE in claims-imagestream.yaml, a tag on that same stream). Verify asserts OUTCOMES (the ext-ubi
-# stream exists with a scheduled tag; a custom Template exists in {user}-dev; the sample pull secret is
-# referenced for pull), never the exact mechanism, so any correct attendee solution stays green (rule 14).
+# stream exists with a scheduled tag; a custom Template exists in {user}-dev and its quickstart runs; the
+# sample pull secret is referenced for pull), never the exact mechanism, so any correct attendee solution stays green (rule 14).
 # The cluster-wide controls are never chart-owned (Rule 13): the install sets allowedRegistriesForImport,
 # and mirroring / samples-skip / ConsoleSample are concept or read-only. Exercise 6's namespaced OUTCOME —
 # the stream imported from an APPROVED registry after docker.io was refused — is rendered below.
@@ -91,6 +91,9 @@ objects:
         app.kubernetes.io/part-of: parasol
     spec:
       replicas: 1
+      # A pod must stay ready 30 s before it counts as available, so `rollout status` cannot report
+      # success for a pod that crashes right after starting (smoke 2026-11-12).
+      minReadySeconds: 30
       selector:
         matchLabels:
           app: ${APP_NAME}
@@ -104,8 +107,26 @@ objects:
               image: {{ .Values.sourceImageStream }}:{{ .Values.seedTag }}
               # Mutable workshop tag - rebuilt in place, so a node-cached IfNotPresent layer served the OLD image (measured 2026-07-29).
               imagePullPolicy: Always
+              # DB-free mode: without these the image dials a parasol-db Service {user}-dev does not
+              # have and crash-loops on UnknownHostException (smoke 2026-11-12). Same as the lab.
+              env:
+                - name: QUARKUS_DATASOURCE_ACTIVE
+                  value: "false"
+                - name: QUARKUS_HIBERNATE_ORM_ACTIVE
+                  value: "false"
               ports:
                 - containerPort: 8080
+              readinessProbe:
+                httpGet:
+                  path: /q/health/ready
+                  port: 8080
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  cpu: 200m
+                  memory: 256Mi
               securityContext:
                 runAsNonRoot: true
                 allowPrivilegeEscalation: false
@@ -127,6 +148,79 @@ objects:
         - name: http
           port: 8080
           targetPort: 8080
+---
+# why: exercise 5's second half — the quickstart the attendee instantiates from that Template (`oc process
+# parasol-claims-quickstart | oc apply`). Verify grades it RUNNING with no restarts, not merely present.
+# Rendered here as the Template's objects with APP_NAME=claims-quickstart.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claims-quickstart
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: claims-quickstart
+    app.kubernetes.io/part-of: parasol
+    workshop.redhat.com/module: registry-images-catalog-governance
+    workshop.redhat.com/owner: ogsr
+spec:
+  replicas: 1
+  minReadySeconds: 30
+  selector:
+    matchLabels:
+      app: claims-quickstart
+  template:
+    metadata:
+      labels:
+        app: claims-quickstart
+    spec:
+      containers:
+        - name: claims
+          image: {{ .Values.sourceImageStream }}:{{ .Values.seedTag }}
+          # Mutable workshop tag - rebuilt in place, so a node-cached IfNotPresent layer served the OLD image (measured 2026-07-29).
+          imagePullPolicy: Always
+          env:
+            - name: QUARKUS_DATASOURCE_ACTIVE
+              value: "false"
+            - name: QUARKUS_HIBERNATE_ORM_ACTIVE
+              value: "false"
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8080
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: claims-quickstart
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: claims-quickstart
+    workshop.redhat.com/module: registry-images-catalog-governance
+    workshop.redhat.com/owner: ogsr
+spec:
+  selector:
+    app: claims-quickstart
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
 ---
 # why: the deploy-from-private-registry outcome — a workload that PULLS with the sample registry secret
 # (pod-level imagePullSecrets is the GitOps-clean form; the attendee may instead `oc secrets link` it to a

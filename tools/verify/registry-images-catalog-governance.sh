@@ -6,8 +6,8 @@
 #          pull secret unreferenced. Entry marker set.
 #   End:   the attendee ran the three namespaced beats — parasol-claims carries the promoted tag
 #          (tag/promote), an ext-ubi ImageStream re-imports an external repo on a schedule (scheduled
-#          import), a custom Template lives in {user}-dev (namespaced catalog governance), and the sample
-#          pull secret is referenced for pull by a workload or ServiceAccount (deploy-from-private-registry),
+#          import), a custom Template lives in {user}-dev (namespaced catalog governance) and the
+#          quickstart instantiated from it runs without restarts, the sample pull secret is referenced for pull by a workload or ServiceAccount (deploy-from-private-registry),
 #          and an nginx ImageStream was imported from an APPROVED registry after the docker.io import was
 #          refused by the install-set image.config allowedRegistriesForImport (exercise 6).
 # Runnable as the ATTENDEE: reads ONLY {user}-dev objects the attendee sees via namespace admin (rule 10).
@@ -80,6 +80,24 @@ custom_template_min() {  # <n> → at least n namespaced Templates
   local n
   n="$(printf '%s\n' "$OC_OUT" | grep -c . || true)"
   [[ "$n" -ge "$1" ]]   # >=, never ==: the lab may legitimately leave more than one Template behind
+}
+
+# Exercise 5's outcome is the app the Template deploys RUNNING, not the Template existing. The smoke of
+# 2026-11-12 watched `rollout status` say "successfully rolled out" and this script go green while the
+# quickstart pod crash-looped on UnknownHostException: parasol-db ~40 s later. Every Deployment in
+# {user}-dev that runs the parasol-claims image is a quickstart instance (whatever APP_NAME it got): each
+# must have a ready replica, and no pod running that image may have restarted.
+quickstart_running() {
+  local names name
+  oc_read get deploy -n "$NS" -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.template.spec.containers[*].image}{"\n"}{end}' || return 1
+  names="$(printf '%s\n' "$OC_OUT" | awk '/\/parasol-claims[:@]/ {print $1}')"
+  # No such Deployment means exercise 5's instantiate step was never done — not a pass.
+  [[ -n "$names" ]] || return 1
+  while read -r name; do
+    deploy_ready "$name" "$NS" || return 1
+  done <<< "$names"
+  oc_read get pods -n "$NS" -o jsonpath='{range .items[*]}{.spec.containers[*].image}{" "}{.status.containerStatuses[*].restartCount}{"\n"}{end}' || return 1
+  ! printf '%s\n' "$OC_OUT" | awk '/\/parasol-claims[:@]/ { for (i = 2; i <= NF; i++) if ($i ~ /^[0-9]+$/ && $i > 0) bad = 1 } END { exit !bad }'
 }
 
 # The pull-secret names referenced by every ServiceAccount in {user}-dev (mechanic A), into OC_OUT…
@@ -201,6 +219,8 @@ else
     || hint "not done yet — the entry state ships no ${EXT_STREAM}, and importing it is the lab: oc import-image ${EXT_STREAM} -n ${NS} --from=registry.access.redhat.com/ubi9/ubi:latest --scheduled --confirm"
   check "a custom Template exists in ${NS} (namespaced catalog governance)" custom_template_min 1 \
     || hint "not done yet — the entry state ships no namespaced Template; adding one is the lab: oc apply -f <your-template>.yaml -n ${NS} (see the lab)"
+  check "the quickstart deployed from your Template is running, with no restarts" quickstart_running \
+    || hint "not done yet? exercise 5 ends with: oc process parasol-claims-quickstart -n ${NS} | oc apply -n ${NS} -f -. If it EXISTS and restarts or never gets ready, read its log (oc logs deploy/claims-quickstart -n ${NS}): 'UnknownHostException: parasol-db' means the Template lost the two DB-free env vars (QUARKUS_DATASOURCE_ACTIVE / QUARKUS_HIBERNATE_ORM_ACTIVE = false) — restore them in the Template, delete the Deployment and instantiate again"
   check "sample pull Secret ${PULL_SECRET} is referenced for pull (private-registry deploy)" secret_referenced \
     || hint "not done yet — the entry state ships ${PULL_SECRET} unreferenced on purpose; using it is the lab: oc secrets link deployer ${PULL_SECRET} --for=pull -n ${NS} (or name it in a pod's imagePullSecrets)"
   check "${APPROVED_STREAM} ImageStream imported from an approved registry, not docker.io (import allowlist)" approved_import \

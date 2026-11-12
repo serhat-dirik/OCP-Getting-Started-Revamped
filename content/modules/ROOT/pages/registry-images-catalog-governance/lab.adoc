@@ -190,7 +190,7 @@ oc get is ext-ubi -n $NS -o jsonpath='{range .spec.tags[*]}{.name}{" scheduled="
 
 The last lever is the catalog itself. Publish a one-click Parasol starter into this team's project, where it appears in their Software Catalog and in nobody else's.
 
-image::registry-images-catalog-governance/registry-images-catalog-governance-03-developer-catalog-template.png["The Software Catalog narrowed to Templates — the breadcrumb reads Software Catalog then Templates — with the keyword box filtered to Parasol and 2 items returned: a Parasol Claims Quickstart tile (Provided by Parasol Insurance, described as a one-click Parasol claims service) and a Parasol PostgreSQL (ephemeral) tile. Both are badged Templates. They are on this page because the Template objects live in this project, not because the cluster offers them to everyone."]
+image::registry-images-catalog-governance/registry-images-catalog-governance-03-developer-catalog-template.png["The Software Catalog narrowed to Templates — the breadcrumb reads Software Catalog then Templates — with the keyword box filtered to Parasol and 2 items returned: a Parasol Claims Quickstart tile (Provided by Parasol Insurance, described as a one-click Parasol claims service) and a Parasol PostgreSQL (ephemeral) tile. Both are badged Templates, but they come from different places: the Quickstart Template lives in this project, so only this project's catalog shows it, while the PostgreSQL Template lives in the cluster-wide openshift namespace, which every project's catalog shows."]
 
 *Why it matters*
 
@@ -222,6 +222,9 @@ objects:
           containers:
             - name: claims
               image: image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims:1.0
+              env:   # no database in this starter: the service runs, its claims API stays off
+                - {name: QUARKUS_DATASOURCE_ACTIVE, value: "false"}
+                - {name: QUARKUS_HIBERNATE_ORM_ACTIVE, value: "false"}
               securityContext:
                 runAsNonRoot: true
                 allowPrivilegeEscalation: false
@@ -301,7 +304,7 @@ CLI::
 [source,sh,role=execute]
 ----
 oc get is parasol-claims -n $NS
-oc describe is parasol-claims -n $NS | head -20
+oc describe is parasol-claims -n $NS | grep -A5 '^1.0$'
 ----
 --
 ====
@@ -310,13 +313,13 @@ oc describe is parasol-claims -n $NS | head -20
 [source,texinfo,subs="attributes"]
 ----
 NAME             IMAGE REPOSITORY                                                            TAGS   UPDATED
-parasol-claims   image-registry.openshift-image-registry.svc:5000/{user}-dev/parasol-claims   1.0    6 minutes ago
-...
+parasol-claims   image-registry.openshift-image-registry.svc:5000/{user}-dev/parasol-claims   1.0    4 minutes ago
 1.0
   tagged from image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims:1.0
     prefer registry pullthrough when referencing this tag
 
-  * image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims@sha256:0995ab385748d9fdcc999e394e6cc072b76cbef1136fd705864741983f7614f7
+  * image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims@sha256:49d01c7054e3d08cf8de689ceb740d2e580c91ae1470618e43b0d8575abe7322
+      4 minutes ago
 ----
 
 Two lines matter.
@@ -732,6 +735,7 @@ objects:
         app.kubernetes.io/part-of: parasol
     spec:
       replicas: 1
+      minReadySeconds: 30
       selector:
         matchLabels:
           app: ${APP_NAME}
@@ -743,8 +747,13 @@ objects:
           containers:
             - name: claims
               image: image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims:1.0
+              env:
+                - {name: QUARKUS_DATASOURCE_ACTIVE, value: "false"}
+                - {name: QUARKUS_HIBERNATE_ORM_ACTIVE, value: "false"}
               ports:
                 - containerPort: 8080
+              readinessProbe:
+                httpGet: {path: /q/health/ready, port: 8080}
               resources:
                 requests: {cpu: 50m, memory: 128Mi}
                 limits: {cpu: 200m, memory: 256Mi}
@@ -773,6 +782,12 @@ oc apply -f ~/parasol-claims-quickstart.yaml -n $NS
 ----
 template.template.openshift.io/parasol-claims-quickstart created
 ----
+
+Three settings in the Deployment make this a starter you can trust, not just one that starts:
+
+* The two `QUARKUS_*_ACTIVE=false` variables run the claims service *without a database*. Its landing page answers and its claims API stays off. Without them the image looks for a database Service named `parasol-db`, which this project does not have, and crashes.
+* The `readinessProbe` counts the pod as ready only once the service answers on `/q/health/ready`, not the moment the container starts.
+* `minReadySeconds: 30` counts a pod as available only after it has stayed ready for 30 seconds, so a pod that crashes right after starting never counts as a successful rollout.
 
 Confirm it's registered as a catalog entry in your namespace:
 
@@ -815,7 +830,7 @@ Open *Ecosystem* → *Software Catalog*, filter to *Template*, and find *Parasol
 Click it → *Instantiate Template*, accept the `APP_NAME` default, and *Create*.
 No other project's catalog lists it — it's yours alone.
 
-image::registry-images-catalog-governance/registry-images-catalog-governance-03-developer-catalog-template.png["The Software Catalog narrowed to Templates — the breadcrumb reads Software Catalog then Templates — with the keyword box filtered to Parasol and 2 items returned: a Parasol Claims Quickstart tile (Provided by Parasol Insurance, described as a one-click Parasol claims service) and a Parasol PostgreSQL (ephemeral) tile. Both are badged Templates. They are on this page because the Template objects live in this project, not because the cluster offers them to everyone."]
+image::registry-images-catalog-governance/registry-images-catalog-governance-03-developer-catalog-template.png["The Software Catalog narrowed to Templates — the breadcrumb reads Software Catalog then Templates — with the keyword box filtered to Parasol and 2 items returned: a Parasol Claims Quickstart tile (Provided by Parasol Insurance, described as a one-click Parasol claims service) and a Parasol PostgreSQL (ephemeral) tile. Both are badged Templates, but they come from different places: the Quickstart Template lives in this project, so only this project's catalog shows it, while the PostgreSQL Template lives in the cluster-wide openshift namespace, which every project's catalog shows."]
 --
 CLI::
 +
@@ -828,19 +843,20 @@ oc rollout status deploy/claims-quickstart -n $NS --timeout=90s
 --
 ====
 
-.Expected output (the template's objects materialize)
+.Expected output (the template's objects materialize; `rollout status` takes about a minute, which is the readiness probe plus the 30 seconds of `minReadySeconds`)
 [source,texinfo]
 ----
 deployment.apps/claims-quickstart created
 service/claims-quickstart created
+Waiting for deployment "claims-quickstart" rollout to finish: 0 of 1 updated replicas are available...
 deployment "claims-quickstart" successfully rolled out
 ----
 
-Confirm the Deployment and Service the template produced:
+Confirm the Deployment and Service the template produced, and that the pod is running with no restarts:
 
 [source,sh,role=execute]
 ----
-oc get deploy,svc -n $NS -l app=claims-quickstart
+oc get deploy,svc,pods -n $NS -l app=claims-quickstart
 ----
 
 .Expected output (your cluster IP and ages will differ)
@@ -855,7 +871,7 @@ service/claims-quickstart   ClusterIP   172.231.37.237   <none>        8080/TCP 
 
 [.checkpoint]
 ****
-✔ *Verify:* You published a namespaced `Template` (`parasol-claims-quickstart`) that appears in *your* Software Catalog only, then *instantiated* it to create a running `claims-quickstart` Deployment + Service — a self-service catalog entry with no cluster-admin required.
+✔ *Verify:* You published a namespaced `Template` (`parasol-claims-quickstart`) that appears in *your* Software Catalog only, then *instantiated* it to create a `claims-quickstart` Deployment + Service whose pod is `1/1 Running` with `0` restarts — a self-service catalog entry with no cluster-admin required. If the pod shows restarts instead, see *The quickstart pod crash-loops* on xref:registry-images-catalog-governance/troubleshooting.adoc[the troubleshooting page].
 ****
 
 == 6. Hit the import allowlist

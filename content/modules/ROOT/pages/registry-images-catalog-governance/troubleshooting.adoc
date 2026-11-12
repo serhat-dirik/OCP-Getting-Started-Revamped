@@ -16,15 +16,15 @@ Set the shortcut first: `NS={user}-dev`.
 
 Symptom:: You ran `oc import-image {user}-dev/ext-ubi …` and the stream is nowhere in `{user}-dev` — or it landed in a different project.
 Cause:: `oc import-image` does *not* parse a `namespace/name` positional prefix the way `oc tag` does. It creates the stream in your *current* project (whatever `oc project` shows) and treats the argument as a bare name — so the `{user}-dev/` prefix is ignored.
-Fix:: Always pass `-n $NS` with a *bare* stream name; delete the misplaced one if it landed elsewhere:
+Fix:: Look in your current project — that is where the stream went — then import it again with `-n $NS` and a *bare* stream name:
 +
 [source,sh,role=execute]
 ----
-oc get is ext-ubi --all-namespaces 2>/dev/null | grep ext-ubi   # find where it actually landed
+oc get is ext-ubi -n "$(oc project -q)"
 oc import-image ext-ubi -n $NS --from=registry.access.redhat.com/ubi9/ubi:latest --scheduled --confirm | head -3
 ----
 +
-On the build cluster, running the command from the `default` project created `ext-ubi` in `default`; with `-n user3-dev` it landed correctly. `oc tag` *does* take `namespace/name` — the two commands differ here, which is the trap.
+If the first command lists `ext-ubi` in a project other than `{user}-dev`, delete that stray copy with `oc delete is ext-ubi -n "$(oc project -q)"`. On the build cluster, running the command from the `default` project created `ext-ubi` in `default`; with `-n user3-dev` it landed correctly. `oc tag` *does* take `namespace/name` — the two commands differ here, which is the trap.
 
 == An import fails with "name unknown: Repo not found"
 
@@ -57,8 +57,8 @@ Nothing is created when the source is missing — the command guards you, so jus
 
 == The pull-secret Deployment is `ImagePullBackOff` — "authentication required"
 
-Symptom:: `oc rollout status` on `parasol-registry-demo` ends in `error: timed out waiting for the condition`, the pod sits in `ImagePullBackOff`, and the kubelet event reads `authentication required` for an `image-registry.openshift-image-registry.svc:5000/...` image. Confusingly, the *next* exercise deploys the very same image and succeeds in seconds.
-Cause:: The pod template names a pull secret *and* pulls from the **internal** registry. The ServiceAccount admission plugin injects the SA's `imagePullSecrets` **only when the pod's own list is empty** — so naming one secret *replaces* the injected set rather than adding to it, and the `default-dockercfg-…` credential that authenticates to the internal registry is silently dropped. The secret you named is for `registry.parasol.example.com`, which is fictional, so the pod ends up with no usable credential for the image it is actually pulling. The next exercise works because it names no pull secret, so injection happens normally. This is namespace-independent: pointing at your *own* namespace's ImageStream fails identically.
+Symptom:: `oc rollout status` on `parasol-registry-demo` ends in `error: timed out waiting for the condition`, the pod sits in `ImagePullBackOff`, and the kubelet event reads `authentication required` for an `image-registry.openshift-image-registry.svc:5000/...` image. Confusingly, the *next* exercise pulls an image from the same internal registry without any trouble.
+Cause:: The pod template names a pull secret *and* pulls from the **internal** registry. The ServiceAccount admission plugin injects the SA's `imagePullSecrets` **only when the pod's own list is empty** — so naming one secret *replaces* the injected set rather than adding to it, and the `default-dockercfg-…` credential that authenticates to the internal registry is silently dropped. The secret you named is for `registry.parasol.example.com`, which is fictional, so the pod ends up with no usable credential for the image it is actually pulling. The next exercise's pull works because it names no pull secret, so injection happens normally. This is namespace-independent: pointing at your *own* namespace's ImageStream fails identically.
 Fix:: Pull an image that needs no credential (the lab uses a public Red Hat base image), or name *both* secrets — yours and the SA's `default-dockercfg-…` — on the pod template. Confirm which credentials the admitted pod actually got:
 +
 [source,sh,role=execute]
@@ -136,6 +136,22 @@ oc get clusterrole platform-observer -o jsonpath='{range .rules[*]}{.apiGroups}:
 ----
 +
 Expect rules covering `config.openshift.io` `images`, `imageregistry.operator.openshift.io` `imagepruners`/`configs`, `samples.operator.openshift.io` `configs`, `console.openshift.io` `consolesamples`, and `operators.coreos.com` `catalogsources`. If they're absent, the workshop-config `platform-observer` extension needs to be applied (an instructor/platform action).
+
+== The quickstart pod crash-loops: `UnknownHostException: parasol-db`
+
+Symptom:: After exercise 5, the `claims-quickstart` pod shows `Error` or `CrashLoopBackOff` and its `RESTARTS` count climbs, or `oc rollout status` times out. Its log ends in `Caused by: java.net.UnknownHostException: parasol-db`.
+Cause:: The claims image connects to a PostgreSQL Service named `parasol-db` at startup unless it is told to run without a database. Your project has no such Service, so the service cannot start. The lab's Template sets the two `QUARKUS_*_ACTIVE=false` variables to run it database-free; a Template written without them, or with a typo in either, deploys a pod that crashes. Without a readiness probe, `rollout status` can even report success first, because the container is up for a few seconds before it fails.
+Fix:: Read the reason from the crashed container, then add the two variables. `oc set env` rolls out a new pod that stays up:
++
+[source,sh,role=execute]
+----
+oc logs deploy/claims-quickstart -n $NS --previous | grep -m1 UnknownHost
+oc set env deploy/claims-quickstart -n $NS QUARKUS_DATASOURCE_ACTIVE=false QUARKUS_HIBERNATE_ORM_ACTIVE=false
+oc rollout status deploy/claims-quickstart -n $NS --timeout=120s
+oc get pods -n $NS -l app=claims-quickstart
+----
++
+Expect `1/1 Running` with `0` restarts on the new pod. Then add the same two `env` entries to your Template file and `oc apply` it again, so the next instance starts correctly.
 
 == My namespaced Template doesn't appear in the Software Catalog
 
