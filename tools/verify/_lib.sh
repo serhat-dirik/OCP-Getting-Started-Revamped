@@ -404,6 +404,41 @@ http_read() {  # http_read <url> [curl args…] → HTTP_CODE/HTTP_OUT; rc 0 = a
   esac
 }
 
+# The student Argo CD, asked AS THE ATTENDEE. An attendee has no k8s read in ogsr-student-gitops
+# (argocd-cm, argocd-rbac-cm, ApplicationSets), so gitops-fundamentals/gitops-at-scale graded those
+# ⚠ on every attendee run, and `ws prep` reads an entry run with a ⚠ as "could not be evaluated" — it
+# never said "ready" (smoke 2026-11-12, SEV2). The attendee CAN answer them the way the lab does: sign
+# in with their local Argo account and the shared, non-secret workshop password (resourceName-scoped
+# read on ogsr-gitea/workshop-user-creds — the same exchange `ws` makes). Password on curl's stdin,
+# never argv; never printed. A refused sign-in is rc 1: that IS the access-plane failure.
+STUDENT_ARGO_TOKEN=""
+student_argo_get() {  # <api path> → HTTP_CODE/HTTP_OUT as USER_NAME; rc as http_read
+  local base pw rc=0
+  oc_read get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' || return $?
+  base="https://student-gitops-server-student-gitops.${OC_OUT}"
+  if [[ -z "$STUDENT_ARGO_TOKEN" ]]; then
+    if [[ -n "${WS_WORKSHOP_PASSWORD:-}" ]]; then
+      pw="$WS_WORKSHOP_PASSWORD"
+    else
+      oc_read get secret workshop-user-creds -n ogsr-gitea -o jsonpath='{.data.password}' || return $?
+      pw="$(base64 -d <<<"$OC_OUT")"; OC_OUT=""
+    fi
+    pw="${pw//\\/\\\\}"; pw="${pw//\"/\\\"}"
+    http_read "${base}/api/v1/session" -X POST -H 'Content-Type: application/json' --data-binary @- \
+      <<<"{\"username\":\"${USER_NAME}\",\"password\":\"${pw}\"}" || rc=$?
+    pw=""
+    (( rc == 0 )) || return "$rc"
+    STUDENT_ARGO_TOKEN="$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' <<<"$HTTP_OUT")"; HTTP_OUT=""
+    [[ -n "$STUDENT_ARGO_TOKEN" ]] || { OC_ERR="student Argo CD refused ${USER_NAME}'s sign-in (HTTP ${HTTP_CODE})"; return 1; }
+  fi
+  http_read "${base}${1}" -H "Authorization: Bearer ${STUDENT_ARGO_TOKEN}"
+}
+
+student_argo_can() {  # <resource> <action> <object> → 0 when the student Argo CD says yes to USER_NAME
+  student_argo_get "/api/v1/account/can-i/${1}/${2}/${3}" || return $?
+  [[ "$HTTP_OUT" == *'"yes"'* ]]
+}
+
 check() {  # check "<description>" <command...>  — pass/fail/SKIP one assertion
   local desc="$1"; shift
   local rc=0

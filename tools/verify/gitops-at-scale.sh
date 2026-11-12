@@ -166,6 +166,15 @@ cli_download_ready() {  # NOTE: this asks whether beat 1 CAN be done; appset_for
 # which is not a win. A filter expression (not a plain field path) is what keeps an ApplicationSet
 # belonging to someone else — or one missing the field — from erroring the read into a false ❌.
 read_user_appsets() {  # → 0 + OC_OUT = one name per line (possibly empty); 1 when the ns could not be read
+  # An attendee may not list ${ARGO_NS} (k8s): ask the student Argo CD as them instead — its RBAC
+  # returns only proj-{user}'s, so any item is theirs (_lib.sh student_argo_get).
+  if [[ "$(appset_read_err)" == *orbidden* ]]; then
+    student_argo_get "/api/v1/applicationsets?projects=proj-${USER_NAME}" || return 1
+    [[ "$HTTP_CODE" == "200" ]] || return 1
+    OC_OUT=""
+    [[ "$HTTP_OUT" != *'"items":[{'* ]] || OC_OUT="$(grep -o '"name":"[^"]*"' <<<"$HTTP_OUT" | head -1)"
+    return 0
+  fi
   oc_read get applicationsets.argoproj.io -n "$ARGO_NS" \
     -o jsonpath="{range .items[?(@.spec.template.spec.project==\"proj-${USER_NAME}\")]}{.metadata.name}{\"\n\"}{end}"
 }
@@ -183,9 +192,9 @@ no_appset_for_user() { read_user_appsets || return 1; [[ -z "$OC_OUT" ]]; }
 # ASK THE OBJECT, NOT A BARE EXISTENCE PROBE — same classifier as argo_access_plane_err above, and
 # for the same reason. An attendee's only k8s read in ogsr-student-gitops is `get appproject
 # proj-{user}` BY NAME (student-appprojects.yaml grants exactly that and nothing else), so listing
-# ApplicationSets there is Forbidden for them and must be ⚠ "not yours to answer", never ❌ on work
-# they may well have done. Anything that is NOT a refusal means the caller CAN ask — so a genuinely
-# missing ApplicationSet falls through and fails loudly, which is the whole point of this check.
+# ApplicationSets there is Forbidden for them — read_user_appsets then asks the student Argo CD as them
+# instead (it used to ⚠-skip, which kept `ws prep` from ever saying "ready"). Anything that is NOT a
+# refusal means the caller CAN ask via k8s, so a missing ApplicationSet still fails loudly.
 appset_read_err() { { oc get applicationsets.argoproj.io -n "$ARGO_NS" -o name >/dev/null; } 2>&1 || true; }
 
 # Did `ws solve` build this world? solve-endstate.yaml stamps this ConfigMap in the attendee's OWN
@@ -292,8 +301,9 @@ check "AppProject proj-${USER_NAME} exists"              oc get appproject "proj
 # ApplicationSet into proj-{user} is (this module's whole beat 1).
 case "$(argo_access_plane_err)" in
   *orbidden*)
-    warn "Argo CD access plane (account + RBAC policy) not readable as this identity"
-    hint "argocd-cm/argocd-rbac-cm live in ogsr-student-gitops, which attendees cannot read — run this check as the instructor/CI identity, or confirm by running the beat-1 argocd login as ${USER_NAME}"
+    # The attendee cannot read those ConfigMaps, so ask Argo itself, signed in as them (beat 1's login).
+    check "Argo CD signs ${USER_NAME} in and allows ApplicationSet create in proj-${USER_NAME}" student_argo_can applicationsets create "proj-${USER_NAME}/*" \
+      || hint "the beat-1 argocd login or the ApplicationSet create would be refused — instructor: sync workshop-config (student-argocd.yaml extraConfig accounts.${USER_NAME} + rbac.policy, student-argo-accounts Job)"
     ;;
   *)
     check "Argo CD account accounts.${USER_NAME} exists (attendee can log in)"  argo_account_exists  || hint "no local Argo account for ${USER_NAME} — the argocd CLI login in beat 1 is rejected; sync workshop-config (student-argocd.yaml, .spec.extraConfig accounts.${USER_NAME}: login)"
@@ -319,15 +329,7 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
   # ApplicationSet REGENERATES the Applications a purge deletes (tools/ws/ws deletes appsets FIRST
   # for exactly this reason), so a world holding one is not a clean slate however empty prod looks —
   # and `ws prep` reads this rc as "already prepared?" and would take its no-purge fast path on it.
-  case "$(appset_read_err)" in
-    *orbidden*)
-      warn "attendee ApplicationSets in ${ARGO_NS} not listable as this identity"
-      hint "not yours to fix: an attendee's only k8s read there is their own AppProject by name. Confirm it yourself with the Argo CLI — \`~/argocd appset list -p proj-${USER_NAME}\` should be empty at entry — or re-run this script as the instructor/CI identity"
-      ;;
-    *)
-      check "no ApplicationSet for proj-${USER_NAME} yet (clean)"  no_appset_for_user  || hint "a previous run's ApplicationSet is still in ${ARGO_NS} and will regenerate anything a purge deletes — ws prep gitops-at-scale --user ${USER_NAME} --yes (or \`~/argocd appset delete claims-${USER_NAME}\` as ${USER_NAME})"
-      ;;
-  esac
+  check "no ApplicationSet for proj-${USER_NAME} yet (clean)"  no_appset_for_user  || hint "a previous run's ApplicationSet is still in ${ARGO_NS} and will regenerate anything a purge deletes — ws prep gitops-at-scale --user ${USER_NAME} --yes (or \`~/argocd appset delete claims-${USER_NAME}\` as ${USER_NAME})"
 else
   # --- end state (what a completed lab / solve looks like) -------------------
   info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
@@ -335,15 +337,7 @@ else
   if [[ "$SOLVE_MODE" == "true" ]] || solve_built_this_world; then
     na "ApplicationSet for proj-${USER_NAME} (exercise 1) — this world was built by \`ws solve\`, which reproduces the same END state from a single prod Application (claims-prod-${USER_NAME}) instead of the attendee's ApplicationSet, so beat 1's artefact is correctly absent here; the checks below still grade the outcome it would have produced"
   else
-    case "$(appset_read_err)" in
-      *orbidden*)
-        warn "could not check: an ApplicationSet for proj-${USER_NAME} exists (exercise 1) — ${ARGO_NS} is not listable as this identity"
-        hint "not yours to fix and not graded here: an attendee's only k8s read in ${ARGO_NS} is their own AppProject by name. Answer it where it can be answered — \`~/argocd appset list -p proj-${USER_NAME}\` in your own terminal after the beat-1 login, or an instructor/CI run of this script"
-        ;;
-      *)
-        check "an ApplicationSet generates proj-${USER_NAME}'s Applications (exercise 1)" appset_for_user  || hint "not done yet? exercise 1 IS this check: log in with the argocd CLI and run \`~/argocd appset create applicationset.yaml\` from your claims-config clone — the entry state ships the source file in your fork and never creates the object. If you DID create it and this is red, that one is real: \`~/argocd appset list -p proj-${USER_NAME}\` (an appset that generates prod by some other route — oc apply -k rollouts/, or a hand-made Application — is not this exercise)"
-        ;;
-    esac
+    check "an ApplicationSet generates proj-${USER_NAME}'s Applications (exercise 1)" appset_for_user  || hint "not done yet? exercise 1 IS this check: log in with the argocd CLI and run \`~/argocd appset create applicationset.yaml\` from your claims-config clone — the entry state ships the source file in your fork and never creates the object. If you DID create it and this is red, that one is real: \`~/argocd appset list -p proj-${USER_NAME}\` (an appset that generates prod by some other route — oc apply -k rollouts/, or a hand-made Application — is not this exercise)"
   fi
   check "parasol-claims runs as a Rollout in ${PROD} (Healthy)" rollout_healthy parasol-claims "$PROD"       || hint "not done yet? the entry state deliberately leaves ${PROD} WITHOUT a Rollout — converting it (rollouts/ overlay) IS the lab, so this red is expected before you start (adm solve gitops-at-scale --user ${USER_NAME} does the conversion). If you HAVE converted it and it is not Healthy, that one is real. Read the object — ${ROLLOUT_INSPECT} — and start from .status.phase. Progressing with no ready canary pods is usually quota: oc get events -n ${PROD} --sort-by=.lastTimestamp | tail -10. A Rollout that never leaves its initial state at all means no controller is serving it (instructor/admin: oc get rolloutmanager -n openshift-gitops). Paused is not broken — a canary pause step is waiting for YOU, and a blue-green pause is waiting for a promotion: ${ROLLOUT_PROMOTE_HINT}"
   # The outcome above says prod runs a Rollout; this says ARGO put it there. `oc apply -k rollouts/`

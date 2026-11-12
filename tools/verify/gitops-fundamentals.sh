@@ -204,8 +204,9 @@ check "AppProject proj-${USER_NAME} exists"              oc get appproject "proj
 # The object above is not the outcome — the attendee LOGGING IN and seeing it is.
 case "$(argo_access_plane_err)" in
   *orbidden*)
-    warn "Argo CD access plane (account + RBAC policy) not readable as this identity"
-    hint "argocd-cm/argocd-rbac-cm live in ogsr-student-gitops, which attendees cannot read — run this check as the instructor/CI identity, or confirm by logging in to the student Argo CD as ${USER_NAME}"
+    # The attendee cannot read those ConfigMaps, so ask Argo itself, signed in as them (_lib.sh).
+    check "Argo CD signs ${USER_NAME} in and allows Application create in proj-${USER_NAME}" student_argo_can applications create "proj-${USER_NAME}/*" \
+      || hint "the attendee's login or their + NEW APP would be refused — instructor: sync workshop-config (student-argocd.yaml extraConfig accounts.${USER_NAME} + rbac.policy, student-argo-accounts Job)"
     ;;
   *)
     check "Argo CD account accounts.${USER_NAME} exists (attendee can log in)"  argo_account_exists  || hint "no local Argo account for ${USER_NAME} — the attendee's login is rejected; sync workshop-config (student-argocd.yaml, .spec.extraConfig accounts.${USER_NAME}: login)"
