@@ -69,6 +69,95 @@ http {
   }
 }
 {{- end }}
+{{- /* The warm Job's spec, kept apart so its hash can name the Job (see the Job). */ -}}
+{{- define "workshop-config.mavenMirrorWarmSpec" -}}
+backoffLimit: 3
+template:
+  spec:
+    automountServiceAccountToken: false
+    restartPolicy: Never
+    volumes:
+      - name: work
+        emptyDir: {}
+    {{- if include "workshop-config.moduleEnabled" (dict "root" $ "slug" "serverless-zero-to-hero") }}
+    initContainers:
+      # The function project the lab generates (`kn func create -l quarkus -t http`), made with the
+      # cluster's own Serverless kn (the lab's func version). Best effort: no kn yet = no func warm-up.
+      - name: func-template
+        image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+        env:
+          - name: HOME
+            value: /work
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            cd /work
+            if curl -ksfL "https://kn-openshift-serverless.{{ .Values.clusterDomain }}/kn-linux-amd64.tar.gz" | tar xz kn 2>/dev/null; then
+              ./kn func create -l quarkus -t http fn >/dev/null && echo "✅ func Quarkus template generated" || echo "⚠ kn func create failed — func not warmed"
+            else
+              echo "⚠ Serverless kn download not reachable — func not warmed"
+            fi
+        resources:
+          requests: {cpu: 50m, memory: 128Mi}
+          limits: {memory: 512Mi}
+        volumeMounts:
+          - name: work
+            mountPath: /work
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+    {{- end }}
+    containers:
+      - name: warm
+        # The maven-jdk21 library Task's image (same digest), so the warm-up resolves with the
+        # Maven the pipelines run.
+        image: registry.access.redhat.com/ubi9/openjdk-21@sha256:24dad82bd5d25d9b0c85f0e9c976e47ccce787cc73792355462bf54fe03d9a77
+        env:
+          - name: HOME
+            value: /tmp
+          - name: SRC
+            value: http://gitea.{{ .Values.giteaNamespace }}.svc:3000/{{ .Values.mirrorOrg }}/{{ .Values.mirrorRepo }}/archive/{{ .Values.parasolImages.build.revision }}.zip
+          - name: MIRROR
+            value: http://maven-mirror.{{ .Values.mavenMirror.namespace }}.svc:8080
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            set -euo pipefail
+            cd /tmp
+            # The image has no gzip/unzip; the JDK's own `jar` reads a zip.
+            curl -sfL -o src.zip "$SRC" && jar xf src.zip
+            cd ./*/apps/parasol-claims
+            printf '<settings><mirrors><mirror><id>mirror.default</id><url>%s</url><mirrorOf>*</mirrorOf></mirror></mirrors></settings>' "$MIRROR" > /tmp/settings.xml
+            mvn -B -ntp -s /tmp/settings.xml test package quarkus:go-offline \
+              org.cyclonedx:cyclonedx-maven-plugin:2.9.2:makeBom
+            # The Maven distribution ./mvnw downloads, so a wrapper pointed here starts warm too.
+            curl -sf -o /dev/null "$MIRROR/$(sed -n 's#^distributionUrl=https://repo.maven.apache.org/maven2/##p' .mvn/wrapper/maven-wrapper.properties)"
+            if [ -f /work/fn/pom.xml ]; then
+              (cd /work/fn && mvn -B -ntp -s /tmp/settings.xml -DskipTests package quarkus:go-offline)
+            fi
+            echo "✅ maven mirror warm"
+        volumeMounts:
+          - name: work
+            mountPath: /work
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+{{- end }}
 {{- $mm := .Values.mavenMirror }}
 {{- $on := false }}
 {{- range $slug := list "build-deliver" "devspaces-inner-loop" "pipelines-fundamentals" "app-security-testing" "trusted-supply-chain" "serverless-zero-to-hero" }}
@@ -208,104 +297,22 @@ spec:
 # Install-time warm-up: resolve, through the mirror, everything the labs' Maven builds need for
 # parasol-claims (package, test, the Quarkus dev-mode set, the SBOM plugin) and, when
 # serverless-zero-to-hero is enabled, the `kn func` Quarkus HTTP template — so the FIRST attendee build
-# is already a cache hit (a cold-mirror first function build took 6m14s, warm ~2m). Runs once; Job
-# templates are immutable, so Force/Replace lets Argo delete and rerun it when this spec changes.
+# is already a cache hit (a cold-mirror first function build took 6m14s, warm ~2m). Runs ONCE PER SPEC:
+# the name carries a hash of the spec, so a sync finds the same finished Job and leaves it alone, while
+# a changed spec is a new Job (the old one pruned) — a Job template is immutable. Force/Replace did
+# that too, but re-ran the ~4 min warm-up on EVERY sync and held the app Progressing through it.
+{{- $warmSpec := include "workshop-config.mavenMirrorWarmSpec" . }}
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: maven-mirror-warm
+  name: maven-mirror-warm-{{ $warmSpec | sha256sum | trunc 8 }}
   namespace: {{ $mm.namespace }}
   labels:
+    app.kubernetes.io/name: maven-mirror-warm
     workshop.redhat.com/layer: workshop-config
     {{- include "workshop-config.ownerLabels" . | nindent 4 }}
   annotations:
     argocd.argoproj.io/sync-wave: "2"
-    argocd.argoproj.io/sync-options: Force=true,Replace=true
 spec:
-  backoffLimit: 3
-  template:
-    spec:
-      automountServiceAccountToken: false
-      restartPolicy: Never
-      volumes:
-        - name: work
-          emptyDir: {}
-      {{- if include "workshop-config.moduleEnabled" (dict "root" $ "slug" "serverless-zero-to-hero") }}
-      initContainers:
-        # The function project the lab generates (`kn func create -l quarkus -t http`), made with the
-        # cluster's own Serverless kn (the lab's func version). Best effort: no kn yet = no func warm-up.
-        - name: func-template
-          image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
-          env:
-            - name: HOME
-              value: /work
-          command: ["/bin/bash", "-c"]
-          args:
-            - |
-              cd /work
-              if curl -ksfL "https://kn-openshift-serverless.{{ .Values.clusterDomain }}/kn-linux-amd64.tar.gz" | tar xz kn 2>/dev/null; then
-                ./kn func create -l quarkus -t http fn >/dev/null && echo "✅ func Quarkus template generated" || echo "⚠ kn func create failed — func not warmed"
-              else
-                echo "⚠ Serverless kn download not reachable — func not warmed"
-              fi
-          resources:
-            requests: {cpu: 50m, memory: 128Mi}
-            limits: {memory: 512Mi}
-          volumeMounts:
-            - name: work
-              mountPath: /work
-          securityContext:
-            allowPrivilegeEscalation: false
-            runAsNonRoot: true
-            capabilities:
-              drop: ["ALL"]
-            seccompProfile:
-              type: RuntimeDefault
-      {{- end }}
-      containers:
-        - name: warm
-          # The maven-jdk21 library Task's image (same digest), so the warm-up resolves with the
-          # Maven the pipelines run.
-          image: registry.access.redhat.com/ubi9/openjdk-21@sha256:24dad82bd5d25d9b0c85f0e9c976e47ccce787cc73792355462bf54fe03d9a77
-          env:
-            - name: HOME
-              value: /tmp
-            - name: SRC
-              value: http://gitea.{{ .Values.giteaNamespace }}.svc:3000/{{ .Values.mirrorOrg }}/{{ .Values.mirrorRepo }}/archive/{{ .Values.parasolImages.build.revision }}.zip
-            - name: MIRROR
-              value: http://maven-mirror.{{ $mm.namespace }}.svc:8080
-          command: ["/bin/bash", "-c"]
-          args:
-            - |
-              set -euo pipefail
-              cd /tmp
-              # The image has no gzip/unzip; the JDK's own `jar` reads a zip.
-              curl -sfL -o src.zip "$SRC" && jar xf src.zip
-              cd ./*/apps/parasol-claims
-              printf '<settings><mirrors><mirror><id>mirror.default</id><url>%s</url><mirrorOf>*</mirrorOf></mirror></mirrors></settings>' "$MIRROR" > /tmp/settings.xml
-              mvn -B -ntp -s /tmp/settings.xml test package quarkus:go-offline \
-                org.cyclonedx:cyclonedx-maven-plugin:2.9.2:makeBom
-              # The Maven distribution ./mvnw downloads, so a wrapper pointed here starts warm too.
-              curl -sf -o /dev/null "$MIRROR/$(sed -n 's#^distributionUrl=https://repo.maven.apache.org/maven2/##p' .mvn/wrapper/maven-wrapper.properties)"
-              if [ -f /work/fn/pom.xml ]; then
-                (cd /work/fn && mvn -B -ntp -s /tmp/settings.xml -DskipTests package quarkus:go-offline)
-              fi
-              echo "✅ maven mirror warm"
-          volumeMounts:
-            - name: work
-              mountPath: /work
-          resources:
-            requests:
-              cpu: 500m
-              memory: 1Gi
-            limits:
-              cpu: "2"
-              memory: 2Gi
-          securityContext:
-            allowPrivilegeEscalation: false
-            runAsNonRoot: true
-            capabilities:
-              drop: ["ALL"]
-            seccompProfile:
-              type: RuntimeDefault
+  {{- $warmSpec | nindent 2 }}
 {{- end }}
