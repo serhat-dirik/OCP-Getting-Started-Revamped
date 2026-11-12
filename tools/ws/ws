@@ -81,8 +81,8 @@ SOURCE_REVISION="${WS_REVISION:-main}"
 SHOWROOM_NS="${WS_SHOWROOM_NS:-ogsr-showroom}"
 PARASOL_IMAGES_NS="${WS_PARASOL_IMAGES_NS:-ogsr-parasol-images}"
 
-# `ws smoke` targets the LIVE cockpit pod — the shared `showroom-shared` where one exists, else the
-# per-user `showroom-<user>` (see shared_cockpit_dep) — and its ttyd shell container. SMOKE_POD/
+# `ws smoke` targets the attendee's LIVE terminal — their own pod in ogsr-term-<user> under the
+# shared cockpit, else the per-user `showroom-<user>` (see shared_cockpit_dep). SMOKE_POD/
 # SMOKE_NS/SMOKE_PRELUDE are resolved per-run in cmd_smoke; declared here so the pod_i/pod_x exec
 # helpers (dynamic scope) reference an assigned global (shellcheck-clean) rather than an unset one.
 SMOKE_NS=""
@@ -1434,15 +1434,13 @@ cmd_verify() {
 # must report on. When no shared cockpit exists the per-user path below is unchanged.
 SHARED_COCKPIT_DEP="showroom-shared"              # the attendee cockpit under the shared model
 SHARED_COCKPIT_DEMOS_DEP="showroom-shared-demos"  # the SA/demo cockpit — same mechanism, demo flavor
-# Per-attendee state lives on ONE RWO claim mounted at /homes; the wrapper creates /homes/<user> and
-# writes its kubeconfig on that attendee's first websocket. The wrapper itself lives in /tmp because
-# the image's own directories are not writable by the random restricted-v2 UID (showroom-shared.yaml
-# says so at the point it generates the file). Both paths measured on the live pod 2026-08-16.
+# Under the shared cockpit every attendee's shell runs in THEIR OWN terminal pod: Deployment
+# `terminal` in ${TERMINAL_NS_PREFIX}<user> (showroom-shared.yaml, owner ruling 2026-11-12). In that
+# pod: home /homes/<user> (its own claim), the read-only session wrapper (a ConfigMap mount), and a
+# read-only repo clone that puts ws on PATH. The cockpit pod itself no longer runs a terminal.
+TERMINAL_NS_PREFIX="ogsr-term-"   # must match $termPrefix in showroom-shared.yaml
 SHARED_COCKPIT_HOMES="/homes"
-SHARED_COCKPIT_WRAPPER="/tmp/ws-session"
-# ONE read-only clone at /showroom/repo serves every session (the per-user model cloned into each
-# home instead), written by the init container and read by a different uid — see verify_shared_head
-# for why `-c safe.directory` is not optional on it.
+SHARED_COCKPIT_WRAPPER="/opt/ogsr-session/ws-session"
 SHARED_COCKPIT_CLONE="/showroom/repo"
 
 shared_cockpit_dep() {  # → "showroom-shared" when this cluster runs the shared cockpit, else EMPTY.
@@ -1497,6 +1495,15 @@ cockpit_pod_for() {  # user [any] → newest Running cockpit pod serving this at
   printf '%s' "${p#pod/}"
 }
 
+terminal_pod_for() {  # user [any] → newest (Running, unless "any") pod of the attendee's OWN terminal
+  # under the shared cockpit, in ${TERMINAL_NS_PREFIX}<user>; empty when there is none.
+  local phase=(--field-selector=status.phase=Running) p
+  if [[ "${2-}" == "any" ]]; then phase=(); fi
+  p="$(oc get pods -n "${TERMINAL_NS_PREFIX}$1" -l app.kubernetes.io/name=ogsr-terminal ${phase[@]+"${phase[@]}"} \
+        --sort-by=.metadata.creationTimestamp -o name 2>/dev/null | tail -1)"
+  printf '%s' "${p#pod/}"
+}
+
 # ── ws smoke — the G1 attendee-cockpit gate ───────────────────────────────────────────────────────
 # Runs the attendee path FROM the real cockpit terminal as {user} (never the admin kubeconfig), to
 # catch the recurring cockpit/identity defect class (ws-not-on-PATH, HOME=/data, JVM user.home,
@@ -1520,14 +1527,11 @@ pod_x() { oc exec "$SMOKE_POD" -n "$SMOKE_NS" -c "$SMOKE_CONTAINER" -- bash -c "
 cockpit_session_prelude() {  # user → the shell prelude that makes an `oc exec` into the SHARED cockpit
   # act as that attendee. Empty on a per-user cockpit (nothing to reproduce — the pod is already them).
   #
-  # THE SESSION ENVIRONMENT IS NOT IN THE POD, IT IS IN THE WRAPPER. One pod serves the whole cohort
-  # and holds no attendee identity of its own — measured 2026-08-16:
-  #   oc exec -n ogsr-showroom deploy/showroom-shared -c terminal -- oc whoami
-  #     → system:serviceaccount:ogsr-showroom:showroom-shared
-  # The attendee's identity is minted per WEBSOCKET by /tmp/ws-session, which exports
+  # THE SESSION ENVIRONMENT IS NOT IN THE POD, IT IS IN THE WRAPPER. A bare exec into the attendee's
+  # terminal pod answers as the pod's ServiceAccount (system:serviceaccount:ogsr-term-<user>:terminal).
+  # The attendee's identity is set per WEBSOCKET by the session wrapper, which exports
   # HOME=/homes/<user>, KUBECONFIG=$HOME/.kube/config and PATH+=/showroom/repo/tools/ws before
-  # exec'ing bash. `oc exec` cannot go through nginx and ttyd, so this gate replays those exports:
-  #   oc exec … -- env HOME=/homes/user1 KUBECONFIG=/homes/user1/.kube/config -- oc whoami → user1
+  # exec'ing bash. `oc exec` cannot go through nginx and ttyd, so this gate replays those exports.
   #
   # IT REPLAYS THEM BY READING THE WRAPPER, NOT BY RESTATING IT HERE — that is the difference between
   # a gate and a second copy of the thing it grades. A hardcoded prelude would set KUBECONFIG itself,
@@ -1575,10 +1579,15 @@ cmd_smoke() {
 
   SMOKE_NS="$SHOWROOM_NS"
   local shared; shared="$(shared_cockpit_dep)"
-  SMOKE_POD="$(cockpit_pod_for "$user")"
+  if [[ -n "$shared" ]]; then
+    SMOKE_NS="${TERMINAL_NS_PREFIX}${user}"
+    SMOKE_POD="$(terminal_pod_for "$user")"
+  else
+    SMOKE_POD="$(cockpit_pod_for "$user")"
+  fi
   if [[ -z "$SMOKE_POD" ]]; then
     if [[ -n "$shared" ]]; then
-      die "no Running pod for the shared cockpit ${shared} in ns ${SMOKE_NS} — it serves every attendee, so this is a cohort-wide outage, not ${user}'s: oc get pods -n ${SMOKE_NS} -l app.kubernetes.io/instance=${shared}"
+      die "no Running terminal pod for ${user} in ns ${SMOKE_NS} — check: oc get deploy,pods -n ${SMOKE_NS}"
     fi
     die "no Running showroom cockpit for ${user} in ns ${SMOKE_NS} — provision the session first (oc get pods -n ${SMOKE_NS} -l workshop.redhat.com/user=${user})"
   fi
@@ -1586,22 +1595,20 @@ cmd_smoke() {
   # PRECONDITIONS THE SHARED MODEL ADDS, checked before the battery so a missing one reads as ONE
   # sentence instead of ten red rows about a cockpit that is fine.
   #
-  # The second one is a real change in what this gate needs, and it is worth stating plainly: under
-  # the shared cockpit an attendee's kubeconfig is minted by the ttyd wrapper on their FIRST
-  # websocket, so a user who has never opened the cockpit page has no session for the gate to run
-  # as. The per-user model had no such precondition — terminal-prep logged that pod in at pod start,
-  # with no human involved. Measured 2026-08-16: /homes held user1, user6, user7, user8 on an
-  # eight-attendee cluster, i.e. only the four who had signed in.
+  # The wrapper signs the attendee in on a websocket. When nobody has opened this terminal yet there
+  # is no kubeconfig, so the gate runs the REAL wrapper once (no shell attached: its final bash reads
+  # EOF and exits), exactly as ttyd would with the header nginx sends.
   if [[ -n "$shared" ]]; then
     if ! pod_x "test -r ${SHARED_COCKPIT_WRAPPER}" >/dev/null 2>&1; then
-      die "the shared cockpit pod ${SMOKE_POD} has no readable session wrapper at ${SHARED_COCKPIT_WRAPPER} — the terminal container writes it at start, so this pod is not serving sessions at all: oc logs ${SMOKE_POD} -n ${SMOKE_NS} -c terminal --tail=100"
+      die "${user}'s terminal pod ${SMOKE_POD} has no readable session wrapper at ${SHARED_COCKPIT_WRAPPER} (ConfigMap terminal-session) — check: oc get cm terminal-session -n ${SMOKE_NS}"
     fi
     if ! pod_x "test -r ${SHARED_COCKPIT_HOMES}/${user}/.kube/config" >/dev/null 2>&1; then
-      local have_sessions; have_sessions="$(pod_x "ls -1 ${SHARED_COCKPIT_HOMES} 2>/dev/null | grep -v '^lost+found$' | tr '\n' ' '" 2>/dev/null || true)"
-      die "${user} has no session in the shared cockpit (${SHARED_COCKPIT_HOMES}/${user}/.kube/config is absent). One cockpit serves everyone and the attendee's kubeconfig is written by the ttyd wrapper on their FIRST sign-in, so someone must open the cockpit Route as ${user} once before this gate can run as them. Attendees with a session right now: ${have_sessions:-none}"
+      info "${user} has not opened a terminal yet — signing in through the session wrapper once…"
+      pod_x "TTYD_USER='u=${user};t=' timeout 90 ${SHARED_COCKPIT_WRAPPER} </dev/null >/dev/null 2>&1; test -r ${SHARED_COCKPIT_HOMES}/${user}/.kube/config" >/dev/null 2>&1 \
+        || die "the session wrapper did not sign ${user} in — run it by hand to see why: oc exec -it ${SMOKE_POD} -n ${SMOKE_NS} -c terminal -- env TTYD_USER='u=${user};t=' ${SHARED_COCKPIT_WRAPPER}"
     fi
     SMOKE_PRELUDE="$(cockpit_session_prelude "$user")"
-    info "smoke ${module} from the shared cockpit ${shared} (pod ${SMOKE_POD}) — replaying ${user}'s ttyd session environment, so every check below runs as ${user}…"
+    info "smoke ${module} from ${user}'s terminal pod ${SMOKE_POD} (ns ${SMOKE_NS}) — replaying the ttyd session environment, so every check below runs as ${user}…"
   else
     info "smoke ${module} from ${user}'s cockpit (pod ${SMOKE_POD}) — running the attendee path as ${user}…"
   fi
@@ -1617,8 +1624,8 @@ cmd_smoke() {
   local home_hint="terminal HOME wrong — the showroom terminal container needs env HOME=/home/lab-user"
   if [[ -n "$shared" ]]; then
     home_expect="${SHARED_COCKPIT_HOMES}/${user}"
-    path_hint="ws missing from the session PATH — the wrapper's \`export PATH=\$PATH:${SHARED_COCKPIT_CLONE}/tools/ws\` line in ${SHARED_COCKPIT_WRAPPER} is what puts it there; check that the read-only clone is mounted: oc exec ${SMOKE_POD} -n ${SMOKE_NS} -c terminal -- ls ${SHARED_COCKPIT_CLONE}/tools/ws"
-    home_hint="session HOME wrong — the wrapper sets HOME=${SHARED_COCKPIT_HOMES}/\${WS_USER} on the shared homes claim; inspect ${SHARED_COCKPIT_WRAPPER} in the pod"
+    path_hint="ws missing from the session PATH — the wrapper's \`export PATH=…:${SHARED_COCKPIT_CLONE}/tools/ws\` line in ${SHARED_COCKPIT_WRAPPER} is what puts it there; check that the read-only clone is mounted: oc exec ${SMOKE_POD} -n ${SMOKE_NS} -c terminal -- ls ${SHARED_COCKPIT_CLONE}/tools/ws"
+    home_hint="session HOME wrong — the wrapper sets HOME=${SHARED_COCKPIT_HOMES}/\${WS_USER} on the attendee's home claim; inspect ${SHARED_COCKPIT_WRAPPER} in the pod"
   fi
   check "ws is on the attendee's interactive PATH (as typed in ttyd)" pod_i 'command -v ws' \
     || hint "$path_hint"
@@ -1960,20 +1967,20 @@ verify_terminal_head() {  # user ns want-sha — confirm the FRESH pod re-cloned
   fi
 }
 
-verify_shared_head() {  # dep ns want-sha — shared cockpit: ONE clone at /showroom/repo, read-only
-  local d="$1" ns="$2" want="$3" head
+verify_shared_head() {  # dep ns want-sha [container] — a shared-model pod's clone at /showroom/repo
+  local d="$1" ns="$2" want="$3" c="${4:-content}" head
   # -c safe.directory is not optional. The clone is written by the init container and read by the
   # restricted-SCC uid the terminal runs as, so plain `git rev-parse` dies with "detected dubious
   # ownership" and exit 128 — which reads as "no clone" rather than "different uid". Measured
   # 2026-08-16 on the live pod: without it, exit 128; with it, the SHA.
-  head="$(oc exec "deploy/${d}" -n "$ns" -c terminal -- \
+  head="$(oc exec "deploy/${d}" -n "$ns" -c "$c" -- \
             git -c safe.directory=/showroom/repo -C /showroom/repo rev-parse HEAD 2>/dev/null || true)"
   if [[ -z "$head" ]]; then
-    info "  ${d}: restarted (clone HEAD not readable yet — pod still initializing)"
+    info "  ${ns}/${d}: restarted (clone HEAD not readable yet — pod still initializing)"
   elif [[ -n "$want" && "$head" != "$want" ]]; then
-    err "  ${d}: pod re-cloned to ${head:0:8} but mirror serves ${want:0:8} — mirror lag? re-check shortly"
+    err "  ${ns}/${d}: pod re-cloned to ${head:0:8} but mirror serves ${want:0:8} — mirror lag? re-check shortly"
   else
-    ok "  ${d}: pod re-cloned to ${head:0:8}${want:+ (matches mirror)}"
+    ok "  ${ns}/${d}: pod re-cloned to ${head:0:8}${want:+ (matches mirror)}"
   fi
 }
 
@@ -2000,30 +2007,51 @@ restart_terminals() {  # target all-flag [exclude...] — opt-in restart of show
   # Restarting mid-workshop is only tolerable because the oauth-proxy cookie secret is now minted
   # once and stored, not redrawn per pod: attendees keep their sessions across this and just see the
   # page reload. Before that fix this would have signed the entire room out.
+  #
+  # The cockpit re-renders the PAGES; each attendee's terminal pod (${TERMINAL_NS_PREFIX}<user>)
+  # re-clones the `ws` they run. Both restart: the cockpit always, terminals for --user or --all.
   local shared=() sd
   for sd in showroom-shared showroom-shared-demos; do
     if oc get deploy "$sd" -n "$ns" >/dev/null 2>&1; then shared+=("$sd"); fi
   done
   if (( ${#shared[@]} > 0 )); then
-    if [[ -n "$target" ]]; then
-      info "one shared cockpit serves every attendee — restarting it, which covers ${target} and everyone else"
-    fi
-    info "restarting shared cockpit(s): ${shared[*]}"
-    local swant sfailed=0
+    local swant sfailed=0 restarted=() tu tns
     swant="$(mirror_head || true)"
+    if [[ -n "$target" ]]; then
+      users=("$target")
+    elif [[ "$all" == true ]]; then
+      for tu in $(oc get deploy -A -l app.kubernetes.io/name=ogsr-terminal \
+                   -o jsonpath='{range .items[*]}{.metadata.labels.workshop\.redhat\.com/terminal-for}{"\n"}{end}' 2>/dev/null | sort -u); do
+        [[ "$reserved" == *" ${tu} "* ]] && { info "skipping reserved terminal ${tu} (override with: --user ${tu})"; continue; }
+        skip=false
+        if [[ ${#excludes[@]} -gt 0 ]]; then
+          for x in "${excludes[@]}"; do [[ "$tu" == "$x" ]] && skip=true; done
+        fi
+        [[ "$skip" == true ]] && { info "skipping ${tu} (excluded)"; continue; }
+        users+=("$tu")
+      done
+    fi
+    info "restarting shared cockpit(s): ${shared[*]}${users[*]:+ and terminal pod(s): ${users[*]}}"
+    # Issue every restart first, then wait: N terminals roll in parallel, not one after another.
     for sd in "${shared[@]}"; do
-      info "  ${sd}: rollout restart…"
-      if ! oc rollout restart "deployment/${sd}" -n "$ns" >/dev/null 2>&1; then
-        err "  ${sd}: restart failed (RBAC? this is an operator/admin action)"; sfailed=1; continue
+      if oc rollout restart "deployment/${sd}" -n "$ns" >/dev/null 2>&1; then restarted+=("${ns}/${sd}")
+      else err "  ${sd}: restart failed (RBAC? this is an operator/admin action)"; sfailed=1; fi
+    done
+    for tu in ${users[@]+"${users[@]}"}; do
+      tns="${TERMINAL_NS_PREFIX}${tu}"
+      if oc rollout restart deployment/terminal -n "$tns" >/dev/null 2>&1; then restarted+=("${tns}/terminal")
+      else err "  ${tns}/terminal: restart failed (no terminal for ${tu}?)"; sfailed=1; fi
+    done
+    for sd in ${restarted[@]+"${restarted[@]}"}; do
+      if ! oc rollout status "deployment/${sd#*/}" -n "${sd%%/*}" --timeout=180s >/dev/null 2>&1; then
+        err "  ${sd}: not ready in 180s — check: oc rollout status deployment/${sd#*/} -n ${sd%%/*}"; sfailed=1; continue
       fi
-      if ! oc rollout status "deployment/${sd}" -n "$ns" --timeout=180s >/dev/null 2>&1; then
-        err "  ${sd}: not ready in 180s — check: oc rollout status deployment/${sd} -n ${ns}"; sfailed=1; continue
-      fi
-      verify_shared_head "$sd" "$ns" "$swant"
+      if [[ "${sd%%/*}" == "$ns" ]]; then verify_shared_head "${sd#*/}" "$ns" "$swant"
+      else verify_shared_head terminal "${sd%%/*}" "$swant" terminal; fi
     done
     echo
     if (( sfailed == 0 )); then
-      ok "shared cockpit restarted — every attendee's page re-renders on reload"
+      ok "restarted ${#restarted[@]} pod(s) — pages re-render on reload; reopened terminals run the new ws"
       return 0
     fi
     return 1
@@ -2161,7 +2189,7 @@ cmd_session_refresh() {
   local sr_shared; sr_shared="$(shared_cockpit_dep)"
   if [[ -n "$sr_shared" ]]; then
     info "nothing to refresh: one shared cockpit (${sr_shared}) serves the cohort, and its terminal mints each attendee's kubeconfig from the OAuth front door on every sign-in — there is no pod-start token to go stale."
-    info "if an attendee is seeing Unauthorized, their SIGN-IN has expired: they reload the cockpit page in the browser and reopen the terminal. Check one: oc exec deploy/${sr_shared} -n ${ns} -c terminal -- ls -l ${SHARED_COCKPIT_HOMES}/<user>/.kube/config"
+    info "if an attendee is seeing Unauthorized, they reopen the terminal: the wrapper signs in again when the saved login no longer works. Check one: oc exec deploy/terminal -n ${TERMINAL_NS_PREFIX}<user> -- ls -l ${SHARED_COCKPIT_HOMES}/<user>/.kube/config"
     return 0
   fi
 
@@ -4031,18 +4059,27 @@ confirm_cockpit() {  # user grow|shrink [timeout] → confirm the cockpit matche
   # — a Deployment can read Argo-Healthy slightly before kubelet actually reports readyReplicas.
   local user="$1" direction="$2" timeout="${3:-300}" t=0 ready desired shared
   shared="$(shared_cockpit_dep)"
-  # A COHORT SIZE CHANGE CREATES AND DESTROYS NO COCKPIT under the shared model — one Deployment
-  # serves everyone, and what actually changes for an attendee is their htpasswd entry, their
-  # workshop-attendees membership and their namespaces. Left per-user, both arms were wrong in
-  # opposite directions: GROW would poll for a showroom-<user> this model never renders and burn its
-  # full timeout PER NEW USER (300s x every user added) before erroring about a healthy cluster, and
-  # SHRINK would return "removed" on its first poll for the wrong reason — the Deployment was never
-  # there. A confirmation that cannot fail, and one that cannot pass, are both worse than none.
+  # Under the shared model one cockpit serves everyone; what a cohort size change creates or removes
+  # per attendee is their terminal pod (namespace ${TERMINAL_NS_PREFIX}<user>), so that is confirmed.
   if [[ -n "$shared" ]]; then
+    local tns="${TERMINAL_NS_PREFIX}${user}"
     if [[ "$direction" == "shrink" ]]; then
-      ok "no per-attendee cockpit to remove for ${user} — one shared cockpit (${shared}) serves the cohort; ${user} loses access with the htpasswd entry and the workshop-attendees membership this command already rewrote"
-      return 0
+      info "confirming ${user}'s terminal namespace ${tns} is gone or going…"
+      while (( t < timeout )); do
+        [[ "$(oc get ns "$tns" -o jsonpath='{.status.phase}' 2>/dev/null || true)" != "Active" ]] && { ok "terminal ${tns} removed"; return 0; }
+        sleep 10; t=$((t+10))
+      done
+      err "terminal namespace ${tns} still Active after ${timeout}s — check: oc get application workshop-config -n ${ARGO_NS}"
+      return 1
     fi
+    info "confirming ${user}'s terminal pod comes up in ${tns}…"
+    while (( t < timeout )); do
+      ready="$(oc get deploy terminal -n "$tns" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+      [[ "${ready:-0}" -ge 1 ]] && break
+      sleep 10; t=$((t+10))
+    done
+    [[ "${ready:-0}" -ge 1 ]] || { err "terminal pod for ${user} not ready after ${timeout}s — check: oc get deploy,pods -n ${tns}"; return 1; }
+    ok "terminal pod for ${user} Running in ${tns}"
     # Still a real wait, and not a redundant one: the workshop-config sync this command just ran
     # re-renders the shared cockpit's userdata, whose checksum rolls the Deployment. So it can
     # genuinely be mid-rollout here, and "the cohort's one cockpit is back up" is the thing a grow
@@ -4575,7 +4612,7 @@ cmd_status() {  # SA everyday cohort-health dashboard. READ-ONLY. [--user U] sco
   # the per-user lookup found nothing and the column read "— none" for all 8 attendees on a cluster
   # whose cockpit was up (measured 2026-08-16); an operator reading that would go provision cockpits
   # that already exist.
-  local st_shared st_cell="" st_attn=""
+  local st_shared st_cell="" st_attn="" st_terms="" st_term_ok=0 st_tr
   st_shared="$(shared_cockpit_dep)"
   if [[ -n "$st_shared" ]]; then
     ready="$(oc get deploy "$st_shared" -n "$SHOWROOM_NS" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
@@ -4588,11 +4625,17 @@ cmd_status() {  # SA everyday cohort-health dashboard. READ-ONLY. [--user U] sco
       st_attn="cockpit ${st_shared} not ready (${ready}/${desired}) — it serves EVERY attendee, so this is the whole room"
     fi
     echo "  cockpit: one shared cockpit (${st_shared}) serves every attendee — the column below reports ITS state, the same value on every row"
+    # Each attendee's own terminal pod: ONE list call, then a per-user lookup in the loop.
+    st_terms="$(oc get deploy -A -l app.kubernetes.io/name=ogsr-terminal \
+      -o jsonpath='{range .items[*]}{.metadata.labels.workshop\.redhat\.com/terminal-for}{"="}{.status.readyReplicas}{"\n"}{end}' 2>/dev/null || true)"
   fi
   printf "  %-8s %-9s %-24s %-10s\n" "User" "Cockpit" "Modules active" "Entries"
   for u in "${users_arr[@]}"; do
     if [[ -n "$st_shared" ]]; then
       cockpit="$st_cell"
+      st_tr="$(printf '%s\n' "$st_terms" | sed -n "s/^${u}=//p")"
+      if [[ "${st_tr:-0}" -ge 1 ]]; then st_term_ok=$((st_term_ok + 1))
+      else attention+=("${u}: terminal pod not ready — oc get deploy,pods -n ${TERMINAL_NS_PREFIX}${u}"); fi
     elif ! oc get deploy "showroom-${u}" -n "$SHOWROOM_NS" >/dev/null 2>&1; then
       cockpit="— none"
     else
@@ -4654,7 +4697,10 @@ cmd_status() {  # SA everyday cohort-health dashboard. READ-ONLY. [--user U] sco
   # number that is arithmetically fine and factually wrong, and it is the kind of line an operator
   # quotes back later, so the shared model states the object instead of a ratio over attendees.
   local cockpit_frag="${sum_cockpit_ready}/${nusers} cockpit(s) ready"
-  if [[ -n "$st_shared" ]]; then cockpit_frag="shared cockpit ${st_shared} ${st_cell}"; fi
+  if [[ -n "$st_shared" ]]; then
+    local st_term_mark="✅"; [[ "$st_term_ok" -eq "$nusers" ]] || st_term_mark="❌"
+    cockpit_frag="shared cockpit ${st_shared} ${st_cell} · terminal pods ${st_term_mark} ${st_term_ok}/${nusers}"
+  fi
   echo "Summary: ${nusers} user(s) · ${cockpit_frag} · ${sum_entries} entry app(s) (${sum_entries_ok} healthy, $((sum_entries - sum_entries_ok)) need attention) · platform ${plat_state}"
   echo "   drill in: ${WS_CMD} status --user <userN>   ·   ${WS_CMD} diag --user <userN> [<module>]"
   return 0
@@ -4779,10 +4825,12 @@ cmd_diag() {  # SA troubleshooting bundle for a stuck attendee. READ-ONLY. cmd_d
   cdep="$(cockpit_dep_for "$user" "$cshared")"
   info "Cockpit (${cdep})"
   if [[ -n "$cshared" ]]; then
+    local tpod tphase=""; tpod="$(terminal_pod_for "$user" any)"
+    if [[ -n "$tpod" ]]; then tphase="$(oc get pod "$tpod" -n "${TERMINAL_NS_PREFIX}${user}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"; fi
     echo "  one shared cockpit serves the whole cohort — the state below is the room's, not ${user}'s"
-    echo "  ${user}'s own session lives on the cockpit's homes claim; its kubeconfig is re-minted on every"
-    echo "  sign-in, so absent = never signed in, and 'everything says Unauthorized' = expired, reload the page:"
-    echo "    oc exec deploy/${cdep} -n ${SHOWROOM_NS} -c terminal -- ls -l ${SHARED_COCKPIT_HOMES}/${user}/.kube/config"
+    echo "  ${user}'s terminal: ${tpod:-no pod} in ${TERMINAL_NS_PREFIX}${user}${tphase:+ (${tphase})}"
+    echo "    oc logs deploy/terminal -n ${TERMINAL_NS_PREFIX}${user} --tail=100"
+    echo "    oc exec deploy/terminal -n ${TERMINAL_NS_PREFIX}${user} -- ls -l ${SHARED_COCKPIT_HOMES}/${user}/.kube/config"
   fi
   if ! oc get deploy "$cdep" -n "$SHOWROOM_NS" >/dev/null 2>&1; then
     echo "  no ${cdep} Deployment — cockpit not provisioned for ${user}"
@@ -4795,7 +4843,7 @@ cmd_diag() {  # SA troubleshooting bundle for a stuck attendee. READ-ONLY. cmd_d
     if [[ -n "$cpod" ]]; then
       cphase="$(oc get pod "$cpod" -n "$SHOWROOM_NS" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
       echo "  newest pod: ${cpod} (${cphase:-?})"
-      echo "  logs: oc logs ${cpod} -n ${SHOWROOM_NS} -c terminal --tail=100"
+      echo "  logs: oc logs ${cpod} -n ${SHOWROOM_NS} -c ${cshared:+nginx}${cshared:-terminal} --tail=100"
     else
       echo "  no cockpit pod found for ${cdep}"
     fi

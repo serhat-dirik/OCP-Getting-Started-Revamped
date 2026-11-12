@@ -36,12 +36,14 @@ repo. `tools/ws/adm` is the operator CLI; attendees only get `ws` inside their c
 ### Sizing
 
 ```
-CPU    = 32  + attendees × 2.5    + 20%
-Memory = 56 Gi + attendees × 1.5 Gi + 20%
+CPU    = 32  + attendees × 2.6     + 20%
+Memory = 56 Gi + attendees × 1.75 Gi + 20%
 ```
 
 - 32 CPU / 56 Gi is the platform before any attendee does anything (measured requests).
 - **CPU decides the worker count, not memory.** Each Dev Spaces workspace requests 2.5 CPU on one node.
+- Each attendee's terminal pod requests 0.1 CPU / 0.25 Gi and a 1 Gi home claim (measured: idle 1m / 2 Mi;
+  a Maven build in it peaks near 0.8 CPU / 285 Mi).
 - Prefer fewer, larger workers. Below 16 vCPU per worker, capacity is stranded.
 - Size on requests, never on a `top` reading — a cluster that looks idle can still refuse a pod.
 - RHACS alone is 26 Gi. To order lean, disable the modules that use it (`modules_disabled`).
@@ -179,7 +181,7 @@ Both floors exist for one module, `deployment-targets-scheduling`:
    ```
 
    Healthy looks like:
-   `Summary: 5 user(s) · shared cockpit showroom-shared ✅ 1/1 · 0 entry app(s) (0 healthy, 0 need attention) · platform all-Synced ✅`
+   `Summary: 5 user(s) · shared cockpit showroom-shared ✅ 1/1 · terminal pods ✅ 5/5 · 0 entry app(s) (0 healthy, 0 need attention) · platform all-Synced ✅`
 
    The attendee-facing URLs (`<apps>` is the cluster's `apps.` domain):
 
@@ -343,7 +345,7 @@ oc get applications -n openshift-gitops
 - **Cause:** the cockpit runs an old `ws`. The cluster got the new policy; the cockpit has not re-cloned.
 - **Fix:** `tools/ws/adm git-refresh --restart-terminals --all`
 - Check a cockpit (`3` = current, `0` = old):
-  `oc exec -n ogsr-showroom deploy/showroom-shared -c terminal -- grep -c ARGO_PROJECT_PIN /showroom/repo/tools/ws/ws`
+  `oc exec -n ogsr-term-<user> deploy/terminal -- grep -c ARGO_PROJECT_PIN /showroom/repo/tools/ws/ws`
 
 ### A cockpit serves old content
 

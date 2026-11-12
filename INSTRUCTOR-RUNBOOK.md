@@ -44,7 +44,7 @@ has its own timing table, pre-flight checklist and watchouts.
    a numbered list where each attendee claims a user, so no two people take the same one.
    - Showroom: `https://ogsr-showroom.<apps>`. Log in as `userN` with the workshop password.
 4. **Last check before you start:** `tools/ws/adm status` must end with
-   `shared cockpit showroom-shared ✅ 1/1` and `platform all-Synced ✅`.
+   `shared cockpit showroom-shared ✅ 1/1 · terminal pods ✅ N/N` and `platform all-Synced ✅`.
 
 No login refresh is needed. Each attendee's terminal logs in from their own browser sign-in.
 

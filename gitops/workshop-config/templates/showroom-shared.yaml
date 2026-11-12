@@ -35,23 +35,18 @@
      attributes and anchors; a response-stream rewrite does not distinguish them, which is why it is
      the right layer.
 
-  2. IDENTITY IN THE TERMINAL — ttyd -H + TTYD_USER, fed by the ACCESS TOKEN.
-     ttyd forks an independent shell per websocket (not per pod), and in auth-proxy mode (-H) it
-     exports the header value to that shell as TTYD_USER. `-H` takes exactly ONE header name
-     (`-H, --auth-header  HTTP Header name for auth proxy` — read out of the running ttyd 1.7.7 on
-     2026-08-16), so the header it carries is a CHOICE, and this cockpit spends it on
-     X-Forwarded-Access-Token rather than X-Forwarded-User. The wrapper turns that token into a
-     per-session kubeconfig and derives the name from `oc whoami`, so the shell acts as the real
-     attendee for as long as the cluster says the token is good.
-
-     WHY THE HEADER MOVED (defect found by the owner on a live cockpit, 2026-08-16). With
-     `-H X-Forwarded-User` the terminal knew a NAME and held no credential, so `oc whoami` in it
-     returned `system:serviceaccount:ogsr-showroom:showroom-shared` — the pod's own SA, which holds
-     only system:auth-delegator. Reproduced here the same day: pods, secrets and projects all
-     Forbidden. Not a privilege leak, a dead end: no `ws` verb works, because `ws` resolves the
-     attendee from `oc whoami` (tools/ws/ws user_arg) and refuses to run without a login. The old
-     wrapper's answer was to PRINT `oc login … -u $TTYD_USER` and let the human finish the job — an
-     instruction, not an identity.
+  2. IDENTITY IN THE TERMINAL — one terminal pod per attendee (owner ruling 2026-11-12).
+     Until then ONE ttyd in the cockpit pod forked every attendee's shell, all as the same uid, so
+     attendee A could rewrite B's ~/.kube/config, ~/.bashrc.d and the session wrapper itself
+     (measured on cluster-5vqxc 2026-11-12; kernel.yama.ptrace_scope was 0 too). Now:
+       * each attendee has namespace ogsr-term-<user> holding one ttyd pod (rendered at the end of
+         this file). Separate namespaces get separate SCC uid ranges, so the kernel separates them;
+       * nginx routes /tty-top/ and /tty-bottom/ to terminal.ogsr-term-<X-Forwarded-User>.svc. That
+         header is set by oauth-proxy, and nginx listens on 127.0.0.1 only, so no client can forge it;
+       * a NetworkPolicy in each terminal namespace admits port 7681 ONLY from the cockpit pods —
+         without it any pod on the cluster network could open any attendee's shell;
+       * the session wrapper is a read-only ConfigMap mount that names its own attendee; it signs in
+         with the shared workshop password and refuses a session the front door names differently.
 
   3. THE FRONT DOOR — oauth-proxy as a REAL OAuthClient (was: as the ServiceAccount).
      A ServiceAccount-as-OAuth-client is SCOPE-CAPPED, and that cap is what forced this change.
@@ -84,27 +79,7 @@
   error, HTTP 200. That is measured, as the negative control of the experiment above, and it is
   exactly the class of defect this project keeps paying for: correct in the source, broken in the
   artefact, reported as success. An empty identity is therefore refused with 503, never rendered.
-
-  ── THE HAZARD THE TOKEN INTRODUCES, AND WHERE IT IS CONTAINED ───────────────────────────────────
-  ttyd names its exported variable TTYD_USER whatever header feeds it, so on THIS cockpit TTYD_USER
-  holds a live bearer token. Every path it could take is closed deliberately, and each one is worth
-  naming because the previous wrapper took the first of them:
-
-    * THE BANNER. The old wrapper printed `You are signed in as $TTYD_USER` into the login greeting —
-      with this header that echoes a live credential to the screen, into scrollback, and into any
-      terminal capture. The wrapper now copies TTYD_USER into a NON-EXPORTED local and `unset`s it on
-      the second line; the banner names the user resolved from `oc whoami`.
-    * THE PROCESS TABLE. Every session in this pod runs as the SAME uid (measured: 1002180000), so
-      `ps eww` and /proc/<pid>/environ are readable across sessions. Unsetting TTYD_USER keeps the
-      token out of the environment, and the token never reaches an argv: the kubeconfig is written by
-      bash BUILTINS (echo into a redirect), never by `oc login --token=…`.
-    * NGINX. `proxy_set_header X-Forwarded-Access-Token ""` on the CONTENT location — an empty value
-      means nginx does not pass the header at all — so the token reaches the ttyd upstream and
-      nothing else. oauth-proxy's request logging is off by default (`-request-logging`, verified in
-      the running image) and nginx's access log format carries no arbitrary headers.
-    * AT REST. Exactly one copy exists per attendee: $HOME/.kube/config, written 0600 under a 0700
-      ~/.kube, replaced (not appended) on every connection. See the wrapper for the one thing file
-      MODE cannot buy here — the homes PVC is shared and so is the uid.
+  The access token oauth-proxy passes stops at nginx: no upstream receives it (see the locations).
 */ -}}
 {{- if and .Values.showroom.enabled .Values.showroom.shared.enabled }}
 {{- $ns := .Values.showroom.namespace }}
@@ -116,6 +91,8 @@
 {{- $disabledModules := list }}
 {{- range $s := splitList "," (default "" .Values.modulesDisabledCSV) }}{{- if trim $s }}{{- $disabledModules = append $disabledModules (trim $s) }}{{- end }}{{- end }}
 {{- $apiUrl := printf "https://api.%s:6443" (trimPrefix "apps." $domain) }}
+{{- /* Per-attendee terminal namespaces are <prefix><user>. tools/ws/ws (TERMINAL_NS_PREFIX) must match. */ -}}
+{{- $termPrefix := "ogsr-term-" }}
 {{- /*
      TWO INSTANCES, ONE DEFINITION. The attendee cockpit and the SA-Demos cockpit differ ONLY in
      which Antora playbook they build — the workshop flavor or the demo flavor (Say/Show/Do). They
@@ -174,52 +151,6 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: system:auth-delegator
-subjects:
-  - kind: ServiceAccount
-    name: {{ $name }}
-    namespace: {{ $ns }}
----
-# why (cross-namespace read): the session wrapper's SECOND identity path. When the front door hands
-# the terminal a username but no access token, the wrapper signs that user in with the shared
-# workshop password — the same secret, in the same namespace, that the Gitea/SonarQube/Etherpad seeds
-# already read, so there is one source of truth for it and no copy in git.
-#
-# THE GRANT IS `get` ON ONE NAMED SECRET, and it is worth stating what it does NOT contain: every
-# session in this pod runs as the same uid and the pod SA token is on that filesystem, so any
-# attendee who wants the workshop password can already read it here. The password is non-secret by
-# owner ruling (it is printed in the attendee materials); this Role changes who is *convenient* for,
-# not who it is *available* to. The exposure that matters is the SA token itself, which is tracked
-# separately rather than pretended away here.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: {{ $name }}-session-creds
-  namespace: {{ $.Values.giteaNamespace }}
-  labels:
-    workshop.redhat.com/layer: workshop-config
-    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
-  annotations:
-    argocd.argoproj.io/sync-wave: "1"
-rules:
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get"]
-    resourceNames: ["workshop-user-creds"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: {{ $name }}-session-creds
-  namespace: {{ $.Values.giteaNamespace }}
-  labels:
-    workshop.redhat.com/layer: workshop-config
-    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
-  annotations:
-    argocd.argoproj.io/sync-wave: "1"
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: {{ $name }}-session-creds
 subjects:
   - kind: ServiceAccount
     name: {{ $name }}
@@ -649,8 +580,19 @@ data:
       map $http_x_forwarded_access_token $ws_hdr_token { default 1; '' 0; }
       log_format ws_identity '$time_iso8601 $request_method $uri upgrade="$http_upgrade" '
                              'hdr_user=$ws_hdr_user hdr_token=$ws_hdr_token -> $status';
+      # The attendee's OWN terminal Service, from the front door's identity header. A name that is
+      # not a DNS label maps to "" and is refused below, so the header can never steer the host.
+      map $http_x_forwarded_user $ws_term {
+        default "";
+        "~^(?<wsu>[a-z0-9]([-a-z0-9]{0,51}[a-z0-9])?)$" "terminal.{{ $termPrefix }}$wsu.svc.cluster.local";
+      }
+      # proxy_pass with a variable resolves at request time, so nginx needs a resolver. The
+      # cluster DNS Service by NAME, because its IP differs per cluster (172.231.0.10 on 5vqxc).
+      resolver dns-default.openshift-dns.svc.cluster.local valid=30s ipv6=off;
       server {
-        listen 8080;
+        # LOOPBACK ONLY. oauth-proxy is the one client; on 0.0.0.0 any pod could send its own
+        # X-Forwarded-User here and be routed to that attendee's shell.
+        listen 127.0.0.1:8080;
         absolute_redirect off;
         location / {
           if ($ws_identity_missing) {
@@ -662,8 +604,8 @@ data:
           # THE CONTENT UPSTREAM MUST NOT SEE THE TOKEN. nginx forwards the client's headers to a
           # proxied server by default, so oauth-proxy's X-Forwarded-Access-Token would reach the
           # content container for free. An EMPTY proxy_set_header value means the field is not passed
-          # at all — that is nginx's documented behaviour and the whole point of this line. The token
-          # is needed by exactly one upstream (ttyd, below) and goes to exactly that one.
+          # at all — that is nginx's documented behaviour and the whole point of this line. No
+          # upstream needs the token; the terminal location strips it too.
           proxy_set_header X-Forwarded-Access-Token "";
           # sub_filter cannot rewrite a compressed body. The content service is Python SimpleHTTP and
           # sends none today (measured: Content-type text/html, no Content-Encoding), but asking for
@@ -675,56 +617,43 @@ data:
           # (search index, nookbag config), and a half-substituted site is worse than none.
           sub_filter_types *;
         }
-        location = /tty-top { return 302 /tty-top/; }
-        location /tty-top/ {
-          proxy_pass http://127.0.0.1:7681/;
+        location ~ ^/tty-(top|bottom)$ { return 302 $uri/; }
+        # Both terminal panes hit the SAME ttyd, which forks one shell per websocket.
+        location ~ ^/tty-(top|bottom)/ {
+          if ($ws_term = "") {
+            return 503 "cockpit: no terminal for this sign-in (attendee usernames only)";
+          }
+          rewrite ^/tty-(?:top|bottom)(/.*)$ $1 break;
+          proxy_pass http://$ws_term:7681;
           proxy_http_version 1.1;
           proxy_set_header Upgrade $http_upgrade;
           proxy_set_header Connection $connection_upgrade;
           proxy_read_timeout 43200000;
           proxy_set_header Host $http_host;
           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          # The front door's credentials stop here: the token and the session cookie would
+          # otherwise cross the pod network to a pod the attendee controls.
+          proxy_set_header X-Forwarded-Access-Token "";
+          proxy_set_header Cookie "";
           # ttyd reads ONE header (-H) and this is it. Two rules govern its value, both measured on
-          # this image on 2026-08-16, and the second is the one that cost a full evening.
+          # this image on 2026-08-16.
           #
           # RULE 1 — IT MUST NEVER BE EMPTY. ttyd's -H DENIES the websocket when its header is
-          # absent, a denied websocket is a closed socket, and a closed socket is the only thing the
-          # ttyd client can render: "reconnecting", forever, with no reason. Composing the value
-          # here means ttyd can never deny anyone; the decision moves into the wrapper, which holds
-          # the connection open and says what happened.
+          # absent, and a denied websocket renders as "reconnecting", forever, with no reason.
+          # Composing the value here means ttyd can never deny anyone; the wrapper decides, holds the
+          # connection open and says what happened.
           #
           # RULE 2 — IT MUST STAY UNDER ~29 CHARACTERS. ttyd/libwebsockets silently refuses a custom
           # header whose VALUE is longer than that. Measured by bisection through this very nginx,
           # subprotocol tty, one variable:
           #     value length 10 15 20 25 28 -> 101 accepted
           #     value length 30 31 34 40 50 61 -> 502 DENIED
-          # Total header size is NOT the limit — a 2.4 KB Cookie on the same request passes fine.
+          # An OpenShift access token is 51 characters, so it can NEVER pass through -H — the
+          # original design sent it and every terminal died. If a future cockpit needs a secret on
+          # the connection, -H is not the channel.
           #
-          # THIS IS WHY THE TOKEN IS NOT HERE, AND IT IS NOT A PREFERENCE. An OpenShift access token
-          # is `sha256~` + 43 = 51 characters, so it can NEVER pass through -H. The original design
-          # sent exactly that and every terminal died — and the failure looked like "the token never
-          # arrived", which sent the search to oauth-proxy, cookie refresh, websocket header
-          # stripping and the proxy's source. The token was arriving the whole time: this location's
-          # own access_log records hdr_token=1 on the request ttyd rejected. It was refused for
-          # LENGTH, and ttyd reports refusal and absence identically.
-          #
-          # A username fits with room to spare (u=user6;t= is 10), so the wrapper takes the name
-          # from here and the credential from the shared workshop password. If a future cockpit ever
-          # needs a real secret on the connection, -H is not the channel — do not try again here.
-          proxy_set_header X-Ws-Session "u=$http_x_forwarded_user;t=";
-          access_log /dev/stdout ws_identity;
-        }
-        location = /tty-bottom { return 302 /tty-bottom/; }
-        location /tty-bottom/ {
-          proxy_pass http://127.0.0.1:7681/;
-          proxy_http_version 1.1;
-          proxy_set_header Upgrade $http_upgrade;
-          proxy_set_header Connection $connection_upgrade;
-          proxy_read_timeout 43200000;
-          proxy_set_header Host $http_host;
-          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          # Same two rules as /tty-top/ above: never empty, never longer than ~29 characters. The
-          # token is deliberately absent — it is 51 characters and physically cannot pass -H.
+          # The wrapper compares the name with its own attendee and refuses a mismatch, so a routing
+          # fault shows as a message instead of somebody else's shell.
           proxy_set_header X-Ws-Session "u=$http_x_forwarded_user;t=";
           access_log /dev/stdout ws_identity;
         }
@@ -747,35 +676,6 @@ data:
   user_data.yml: |
 {{- include "workshop-config.showroomUserData" (dict "user" "__WS_USER__" "domain" $domain "giteaHost" $giteaHost "disabledModules" $disabledModules "root" $) }}
 ---
-# One home per authenticated user, as subdirectories of one claim: the per-user cockpits take one
-# PVC each, this takes one for the whole cohort.
-#
-# SAME sync-wave as the Deployment (3), NOT earlier — the identical rule showroom.yaml states for
-# showroom-home-{user}, and this file got it wrong. The default StorageClass on RHDP clusters is
-# WaitForFirstConsumer, so this PVC stays Pending until its consuming pod is SCHEDULED. At wave 2
-# Argo waits for a wave-2 resource to go Healthy before creating anything in wave 3 — so it waits
-# for a PVC that cannot bind until the wave-3 Deployment it is waiting to create actually exists.
-# That is a permanent deadlock, and it does not look like one: the Application sits
-# Progressing/Running with the honest-but-unhelpful message
-#     waiting for healthy state of /PersistentVolumeClaim/{{ $name }}-homes
-# and NOTHING is ever created. Measured on cluster-m24jn 2026-08-15: 52 minutes, zero pods.
-# Nothing about a Pending PVC is reported as an error, which is why this reads as a slow sync.
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: {{ $name }}-homes
-  namespace: {{ $ns }}
-  labels:
-    workshop.redhat.com/layer: workshop-config
-    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
-  annotations:
-    argocd.argoproj.io/sync-wave: "3"
-spec:
-  accessModes: ["ReadWriteOnce"]
-  resources:
-    requests:
-      storage: {{ $.Values.showroom.shared.homesStorage }}
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -789,10 +689,6 @@ metadata:
     argocd.argoproj.io/sync-wave: "3"
 spec:
   replicas: 1
-  # One RWO claim holds every home, so two pods could never both mount it. Recreate states that
-  # instead of letting a rollout wedge on an attach that cannot succeed.
-  strategy:
-    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/instance: {{ $name }}
@@ -804,28 +700,6 @@ spec:
     spec:
       serviceAccountName: {{ $name }}
       initContainers:
-        {{- if include "workshop-config.moduleEnabled" (dict "root" $ "slug" "serverless-zero-to-hero") }}
-        # 0) Red Hat's Serverless `kn` (with `kn func` v1.17+) from the cluster's own CLI download route,
-        #    put first on the terminal's PATH. The terminal image ships kn/func v1.15.2, whose remote-build
-        #    request the Pipelines 1.24 webhook rejects (`impossible ParamValues.Type`). Best effort: no
-        #    Serverless route, no download, and the image's own kn stays.
-        - name: kn-cli
-          image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
-          command: ["/bin/bash", "-c"]
-          args:
-            - |
-              if curl -ksfL "https://kn-openshift-serverless.{{ $domain }}/kn-linux-amd64.tar.gz" | tar xz -C /opt/ogsr-bin kn; then
-                echo "✅ Serverless kn: $(/opt/ogsr-bin/kn version | sed -n 's/^Version: *//p') (kn func $(/opt/ogsr-bin/kn func version))"
-              else
-                echo "⚠ Serverless kn download unavailable — the terminal keeps the image's kn"
-              fi
-          resources:
-            requests: {cpu: 50m, memory: 64Mi}
-            limits: {memory: 256Mi}
-          volumeMounts:
-            - name: ogsr-bin
-              mountPath: /opt/ogsr-bin
-        {{- end }}
         # 1) Clone the in-cluster monorepo mirror (public repo, valid RHDP wildcard cert → no auth).
         - name: content-clone
           image: {{ $img.gitCloner | quote }}
@@ -863,27 +737,6 @@ spec:
               subPath: www
             - name: userdata
               mountPath: /user_data/
-        # 3) Only the homes ROOT is prepared. Which users will sign in is unknowable here, and
-        #    pre-creating N homes would re-encode the per-user assumption this template removes —
-        #    the session wrapper creates a home on first connection instead.
-        - name: homes-prep
-          image: {{ $img.terminal | quote }}
-          command: ["/bin/bash", "-c"]
-          args:
-            - |
-              set -euo pipefail
-              mkdir -p /homes
-              # NO chmod. Under restricted-v2 the PVC is mounted root-owned but group-owned by the
-              # namespace's fsGroup, which the container already runs as — so it is ALREADY writable,
-              # and chmod on a directory this UID does not own is refused. Measured 2026-08-14:
-              # "chmod: changing permissions of '/homes': Operation not permitted", rc 11, uid
-              # 1002200000 / fsGroup 1002200000 on OCP 4.22. Assert the property we need instead of
-              # trying to impose one we cannot.
-              test -w /homes || { echo "FATAL: /homes not writable by uid $(id -u) — per-session homes cannot be created"; exit 1; }
-              echo "✅ shared homes root ready (writable by uid $(id -u))"
-          volumeMounts:
-            - name: homes
-              mountPath: /homes
       containers:
         # ── the front door. Every other container listens on loopback only. ──
         - name: oauth-proxy
@@ -891,10 +744,6 @@ spec:
           ports:
             - name: https
               containerPort: 8443
-          # The cookie secret is minted per pod start rather than stored. There is ONE replica with a
-          # Recreate strategy, so a restart already invalidates every session — persisting a secret
-          # would buy nothing and would put a credential in the repo or in Argo's diff.
-          #
           # NO --openshift-sar, and that is deliberate. The obvious-looking guard
           #   --openshift-sar={"namespace":"<showroom-ns>","resource":"services","verb":"get"}
           # LOCKS OUT EVERY ATTENDEE. Measured 2026-08-14:
@@ -1085,234 +934,8 @@ spec:
             - name: showroom-files
               mountPath: /showroom/www
               subPath: www
-        - name: terminal
-          image: {{ $img.terminal | quote }}
-          command: ["/bin/bash", "-c"]
-          args:
-            - |
-              set -euo pipefail
-              # The wrapper ttyd execs per websocket. TTYD_USER is set by ttyd from the -H header, so
-              # this is the ONLY place the connecting attendee's identity is known — the pod itself
-              # has no single user, which is the whole point.
-              #
-              # ON THIS COCKPIT TTYD_USER IS A BEARER TOKEN, NOT A NAME. ttyd names that variable
-              # after its own flag, whatever header feeds it, and -H here carries
-              # X-Forwarded-Access-Token. Read the header block for the full leak inventory; the four
-              # rules the generated wrapper obeys are:
-              #   1. copy it to a NON-EXPORTED local and `unset TTYD_USER` on the next line, so it is
-              #      gone from the environment before anything else runs — /proc/<pid>/environ is
-              #      readable by every other session in this pod (all of them run as the same uid).
-              #   2. never echo it, never let it become an argv (kubeconfig written by builtins).
-              #   3. one copy at rest, 0600, under 0700 ~/.kube, replaced per connection.
-              #   4. the banner names `oc whoami`, never the variable.
-              #
-              # WHAT MODE 0600 DOES *NOT* BUY, stated plainly because it looks like it does. /homes is
-              # `drwxrwsr-x root:1002180000` and every session in this pod runs as uid 1002180000
-              # (measured on the live pod, 2026-08-16) — so the OWNER of every kubeconfig here is the
-              # same uid as every other attendee's shell. 0600 removes group and other, which is
-              # correct hygiene against any other uid, and it does NOT isolate attendee from attendee:
-              # `cat /homes/userN/.kube/config` works from any session. That is a property of one pod
-              # shared by a cohort, not of this file, and it is reported to the PM rather than papered
-              # over here. What this wrapper CAN do it does: nothing is in the environment, nothing is
-              # in a process argument, and there is one file rather than one per connection.
-              #
-              # ECHO LINES, NOT A HEREDOC — and /tmp, not /usr/local/bin. Both learned the hard way
-              # on 2026-08-14. A quoted heredoc delimiter must sit at column 0, which is impossible
-              # inside this indented YAML block scalar: bash never closes the heredoc and instead
-              # tries to EXECUTE the following lines, which surfaces as the baffling
-              # "/bin/bash: line 5: /usr/local/bin/ws-session: Permission denied". showroom-demos.yaml
-              # carries the same warning; this is the second time the trap has been paid for. /usr/local/bin
-              # is also not writable by the random restricted-v2 UID, so the wrapper lives in /tmp.
-              #
-              # Single-quoted echoes keep every $VAR literal — they must expand in the ATTENDEE's
-              # shell at connection time, not in this container's shell at pod start. The one value
-              # that IS resolved here is the API URL, which Helm knows and the shell cannot; it is the
-              # ONLY double-quoted generator line below, and it contains no $ of its own.
-              #
-              # THE GENERATED WRAPPER RUNS WITHOUT `set -e`, deliberately. A session wrapper that dies
-              # on a benign non-zero closes the attendee's terminal with no message at all, which is a
-              # worse outcome than the non-zero. `-u` and `pipefail` stay; everything that must not
-              # fail silently is checked explicitly and prints its own ❌.
-              {
-                echo '#!/bin/bash'
-                echo 'set -uo pipefail'
-                echo 'umask 077'
-                echo '# Rule 1: the session header leaves the environment before anything else runs.'
-                echo '_sess="${TTYD_USER:-}"'
-                echo 'unset TTYD_USER'
-                echo "WS_API='{{ $apiUrl }}'"
-                echo "WS_GITEA_NS='{{ $.Values.giteaNamespace }}'"
-                echo '# nginx composes "u=<name>;t=<token>" and never sends it empty, so reaching this'
-                echo '# line proves the socket opened and NOTHING about identity. Either half may be'
-                echo '# absent; each is handled on its own below, and neither absence closes the socket.'
-                echo '_hu="${_sess%%;t=*}"; _hu="${_hu#u=}"'
-                echo '_tok="${_sess#*;t=}"'
-                echo 'unset _sess'
-                echo '_why=""'
-                echo '# Bootstrap kubeconfig, written by BUILTINS into a 0600 mktemp file: no `oc login'
-                echo '# --token=…`, because a flag value is visible in the process table to every other'
-                echo '# session in this pod. HOME cannot be known yet — it is derived from the identity'
-                echo '# this file is what proves — so the first write lands outside the shared PVC.'
-                echo '_kc="$(mktemp /tmp/.ws-kube.XXXXXXXXXX)" || { echo "❌ cannot create a session kubeconfig"; exec sleep 3600; }'
-                echo 'chmod 0600 "$_kc"'
-                echo 'WS_USER=""'
-                echo '# --- path 1: an access token arrived on the connection. UNREACHABLE VIA -H TODAY,'
-                echo '# and kept deliberately: ttyd caps a custom header value at ~29 characters and an'
-                echo '# OpenShift token is 51, so nginx does not even send it (see the tty location).'
-                echo '# This branch is what a future per-connection channel would land in, and it costs'
-                echo '# one string test. Do NOT re-point nginx at -H to feed it.'
-                echo 'if [ -n "$_tok" ]; then'
-                echo '{'
-                echo '  echo "apiVersion: v1"'
-                echo '  echo "kind: Config"'
-                echo '  echo "clusters:"'
-                echo '  echo "- name: ogsr"'
-                echo '  echo "  cluster:"'
-                echo '  echo "    server: $WS_API"'
-                echo '  echo "    insecure-skip-tls-verify: true"'
-                echo '  echo "contexts:"'
-                echo '  echo "- name: ogsr"'
-                echo '  echo "  context:"'
-                echo '  echo "    cluster: ogsr"'
-                echo '  echo "    user: ogsr"'
-                echo '  echo "current-context: ogsr"'
-                echo '  echo "users:"'
-                echo '  echo "- name: ogsr"'
-                echo '  echo "  user:"'
-                echo '  echo "    token: $_tok"'
-                echo '} > "$_kc"'
-                echo '# The name comes from the CLUSTER, never from a header we could be fed. This is'
-                echo '# also the expiry probe: a dead token cannot answer whoami.'
-                echo 'WS_USER="$(KUBECONFIG="$_kc" oc whoami 2>/dev/null || true)"'
-                echo '[ -n "$WS_USER" ] || _why="the access token the front door passed is not valid here — the sign-in has expired"'
-                echo 'fi'
-                echo '# --- path 2: only a NAME arrived. Sign in with the shared workshop password, which'
-                echo '# is the same mechanism the per-user cockpits have always used. This path exists'
-                echo '# because oauth-proxy proxies websockets through a different handler than plain'
-                echo '# HTTP, and whether the access token survives that hop is a property of the proxy'
-                echo '# build, not of this chart — see the header. A name is not a credential, so a'
-                echo '# forged one buys nothing the shared password does not already give everybody.'
-                echo 'if [ -z "$WS_USER" ] && [ -n "$_hu" ]; then'
-                echo '  case "$_hu" in'
-                echo '    *[!A-Za-z0-9._@-]* | .* | -* )'
-                echo '      _why="the front door sent a username this cockpit will not use" ;;'
-                echo '    * )'
-                echo '      _pw="$(oc get secret workshop-user-creds -n "$WS_GITEA_NS" -o "jsonpath={.data.password}" 2>/dev/null | base64 -d 2>/dev/null || true)"'
-                echo '      if [ -z "$_pw" ]; then'
-                echo '        _why="no access token arrived, and the shared workshop password is not readable from this pod"'
-                echo '      else'
-                echo '        KUBECONFIG="$_kc" oc login --server="$WS_API" --insecure-skip-tls-verify=true -u "$_hu" -p "$_pw" >/dev/null 2>&1 || true'
-                echo '        unset _pw'
-                echo '        WS_USER="$(KUBECONFIG="$_kc" oc whoami 2>/dev/null || true)"'
-                echo '        [ -n "$WS_USER" ] || _why="could not sign in as ${_hu} with the shared workshop password"'
-                echo '      fi ;;'
-                echo '  esac'
-                echo 'fi'
-                echo '# --- neither path produced an identity. HOLD THE SOCKET OPEN. Closing it here is'
-                echo '# what made three unrelated faults look like one "reconnecting" loop for a whole'
-                echo '# evening: the client cannot render a reason it never received. `sleep` and not'
-                echo '# bash, because an unidentified session must not get a shell — the pod SA token is'
-                echo '# on this filesystem.'
-                echo 'if [ -z "$WS_USER" ]; then'
-                echo '  _got_u=no; [ -n "$_hu" ] && _got_u=yes'
-                echo '  _got_t=no; [ -n "$_tok" ] && _got_t=yes'
-                echo '  rm -f "$_kc"; unset _tok'
-                echo '  [ -n "$_why" ] || _why="the cockpit front door sent neither a username nor an access token"'
-                echo '  echo'
-                echo '  echo "  This terminal could not identify you, so it has not opened a shell."'
-                echo '  echo'
-                echo '  echo "  Reason:   ${_why}"'
-                echo '  echo "  Received: username=${_got_u}  token=${_got_t}"'
-                echo '  echo'
-                echo '  echo "  Reload the cockpit page in your browser to sign in again, then reopen this"'
-                echo '  echo "  terminal. This connection stays open so the message stays readable."'
-                echo '  echo'
-                echo '  exec sleep 3600'
-                echo 'fi'
-                echo '# $HOME is built from this string, so anything that is not a plain name is refused'
-                echo '# rather than turned into a path. htpasswd names are plain; an OIDC identity need'
-                echo '# not be, and "../.." must never become a home directory.'
-                echo 'case "$WS_USER" in'
-                echo '  *[!A-Za-z0-9._@-]* | .* | -* )'
-                echo '    rm -f "$_kc"; unset _tok'
-                echo '    echo "❌ the cluster returned a username this cockpit will not turn into a home directory."'
-                echo '    echo "   Ask your instructor — the shared cockpit expects plain workshop usernames."'
-                echo '    exec sleep 3600 ;;'
-                echo 'esac'
-                echo 'export HOME="/homes/${WS_USER}"'
-                echo 'mkdir -p "$HOME/.kube" "$HOME/.bashrc.d" || { echo "❌ cannot create ${HOME}"; rm -f "$_kc"; exec sleep 3600; }'
-                echo 'chmod 0700 "$HOME/.kube"'
-                echo '# Copy-then-rename INSIDE ~/.kube so the swap is an atomic same-filesystem rename:'
-                echo '# a second tab connecting at the same moment can never read a half-written config.'
-                echo 'cp -f "$_kc" "$HOME/.kube/.config.$$" && chmod 0600 "$HOME/.kube/.config.$$" \'
-                echo '  && mv -f "$HOME/.kube/.config.$$" "$HOME/.kube/config" \'
-                echo '  || { echo "❌ cannot write ${HOME}/.kube/config"; rm -f "$_kc" "$HOME/.kube/.config.$$"; exec sleep 3600; }'
-                echo 'rm -f "$_kc"'
-                echo '# Last reference to the token in this shell. It was never exported, so the bash we'
-                echo '# exec below would not have inherited it either way — this is belt and braces.'
-                echo 'unset _tok'
-                echo 'export KUBECONFIG="$HOME/.kube/config"'
-                echo 'export WS_USER'
-                echo 'cd "$HOME" || { echo "❌ cannot enter ${HOME}"; exec sleep 3600; }'
-                echo '# ws on PATH, from the clone the content build already made. The attendee'
-                echo '# cockpit clones the repo into each home; here one clone at /showroom/repo is'
-                echo '# mounted read-only and shared by every session, so N logins do not mean N'
-                echo '# clones. This is what makes an SA "just another workshop user" — the owner'
-                echo '# ruling is same identity, same tools, and every demo pre-flight is ws prep.'
-                echo '# Serverless kn (with kn func) first, when the kn-cli init container fetched it.'
-                echo 'export PATH="/opt/ogsr-bin:$PATH:/showroom/repo/tools/ws"'
-                echo 'oc project "${WS_USER}-dev" >/dev/null 2>&1 || true'
-                echo '# Printed HERE, not seeded into ~/.bashrc.d. The wrapper already runs exactly'
-                echo '# once per websocket, which is the once-per-session semantics the old'
-                echo '# OGSR_BANNER_SHOWN guard was imitating — and a fresh /homes/<user> has no'
-                echo '# ~/.bashrc, so nothing was sourcing that drop-in in the first place.'
-                echo 'echo'
-                echo 'echo "  You are signed in as ${WS_USER} — this shell is already logged in to the cluster."'
-                echo 'echo "  Try: oc whoami   ·   ws prep <module>"'
-                echo 'echo'
-                echo 'echo "  If a command comes back Unauthorized, your sign-in has expired: reload the"'
-                echo 'echo "  cockpit page in your browser, then reopen this terminal."'
-                echo 'echo'
-                echo 'echo "  Anything needing cluster-admin belongs in your OWN terminal, not this one."'
-                echo 'echo'
-                echo 'exec /usr/bin/bash'
-              } > /tmp/ws-session
-              chmod 0755 /tmp/ws-session
-              # -H populates TTYD_USER and takes exactly ONE header, so nginx composes both halves of
-              # the identity into one: X-Ws-Session = "u=<name>;t=<token>".
-              #
-              # IT IS DELIBERATELY A HEADER THAT IS NEVER EMPTY. ttyd's -H is an ENFORCEMENT point: an
-              # absent header means it denies the websocket, and a denied websocket is a closed socket,
-              # which the ttyd client can only render as "reconnecting" — forever, with no reason shown.
-              # That is how a missing token, an expired token and a wrapper fault presented as one
-              # identical symptom on 2026-08-16 and cost an evening. Enforcement now lives in the
-              # wrapper, which can hold the connection open and name the reason. Do not "tidy" this
-              # back into -H X-Forwarded-Access-Token: that reinstates the silent failure mode.
-              #
-              # -W keeps the terminal writable. No -c: authentication is the front door's job, and a
-              # second password here would only be theatre.
-              exec /usr/bin/ttyd -p 7681 -i 0.0.0.0 -W -H X-Ws-Session /tmp/ws-session
-          resources:
-            {{- toYaml $.Values.showroom.terminalResources | nindent 12 }}
-          volumeMounts:
-            - name: homes
-              mountPath: /homes
-            # Read-only, and the SAME clone the content build used — so `ws` on an attendee's PATH
-            # is always the revision their instructions were rendered from. A second clone could
-            # drift from the page the reader is looking at, which is the bug class this repo keeps
-            # paying for.
-            - name: showroom-files
-              mountPath: /showroom/repo
-              subPath: repo
-              readOnly: true
-            - name: ogsr-bin
-              mountPath: /opt/ogsr-bin
-              readOnly: true
       volumes:
         - name: showroom-files
-          emptyDir: {}
-        # Serverless kn fetched by the kn-cli init container (empty when Serverless is not installed).
-        - name: ogsr-bin
           emptyDir: {}
         - name: userdata
           configMap:
@@ -1361,8 +984,316 @@ spec:
             items:
               - key: cookieSecret
                 path: cookie-secret
-        - name: homes
-          persistentVolumeClaim:
-            claimName: {{ $name }}-homes
 {{- end }}{{/* range $instances */}}
+{{- /* ── PER-ATTENDEE TERMINALS (owner ruling 2026-11-12) ─────────────────────────────────────────
+     One namespace per attendee, ogsr-term-<user>, holding ONE ttyd pod that both cockpits route to
+     (see header mechanism 2). NOT <user>-dev: labs put NetworkPolicies and quotas there and
+     `ws reset` purges its workloads. The namespace carries NO workshop.redhat.com/user label for the
+     same reason — cohort-reset purges every namespace that has one. Attendees hold no rights here. */ -}}
+{{- $users := list }}
+{{- if .Values.showroom.pilotUser }}
+{{- $users = list .Values.showroom.pilotUser }}
+{{- else }}
+{{- range $i := until (int .Values.userCount) }}{{- $users = append $users (printf "%s%d" $.Values.userPrefix (add $i 1)) }}{{- end }}
+{{- end }}
+---
+# Lets each terminal's wrapper read the shared workshop password (non-secret by owner ruling) — the
+# same secret the Gitea/SonarQube/Etherpad seeds read, so there is one source of truth and no copy.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ogsr-terminal-session-creds
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames: ["workshop-user-creds"]
+---
+# Binds that read to every attendee's terminal ServiceAccount, and to nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ogsr-terminal-session-creds
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ogsr-terminal-session-creds
+subjects:
+{{- range $u := $users }}
+  - kind: ServiceAccount
+    name: terminal
+    namespace: {{ $termPrefix }}{{ $u }}
+{{- end }}
+{{- range $u := $users }}
+{{- $tns := printf "%s%s" $termPrefix $u }}
+---
+# The attendee's terminal namespace: its own SCC uid range is what isolates this attendee's shell.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $tns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    workshop.redhat.com/terminal-for: {{ $u | quote }}
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
+---
+# The terminal pod's identity; its only grant is the password read above.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: terminal
+  namespace: {{ $tns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+---
+# The session wrapper ttyd runs per websocket. A ConfigMap mount is read-only, so nothing in the
+# attendee's shell can change what their next terminal runs.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: terminal-session
+  namespace: {{ $tns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+data:
+  ws-session: |
+    #!/bin/bash
+    # ttyd runs this once per websocket: sign this pod's attendee in, then hand them a shell.
+    # No `set -e`: a wrapper that dies on a benign non-zero closes the terminal with no message.
+    set -uo pipefail
+    umask 077
+    WS_USER='{{ $u }}'
+    WS_API='{{ $apiUrl }}'
+    # The -H header arrives as TTYD_USER; nginx composes it as "u=<front-door user>;t=".
+    _hu="${TTYD_USER:-}"; unset TTYD_USER
+    _hu="${_hu%%;t=*}"; _hu="${_hu#u=}"
+    hold() {  # say why and keep the socket open so it stays readable; never hand out a shell
+      echo; echo "  $1"; echo
+      echo "  Reload the cockpit page to sign in again, then reopen this terminal."
+      exec sleep 3600
+    }
+    [ "$_hu" = "$WS_USER" ] || hold "This terminal belongs to ${WS_USER}, but the cockpit signed you in as ${_hu:-nobody}."
+    export HOME="/homes/${WS_USER}"
+    export KUBECONFIG="${HOME}/.kube/config"
+    export PATH="/opt/ogsr-bin:${PATH}:/showroom/repo/tools/ws"
+    export WS_USER
+    { mkdir -p "$HOME/.kube" && chmod 0700 "$HOME/.kube" && cd "$HOME"; } || hold "Cannot prepare ${HOME}."
+    # Reuse a live login. Otherwise sign in with the shared workshop password, read through this
+    # pod's ServiceAccount (KUBECONFIG=/dev/null = in-cluster credentials), into a temp file that is
+    # renamed into place, so two panes connecting at once never read a half-written config.
+    if [ "$(oc whoami 2>/dev/null)" != "$WS_USER" ]; then
+      _pw="$(KUBECONFIG=/dev/null oc get secret workshop-user-creds -n '{{ $.Values.giteaNamespace }}' -o 'jsonpath={.data.password}' 2>/dev/null | base64 -d 2>/dev/null)"
+      [ -n "$_pw" ] || hold "The workshop password is not readable from this terminal. Tell your instructor."
+      _kc="$HOME/.kube/.config.$$"
+      KUBECONFIG="$_kc" oc login --server="$WS_API" --insecure-skip-tls-verify=true -u "$WS_USER" -p "$_pw" >/dev/null 2>&1
+      unset _pw
+      if [ "$(KUBECONFIG="$_kc" oc whoami 2>/dev/null)" = "$WS_USER" ] && mv -f "$_kc" "$KUBECONFIG"; then
+        oc project "${WS_USER}-dev" >/dev/null 2>&1 || true
+      else
+        rm -f "$_kc"
+        hold "Could not sign in as ${WS_USER}. Tell your instructor."
+      fi
+    fi
+    echo
+    echo "  You are signed in as ${WS_USER} — this shell is already logged in to the cluster."
+    echo "  Try: oc whoami   ·   ws prep <module>"
+    echo
+    exec /usr/bin/bash
+---
+# THE critical control: only the cockpit pods may open a shell here. Without it any pod on the
+# cluster network could reach this ttyd and get this attendee's terminal.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ttyd-from-cockpit-only
+  namespace: {{ $tns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $ns }}
+          podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/instance
+                operator: In
+                values: ["showroom-shared", "showroom-shared-demos"]
+      ports:
+        - protocol: TCP
+          port: 7681
+---
+# What nginx in the cockpit proxies /tty-top/ and /tty-bottom/ to for this attendee.
+apiVersion: v1
+kind: Service
+metadata:
+  name: terminal
+  namespace: {{ $tns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ogsr-terminal
+  ports:
+    - name: ttyd
+      port: 7681
+      targetPort: 7681
+---
+# The attendee's home (kubeconfig, ~/.m2, clones). Survives a pod restart. Same wave as its
+# Deployment: a WaitForFirstConsumer claim cannot bind before its pod exists (sync-wave-pvc-guard).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: terminal-home
+  namespace: {{ $tns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: {{ $.Values.showroom.shared.terminalHomeStorage }}
+---
+# The attendee's ttyd. One pod serves both terminal panes: ttyd forks a shell per websocket.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: terminal
+  namespace: {{ $tns }}
+  labels:
+    app.kubernetes.io/name: ogsr-terminal
+    workshop.redhat.com/terminal-for: {{ $u | quote }}
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  replicas: 1
+  # The home is an RWO claim, so a second pod could never attach it mid-rollout.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ogsr-terminal
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ogsr-terminal
+        workshop.redhat.com/terminal-for: {{ $u | quote }}
+    spec:
+      serviceAccountName: terminal
+      initContainers:
+        {{- if include "workshop-config.moduleEnabled" (dict "root" $ "slug" "serverless-zero-to-hero") }}
+        # Red Hat's Serverless `kn` (with `kn func` v1.17+) from the cluster's own CLI download route,
+        # first on the terminal's PATH. The terminal image ships kn/func v1.15.2, whose remote-build
+        # request the Pipelines 1.24 webhook rejects (`impossible ParamValues.Type`). Best effort: no
+        # Serverless route, no download, and the image's own kn stays.
+        - name: kn-cli
+          image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              if curl -ksfL "https://kn-openshift-serverless.{{ $domain }}/kn-linux-amd64.tar.gz" | tar xz -C /opt/ogsr-bin kn; then
+                echo "✅ Serverless kn: $(/opt/ogsr-bin/kn version | sed -n 's/^Version: *//p') (kn func $(/opt/ogsr-bin/kn func version))"
+              else
+                echo "⚠ Serverless kn download unavailable — the terminal keeps the image's kn"
+              fi
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          volumeMounts:
+            - name: ogsr-bin
+              mountPath: /opt/ogsr-bin
+        {{- end }}
+        # The repo clone that puts `ws` on the attendee's PATH, from the in-cluster mirror.
+        - name: repo-clone
+          image: {{ $img.gitCloner | quote }}
+          env:
+            - name: GIT_REPO_URL
+              value: {{ $mirrorUrl | quote }}
+            - name: GIT_REPO_REF
+              value: {{ $.Values.showroom.contentRef | quote }}
+            - name: CLONE_DIR
+              value: /showroom/repo
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          volumeMounts:
+            - name: repo
+              mountPath: /showroom/repo
+      containers:
+        - name: terminal
+          image: {{ $img.terminal | quote }}
+          # -W keeps the terminal writable. No -c: authentication is the front door's job. -H makes
+          # ttyd hand the X-Ws-Session header to the wrapper, which checks it names this attendee.
+          # One shell line, not an argv list: ttyd-auth-header-guard's raw lane reads it from this text.
+          command: ["/bin/bash", "-c"]
+          args:
+            - exec /usr/bin/ttyd -p 7681 -i 0.0.0.0 -W -H X-Ws-Session /opt/ogsr-session/ws-session
+          ports:
+            - name: ttyd
+              containerPort: 7681
+          readinessProbe:
+            tcpSocket:
+              port: 7681
+            periodSeconds: 10
+          resources:
+            {{- toYaml $.Values.showroom.terminalResources | nindent 12 }}
+          volumeMounts:
+            - name: home
+              mountPath: /homes/{{ $u }}
+            - name: repo
+              mountPath: /showroom/repo
+              readOnly: true
+            - name: ogsr-bin
+              mountPath: /opt/ogsr-bin
+              readOnly: true
+            - name: session
+              mountPath: /opt/ogsr-session
+              readOnly: true
+      volumes:
+        - name: home
+          persistentVolumeClaim:
+            claimName: terminal-home
+        - name: repo
+          emptyDir: {}
+        # Serverless kn fetched by the kn-cli init container (empty when Serverless is not installed).
+        - name: ogsr-bin
+          emptyDir: {}
+        - name: session
+          configMap:
+            name: terminal-session
+            defaultMode: 365
+{{- end }}{{/* range $users */}}
 {{- end }}

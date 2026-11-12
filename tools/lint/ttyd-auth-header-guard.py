@@ -7,7 +7,7 @@ flag names it and nginx composes its value. In gitops/workshop-config/templates/
 the live pair is
 
     proxy_set_header X-Ws-Session "u=$http_x_forwarded_user;t=";        # nginx
-    exec /usr/bin/ttyd … -W -H X-Ws-Session /tmp/ws-session             # ttyd
+    exec /usr/bin/ttyd … -W -H X-Ws-Session /opt/ogsr-session/ws-session  # ttyd
 
 and the `t=` is deliberately EMPTY. ttyd/libwebsockets silently refuses a custom header whose VALUE
 exceeds ~29 characters. Bisected through that same nginx with subprotocol `tty`, one variable at a
@@ -1225,10 +1225,10 @@ def self_test(root: pathlib.Path) -> int:
 
 
 def scope_for_tree() -> Scope:
-    """Floors for a real-tree run. Measured 2026-08-16 on gitops/workshop-config with
-    showroom.shared.enabled=true: 1 chart, 1 render, 447 documents, 2 ttyd invocations (both with
-    -H), 2 nginx configs holding 28 proxy_set_header directives of which 4 name ttyd's header, and
-    1 raw manifest file carrying a ttyd -H out of 594 scanned."""
+    """Floors for a real-tree run. Re-measured 2026-11-12 after the per-attendee terminal pods: one
+    ttyd per attendee (5 at the chart's default userCount, all with -H), 2 nginx configs whose ONE
+    terminal location each names ttyd's header (2 values judged), and 1 raw manifest file carrying
+    a ttyd -H."""
     scope = Scope("ttyd-auth-header-guard")
     scope.require("charts rendered", 1,
                   "gitops/workshop-config is the only chart that ships a cockpit today. Zero means "
@@ -1238,8 +1238,8 @@ def scope_for_tree() -> Scope:
                   "the workshop-config render carries hundreds of documents; a handful means the "
                   "source-split collapsed and most of the chart was never walked.")
     scope.require("ttyd invocations", 2,
-                  "the shared cockpit renders twice — the workshop flavor and the SA-demo flavor — "
-                  "and each runs one ttyd.")
+                  "every attendee has a terminal pod running one ttyd, and the default render has "
+                  "five attendees; fewer than two means the per-user loop stopped rendering.")
     scope.require("auth-header invocations", 2,
                   "both of those pass -H. Zero is the shape where this gate judges nothing and "
                   "still prints clean, which is the whole reason the floor exists.")
@@ -1247,12 +1247,12 @@ def scope_for_tree() -> Scope:
     scope.require("proxy_set_header directives", 10,
                   "the two configs carry 22 between them. A single-figure count means the nginx "
                   "parser stopped descending into location blocks.")
-    scope.require("auth-header values judged", 3,
-                  "four proxy_set_header lines name ttyd's header — two tty locations in each of "
-                  "the two cockpits. This is the count that proves the CORRELATION ran: invocations "
-                  "and sites can both be found in full while nothing is matched up. The floor is 3 "
-                  "rather than 2 deliberately, because ONE cockpit on its own yields exactly 2 — if "
-                  "the SA-demo flavor is genuinely retired, lower this to 2 in the same change and "
+    scope.require("auth-header values judged", 2,
+                  "two proxy_set_header lines name ttyd's header — the one terminal location in each "
+                  "of the two cockpits (2026-11-12: /tty-top/ and /tty-bottom/ merged into one). This "
+                  "is the count that proves the CORRELATION ran: invocations and sites can both be "
+                  "found in full while nothing is matched up. ONE cockpit on its own yields 1 — if "
+                  "the SA-demo flavor is genuinely retired, lower this to 1 in the same change and "
                   "say so.")
     scope.require("raw manifest files scanned", 50,
                   "the coverage lane reads every YAML/TPL under the manifest roots. A tiny number "

@@ -115,9 +115,9 @@ restarted since an update serves the old copy. The symptom is `ws prep` being re
 [INSTALL.md](INSTALL.md#ws-prep-is-refused-own-appproject-only). Skip this if nothing has changed since the install.
 
 **Attendee logins need no morning refresh.** One cockpit serves the whole cohort behind an OpenShift
-login, and its terminal mints each attendee's kubeconfig from that sign-in — there is no pod-start
-token to go stale, so **installing the day before a workshop is fine**. If an attendee's first
-command returns:
+login; each attendee's terminal runs in their own pod and signs them in whenever it is opened — there
+is no pod-start token to go stale, so **installing the day before a workshop is fine**. If an
+attendee's first command returns:
 
 ```
 error: You must be logged in to the server (Unauthorized)
