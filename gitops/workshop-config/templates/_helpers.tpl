@@ -31,6 +31,16 @@ image-registry.openshift-image-registry.svc:5000/{{ .Values.showroom.namespace }
 {{- end -}}
 
 {{/*
+workshop-config.mirrorUrl — the in-cluster Gitea mirror URL exactly as tools/ws/ws repo_url renders it
+for an attendee (gitea-<giteaNamespace>.<clusterDomain>). The ONLY repo an attendee entry Application
+may name: the admission guard (attendee-entry-app-guard.yaml) and entries-{user} sourceRepos both pin
+to it. An empty clusterDomain renders a URL nothing matches, i.e. it fails closed.
+*/}}
+{{- define "workshop-config.mirrorUrl" -}}
+https://gitea-{{ .Values.giteaNamespace }}.{{ .Values.clusterDomain }}/{{ .Values.mirrorOrg }}/{{ .Values.mirrorRepo }}.git
+{{- end -}}
+
+{{/*
 workshop-config.entryDestinationsShared — the SHARED (not per-user) namespaces every entry-state
 Application must be allowed to write into, emitted as AppProject destination entries.
 

@@ -21,12 +21,20 @@
 # attendee to `entries-<their own username>` is the ONLY thing that makes those per-user destination
 # lists binding, because k8s RBAC cannot stop them naming a different project.
 #
-# What remains, deliberately: `entries-{user}` still permits the seven SHARED workshop namespaces
-# (ogsr-gitea, ogsr-student-gitops, ogsr-system, openshift-lightspeed, openshift-pipelines, sonarqube,
-# stackrox) because the entry charts genuinely write Roles/RoleBindings/SAs/Jobs there and Argo cannot
-# scope a destination by resource name. Those namespaces hold no attendee work; peer tenancy is what
-# mattered and it is now enforced. Blacklisting the kinds is not available either -- entry charts
-# legitimately render 37 RoleBindings, 34 Roles and 26 ServiceAccounts across 16 modules.
+# `entries-{user}` still permits the seven SHARED workshop namespaces (ogsr-gitea, ogsr-student-gitops,
+# ogsr-system, openshift-lightspeed, openshift-pipelines, sonarqube, stackrox) because the entry charts
+# genuinely write Roles/RoleBindings/SAs/Jobs there (re-derived 2026-11-12: every chart, solve=false
+# and true, still uses all seven) and Argo cannot scope a destination by resource name. That is only
+# safe while WHAT lands there is the workshop's own chart content -- and until 2026-11-12 it was not:
+# validations 1-4 never looked at spec.source.repoURL or any override, so an attendee could point the
+# cluster-admin controller at a repo THEY control (proven by server dry-run as user7: repoURL on the
+# attendee's Gitea, destination stackrox -> "created") and have it write RoleBindings/Jobs/Secrets into
+# all seven (ogsr-gitea = Gitea admin = every attendee's repos), or keep the real chart and steer it
+# with helm overrides (giteaNamespace, sourceRepo, a peer's `user`, ...). Validations 5-8 close that:
+# the Application must be byte-for-byte what `ws` renders -- this cluster's mirror at `main`, only the
+# four helm parameters ws sets at the values ws sets, no destination namespace, a plain sync, and no
+# attendee-written status. With the source pinned, the shared namespaces receive only reviewed chart
+# content, and the user-identifying parameter is the requester's own username.
 #
 # ==============================================================================================
 # LANDING SEQUENCE -- READ THIS BEFORE PUSHING. The switch is NOT atomic on a live cluster.
@@ -138,8 +146,9 @@ spec:
     - expression: "has(object.spec.project) && object.spec.project == 'entries-' + request.userInfo.username"
       message: "attendees may only use their own 'entries-<username>' AppProject"
       reason: Forbidden
-    # 2. Single-source only. A `spec.sources` (plural) app would slip past every source check below.
-    - expression: "!has(object.spec.sources) && has(object.spec.source)"
+    # 2. Single-source only. A `spec.sources` (plural) or `spec.sourceHydrator` app would slip past
+    #    every source check below.
+    - expression: "!has(object.spec.sources) && !has(object.spec.sourceHydrator) && has(object.spec.source)"
       message: "attendees may only create single-source Applications"
       reason: Forbidden
     # 3. The app must be named exactly as `ws` names it, and end in the requester's own username —
@@ -148,9 +157,79 @@ spec:
       message: "attendees may only create Applications named entry-<module-slug>-<their own username>"
       reason: Forbidden
     # 4. The source path must be an entry state, not an arbitrary directory of the repo (the
-    #    platform-portfolio paths, for instance, are cluster-scoped by nature).
-    - expression: "has(object.spec.source.path) && object.spec.source.path.startsWith('gitops/entry-states/')"
+    #    platform-portfolio paths, for instance, are cluster-scoped by nature). A slug, not a prefix:
+    #    `gitops/entry-states/../../platform-portfolio/...` passed startsWith and Argo resolves it
+    #    inside the repo.
+    - expression: "has(object.spec.source) && has(object.spec.source.path) && object.spec.source.path.matches('^gitops/entry-states/[a-z0-9-]+$')"
       message: "attendees may only source Applications from gitops/entry-states/"
+      reason: Forbidden
+    # Validations 5-8 pin the Application to exactly what tools/ws/ws render_app emits. LOCKSTEP with
+    # render_app (repo_url, SOURCE_REVISION, the helm parameter list) and sync_app_operation (the
+    # `operation` patch): a ws that renders anything else is Forbidden for attendees. Appended AFTER
+    # 1-4 on purpose — platform-guardrails' lab breaks 1 and 4 and quotes the first failing message.
+    #
+    # 5. The source is THIS cluster's in-cluster mirror (a read-only Gitea pull-mirror of the upstream
+    #    repo; attendees have no push right on it) at `main` — nothing an attendee can write. The
+    #    revision matters as much as the URL: a mirror may carry other refs, and the mirror URL is
+    #    rendered from chart values so every cluster pins its own (empty clusterDomain fails closed).
+    - expression: >-
+        has(object.spec.source) && has(object.spec.source.repoURL)
+        && object.spec.source.repoURL == '{{ include "workshop-config.mirrorUrl" . }}'
+        && has(object.spec.source.targetRevision) && object.spec.source.targetRevision == 'main'
+      message: "attendees may only source Applications from this workshop's Git mirror at revision main"
+      reason: Forbidden
+    # 6. No overrides of the pinned chart. Only spec.source.helm.parameters, only the four names ws
+    #    sends, each at the value ws sends — `user` exactly once and equal to the requester (a peer's
+    #    `user` would render THEIR seeding Jobs), clusterDomain/studentArgoNamespace equal to this
+    #    install's values (both reach hook Jobs that run in shared namespaces with workshop SAs),
+    #    solve true|false. values/valuesObject/valueFiles/fileParameters/kustomize/directory/plugin
+    #    and every other helm knob are denied outright.
+    - expression: >-
+        has(object.spec.source) && has(object.spec.source.helm)
+        && !has(object.spec.source.chart) && !has(object.spec.source.directory)
+        && !has(object.spec.source.kustomize) && !has(object.spec.source.plugin)
+        && !has(object.spec.source.ref) && !has(object.spec.source.name)
+        && !has(object.spec.source.tagPrefix)
+        && !has(object.spec.source.helm.values) && !has(object.spec.source.helm.valuesObject)
+        && !has(object.spec.source.helm.valueFiles) && !has(object.spec.source.helm.fileParameters)
+        && !has(object.spec.source.helm.releaseName) && !has(object.spec.source.helm.namespace)
+        && !has(object.spec.source.helm.version) && !has(object.spec.source.helm.kubeVersion)
+        && !has(object.spec.source.helm.apiVersions) && !has(object.spec.source.helm.passCredentials)
+        && !has(object.spec.source.helm.ignoreMissingValueFiles) && !has(object.spec.source.helm.skipCrds)
+        && !has(object.spec.source.helm.skipSchemaValidation) && !has(object.spec.source.helm.skipTests)
+        && has(object.spec.source.helm.parameters)
+        && object.spec.source.helm.parameters.exists_one(p, has(p.name) && p.name == 'user')
+        && object.spec.source.helm.parameters.all(p, has(p.name) && has(p.value) && (
+        (p.name == 'user' && p.value == request.userInfo.username)
+        || (p.name == 'clusterDomain' && p.value == '{{ .Values.clusterDomain }}')
+        || (p.name == 'solve' && p.value in ['true', 'false'])
+        || (p.name == 'studentArgoNamespace' && p.value == '{{ .Values.studentArgoNamespace }}')))
+      message: "attendees may only set the helm parameters ws sets (user = their own username, clusterDomain, solve, studentArgoNamespace) and no other overrides"
+      reason: Forbidden
+    # 7. In-cluster, no destination namespace (entry charts place every object explicitly; the
+    #    AppProject's "" destination exists for exactly this), and no managedNamespaceMetadata — that
+    #    would let an attendee label/annotate a Namespace the cluster-admin controller manages.
+    - expression: >-
+        has(object.spec.destination.server) && object.spec.destination.server == 'https://kubernetes.default.svc'
+        && !has(object.spec.destination.name)
+        && (!has(object.spec.destination.namespace) || object.spec.destination.namespace == '')
+        && (!has(object.spec.syncPolicy) || !has(object.spec.syncPolicy.managedNamespaceMetadata))
+      message: "attendees may only target the in-cluster server with no destination namespace or namespace metadata"
+      reason: Forbidden
+    # 8. A sync may only be the plain one ws patches in: no operation.sync.manifests (that is
+    #    `argocd app sync --local` — arbitrary manifests, no repo at all), no source/sources override,
+    #    revision `main` only. And status is the controller's: the CRD has no status subresource, so
+    #    without this an attendee could write status.operationState, which the controller RESUMES
+    #    from in preference to .operation. ws only ever patches, so status is never in its requests.
+    - expression: >-
+        (!has(object.operation) || !has(object.operation.sync) || (
+        !has(object.operation.sync.manifests) && !has(object.operation.sync.source)
+        && !has(object.operation.sync.sources) && !has(object.operation.sync.revisions)
+        && (!has(object.operation.sync.revision) || object.operation.sync.revision == 'main')))
+        && (request.operation == 'CREATE' ? !has(object.status)
+        : (has(object.status) ? (has(oldObject.status) && object.status == oldObject.status)
+        : !has(oldObject.status)))
+      message: "attendees may only start a plain sync of revision main and may not write Application status"
       reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
