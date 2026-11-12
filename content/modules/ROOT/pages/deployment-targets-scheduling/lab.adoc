@@ -39,6 +39,11 @@ include::partial$version-attributes.adoc[]
 // newest pod. Without them the G3 smoke (as user12) listed a Terminating pod in exercise 2, counted four
 // replicas for three in exercise 3's zone readout, and in exercise 5 deleted a pod that was already gone
 // (NotFound) — so the "Approved survives a restart" proof proved nothing. Keep them.
+// 2026-11-12 cross-module audit, re-proven as user9 in the attendee terminal pod: every exercise from 2 on
+// opens with a block that re-sets $NS (terminals restart more often since the per-attendee pods), exercise
+// 6's retry loop re-reads the refused pod instead of trusting $POD from the block before it, and the demo's
+// eviction steps pick the oldest pod that is not shutting down — an eviction of a Terminating pod skips the
+// budget check and returns 201, so step 4's "DENIED" eviction printed Success when it picked one.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -62,7 +67,8 @@ In this lab you take that control: spread the API across nodes so one failure ca
 Most steps are offered two ways: the *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`), the *CLI* tab uses `oc` in the *Terminal* tab beside these instructions.
 Pick a path once — the tabs stay in sync across the page.
 A few steps are *terminal-only* because the console adds nothing: the scheduler-event reads, the rollout measurements, and the eviction probes are quickest in the terminal.
-Keep the terminal open regardless — the `$NS` shortcut you just set lives there.
+Each exercise opens with a block that sets the `$NS` shortcut in the terminal.
+*If your terminal reconnects, run the exercise's first block again* (in exercise 1, the shortcut block above) — a fresh shell has no shortcuts.
 Node names in the output below (`worker-2`, `control-plane-1`, …) are illustrative; *your* cluster's nodes are named differently — read the *shape*, not the exact names.
 ====
 endif::demo[]
@@ -168,8 +174,9 @@ image::deployment-targets-scheduling/deployment-targets-scheduling-02-seek-vs-re
 
 Affinity and taints are often described as two ways of doing the same thing. They are opposites, and both are needed here: the selector chooses the node, the toleration gets the pod past the node's guard. The mirror-image mistake is a toleration with no selector — the pod is then allowed on the premium node and just as likely to land anywhere else.
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-dev
 oc patch deploy statement-batch -n $NS --type=merge -p '{"spec":{"template":{"spec":{"tolerations":[{"key":"workshop.redhat.com/pool","operator":"Equal","value":"batch","effect":"NoSchedule"}]}}}}'
 oc rollout status deploy/statement-batch -n $NS --timeout=60s
 oc get pods -n $NS -l app=statement-batch -o wide
@@ -177,7 +184,7 @@ oc get pods -n $NS -l app=statement-batch -o wide
 
 *What just happened*
 
-The batch worker is on its own nodes. A statement run no longer takes CPU from the live claims API, and nothing without explicit permission can drift onto the pool that was set aside for it.
+The batch worker is on its own nodes. A statement run no longer takes CPU from the live claims API, and nothing without explicit permission can drift onto the pool that was set aside for it. The listing may still show the old pod as `Terminating` on its previous node for up to 30 seconds; the `Running` pod on the batch node is the new one.
 
 === 3 · A redeploy under live traffic that keeps its data — 3 min
 
@@ -189,15 +196,19 @@ image::deployment-targets-scheduling/deployment-targets-scheduling-04-reseed-on-
 
 "The deploy dropped requests again" is usually blamed on shutdown, and here that would be the wrong place to look. Every new pod boots with Hibernate set to drop-and-create and reseeds the *shared* database, discarding rows the pods still serving wrote minutes earlier — with no error, because the reseed commits cleanly. `maxUnavailable: 0` guarantees capacity and cannot see this at all. Setting the schema strategy to `none` moves seeding to deploy time, where it belongs, and a higher CPU limit shortens the JVM cold start each new pod makes the rollout wait for.
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+NS={user}-dev
 oc set env deployment/parasol-claims QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY=none -n $NS
 oc patch deploy parasol-claims -n $NS --type=strategic -p '{"spec":{"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":1,"maxUnavailable":0}},"template":{"spec":{"containers":[{"name":"parasol-claims","resources":{"requests":{"cpu":"200m","memory":"256Mi"},"limits":{"cpu":"1","memory":"512Mi"}}}]}}}}'
 oc rollout status deploy/parasol-claims -n $NS --timeout=180s
+for i in $(seq 1 45); do [ "$(oc get pods -n $NS -l app=parasol-claims -o name | wc -l)" -eq 2 ] && break; sleep 2; done
 # plant a claim state the seed doesn't carry, then redeploy under live traffic
-oc exec deploy/claims-load -n $NS -- curl -s -X PUT http://parasol-claims:8080/api/claims/CLM-1001/status -H 'Content-Type: application/json' -d '{"status":"Approved"}' -o /dev/null
+oc exec deploy/claims-load -n $NS -- curl -s -X PUT http://parasol-claims:8080/api/claims/CLM-1001/status -H 'Content-Type: application/json' -d '{"status":"Approved"}' -o /dev/null -w 'planted: HTTP %\{http_code}\n'
 oc rollout restart deploy/parasol-claims -n $NS
 for i in $(seq 1 10); do oc get deploy parasol-claims -n $NS -o jsonpath='available={.status.availableReplicas}/{.spec.replicas}{"\n"}'; sleep 4; done
+oc rollout status deploy/parasol-claims -n $NS --timeout=180s
+for i in $(seq 1 45); do [ "$(oc get pods -n $NS -l app=parasol-claims -o name | wc -l)" -eq 2 ] && break; sleep 2; done
 oc exec deploy/claims-load -n $NS -- curl -s http://parasol-claims:8080/api/claims/CLM-1001 | grep -o '"status":"[^"]*"'
 ----
 
@@ -215,23 +226,26 @@ image::deployment-targets-scheduling/deployment-targets-scheduling-04-pdb-allowe
 
 Hardware failures cannot be budgeted. Voluntary disruptions can, and they are most of what actually takes a service down during a maintenance window. The budget does not stop the drain; it makes it wait its turn and take pods one at a time. The one trap is setting `minAvailable` equal to the replica count, which leaves no eviction room at all and deadlocks the drain forever.
 
-[source,sh,role=execute]
+// attributes+ APPENDS: plain subs="attributes" drops HTML escaping, and the browser swallowed <none> as a tag.
+[source,sh,role=execute,subs="attributes+"]
 ----
+NS={user}-dev
 oc apply -n $NS -f - <<'EOF'
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata: {name: parasol-claims}
 spec: {minAvailable: 1, selector: {matchLabels: {app: parasol-claims}}}
 EOF
+oc wait pdb/parasol-claims -n $NS --for=jsonpath='{.status.disruptionsAllowed}'=1 --timeout=60s
 oc get pdb parasol-claims -n $NS
-# budget has headroom — this eviction is ALLOWED
-POD=$(oc get pods -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
-echo '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"'"$POD"'"}}' | oc create --raw /api/v1/namespaces/$NS/pods/$POD/eviction -f -
+# budget has headroom — this eviction is ALLOWED (oldest pod not already shutting down)
+POD=$(oc get pods -n $NS -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp --no-headers | awk '$2=="<none>" {print $1; exit}')
+echo '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"'"$POD"'"}}' | oc create --raw /api/v1/namespaces/$NS/pods/$POD/eviction -f - && echo
 sleep 8
 # now exhaust the budget — the next eviction is DENIED
 oc patch pdb parasol-claims -n $NS --type=merge -p '{"spec":{"minAvailable":3}}'
 sleep 3
-POD=$(oc get pods -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+POD=$(oc get pods -n $NS -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp --no-headers | awk '$2=="<none>" {print $1; exit}')
 echo '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"'"$POD"'"}}' | oc create --raw /api/v1/namespaces/$NS/pods/$POD/eviction -f - || true
 oc patch pdb parasol-claims -n $NS --type=merge -p '{"spec":{"minAvailable":1}}'
 ----
@@ -385,6 +399,14 @@ Exercise 4 checks this again and walks you through exactly what it means for the
 == 2. Direct the API with pod anti-affinity
 ⏱ *~8 min* · force the replicas apart, read a scheduler refusal, watch a reschedule
 
+Set this exercise's shortcut first (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+echo "app namespace: $NS"
+----
+
 Your two `parasol-claims` replicas *happen* to be on different nodes — but that's the scheduler's *soft preference*, not a guarantee.
 On a busy cluster both could land on one node, and one node failure would take the whole API down.
 Turn "prefers apart" into *required* apart with `podAntiAffinity` on `kubernetes.io/hostname` (no two claims pods on the same node):
@@ -533,6 +555,14 @@ for i in $(seq 1 45); do [ "$(oc get pods -n $NS -l app=parasol-claims -o name |
 == 3. Spread evenly with topology spread constraints
 ⏱ *~5 min* · even distribution across a domain — nodes, and (the knob) zones
 
+Set this exercise's shortcut first (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+echo "app namespace: $NS"
+----
+
 Anti-affinity says "never two on a node." `topologySpreadConstraints` says the stronger thing — "keep them *evenly* spread across a domain."
 Add one on `kubernetes.io/hostname`, `maxSkew: 1`, `ScheduleAnyway` (a strong preference that never blocks a deploy):
 
@@ -629,6 +659,14 @@ oc patch deploy parasol-claims -n $NS --type=merge -p '{"spec":{"template":{"spe
 
 == 4. Reserve a dedicated pool for the batch worker
 ⏱ *~7 min* · the break-and-fix: a selector attracts, but a toleration is what permits
+
+Set this exercise's shortcut first (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+echo "app namespace: $NS"
+----
 
 The `statement-batch` worker churns monthly statements and shouldn't compete with the live API for CPU.
 You have a *dedicated pool* — the batch-pool node from exercise 1 — and now you'll pin the batch worker onto it.
@@ -780,6 +818,14 @@ A toleration without a selector would *allow* the batch node but not *choose* it
 
 == 5. Make the rollout zero-downtime
 ⏱ *~15 min* · measure the drops, diagnose the real cause, fix it at the source, and protect with a PDB
+
+Set this exercise's shortcut first (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+echo "app namespace: $NS"
+----
 
 A rollout replaces every API pod. Done carelessly it drops requests; done right a customer never notices.
 First, *measure* a default roll. This one-shot block drives a fast probe at the API from the load generator while a rollout runs, and tallies any request that isn't a clean `2xx`:
@@ -1098,6 +1144,7 @@ Always confirm the roll actually landed before you believe the number.
 [source,sh,role=execute]
 ----
 oc rollout status deploy/parasol-claims -n $NS --timeout=180s
+for i in $(seq 1 45); do [ "$(oc get pods -n $NS -l app=parasol-claims -o name | wc -l)" -eq 3 ] && break; sleep 2; done
 ----
 
 .Expected output
@@ -1240,6 +1287,14 @@ That is the budget a node drain spends. In exercise 6 you spend it yourself, thr
 == 6. Read how the platform shapes the cluster, then drain through your budget
 ⏱ *~7 min* · read the node agents and the batch pool; evict your own pods the way a drain does
 
+Set this exercise's shortcut first (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+echo "app namespace: $NS"
+----
+
 The pools and node agents you've been working around are *built* with the same primitives you just used.
 Read them live (the `platform-observer` role grants you cluster-wide *read*).
 First, the *DaemonSets* — the "one pod per node" agents that are the cluster's own plumbing.
@@ -1356,11 +1411,14 @@ parasol-claims   1               N/A               0                     85s
 
 Two evictions accepted (`201`), the third refused with HTTP `429 TooManyRequests`.
 With two pods already leaving, one is left — exactly `minAvailable: 1` — so the budget has nothing more to give.
-A drain doesn't give up here; it retries. Do the same for the refused pod (`$POD` still holds its name):
+A drain doesn't give up here; it retries. Do the same for the refused pod. The first line reads its name back — the oldest claims pod that is not already shutting down — so this block also works in a fresh shell:
 
 [source,sh,role=execute]
 ----
+POD=$(oc get pods -n $NS -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp --no-headers | awk '$2=="<none>" {print $1; exit}')
+echo "refused pod: ${POD:-NONE — run the first block of this exercise, then the eviction loop above}"
 for i in $(seq 1 12); do
+  [ -n "$POD" ] || break
   OUT=$(echo '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"'"$POD"'"}}' | oc create --raw /api/v1/namespaces/$NS/pods/$POD/eviction -f - 2>&1) && { echo "$(date +%T) evicted $POD"; break; }
   echo "$(date +%T) $OUT (retry in 5s)"
   sleep 5
@@ -1371,6 +1429,7 @@ oc get pods -n $NS -l app=parasol-claims -o wide
 .Expected output (one or more refusals, then accepted once the replacements are `Ready` — 10 to 16 s in our runs)
 [source,texinfo]
 ----
+refused pod: parasol-claims-6745f45b89-n7ljb
 02:21:48 Error from server (TooManyRequests): Cannot evict pod as it would violate the pod's disruption budget. (retry in 5s)
 02:21:54 Error from server (TooManyRequests): Cannot evict pod as it would violate the pod's disruption budget. (retry in 5s)
 02:21:59 evicted parasol-claims-6745f45b89-n7ljb
