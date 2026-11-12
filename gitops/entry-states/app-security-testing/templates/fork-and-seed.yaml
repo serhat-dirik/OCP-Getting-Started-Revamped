@@ -354,14 +354,21 @@ spec:
                 # Insert a dependency:copy step right AFTER the build stage's `mvn ... package` line, so the
                 # jar lands in the runtime lib dir the next COPY pulls into the image. Trivy (source) can't
                 # see it; RHACS (image) can — that's the defense-in-depth beat.
-                CF_NEW="$(printf '%s' "$CF" | awk '
+                # Anchor on the line that ENDS the package step (`... package`, no continuation), not on
+                # `RUN mvn`: since the Maven-mirror Containerfile (7b1d3d6) that RUN opens with `if` and
+                # `mvn ... package` sits on its last continued line, so a `RUN mvn` anchor matched
+                # nothing and every fork shipped with NO image flaw — the image-scan gate passed on the
+                # first run (found 2026-11-12, user6). The copy reuses the build's settings.xml (the
+                # in-cluster mirror) when the Containerfile writes one.
+                MVN_S=""; printf '%s' "$CF" | grep -q '/tmp/settings.xml' && MVN_S=" -s /tmp/settings.xml"
+                CF_NEW="$(printf '%s' "$CF" | awk -v mvns="$MVN_S" '
                   { print }
-                  /RUN[ ]+mvn[ ].*package/ && !done {
+                  /mvn[ ].*package[ \t]*$/ && !done {
                     print "";
                     print "# Intentional flaw - do not fix on this branch (app-security-testing image-scan seed): bake a vulnerable";
                     print "# log4j-core 2.14.1 (CVE-2021-44228 Log4Shell) straight into the runtime lib dir. A SOURCE";
                     print "# dependency scan (Trivy on pom.xml) cannot see it - only the RHACS IMAGE scan catches it.";
-                    print "RUN mvn -B -ntp org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy \\";
+                    print "RUN mvn -B -ntp" mvns " org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy \\";
                     print "    -Dartifact=org.apache.logging.log4j:log4j-core:2.14.1 \\";
                     print "    -DoutputDirectory=/build/target/quarkus-app/lib/main";
                     done=1
