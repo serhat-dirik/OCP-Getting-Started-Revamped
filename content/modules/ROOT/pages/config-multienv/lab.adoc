@@ -13,6 +13,14 @@ include::partial$version-attributes.adoc[]
 // someone else's user for 7 of 8 attendees. Those two blocks (the stage-overlay preview and the
 // three-environment comparison in exercise 6) carry subs="attributes" and {user}; both are safe to
 // substitute because neither body contains a `{` brace for Asciidoctor to misread as an attribute.
+//
+// Re-proven 2026-11-12 on cluster-5vqxc (OCP 4.22.22) from a cold `adm reset`, as user7 in the
+// attendee's own terminal pod; `ws verify` 23/23. That pass added the wait lines: every rollout block
+// ends with a bounded `for … wc -l … -eq 1` loop (rollout status returns while the replaced pod is
+// still Terminating and still listed), and every block that sends a request after a rollout adds
+// `sleep 10` plus `curl -f --retry` (the router refreshes its backend list only every few seconds; the
+// G3 smoke printed the router's 503 page at the ex2 checkpoint right after "successfully rolled out").
+// Keep them.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -291,11 +299,14 @@ CLI::
 oc set probe deploy/parasol-claims --readiness \
   --get-url=http://:8080/q/health/ready --period-seconds=10 --failure-threshold=3
 oc rollout status deploy/parasol-claims
+for i in $(seq 1 45); do [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ] && break; sleep 2; done
 ----
 --
 ====
 
 The app is still healthy — one pod, `1/1` ready.
+(The `for` line waits for the pod the rollout replaced to finish shutting down: `rollout status` returns as soon as the new pod is ready, while the old one is still `Terminating` and still listed.
+Every rollout on this page ends with that line, so the next listing shows only the pods you mean.)
 Now break it: point the datasource at a database host that does not exist.
 
 // Verified live OCP 4.22.5, 2026-07-28 as user1: the Environment tab carries a "Single values (env)"
@@ -406,13 +417,22 @@ oc logs "$BAD" --previous 2>/dev/null | grep -A2 -iE 'Failed to start|UnknownHos
   || { echo "(previous container log already rotated away by cri-o — reading the current one, which is still crash-looping on the same cause)"; oc logs "$BAD" | grep -A2 -iE 'Failed to start|UnknownHost'; }
 ----
 
-.Expected output
+// Captured 2026-11-12 as user7 (see header). Three matches, each with its two following stack lines;
+// `--` separates them. The first UnknownHostException is from Hibernate's earlier metadata probe.
+.Expected output (sample — if cri-o has already rotated the previous log away, a one-line note prints first and the current log is read instead; the matches are the same)
 [source,texinfo]
 ----
-ERROR [io.quarkus.runtime.Application] (main) Failed to start application: java.lang.RuntimeException: Failed to start quarkus
-Caused by: org.hibernate.exception.JDBCConnectionException: Unable to open JDBC Connection for DDL execution [The connection attempt failed.]
-Caused by: org.postgresql.util.PSQLException: The connection attempt failed.
 Caused by: java.net.UnknownHostException: wrong-db-host
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:567)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+--
+2026-11-12 17:22:19,798 ERROR [io.quarkus.runtime.Application] (main) Failed to start application: java.lang.RuntimeException: Failed to start quarkus
+	at io.quarkus.runner.ApplicationImpl.doStart(Unknown Source)
+	at io.quarkus.runtime.Application.start(Application.java:112)
+--
+Caused by: java.net.UnknownHostException: wrong-db-host
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:567)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
 ----
 
 The root cause is right there at the bottom: `UnknownHostException: wrong-db-host`.
@@ -526,7 +546,7 @@ Confirm the non-secret config now comes from the ConfigMap (only the credentials
 oc set env deploy/parasol-claims --list
 ----
 
-.Expected output
+.Expected output (the order of the lines can vary)
 [%collapsible]
 =====
 [source,texinfo]
@@ -549,11 +569,18 @@ The app is now configured from an object you can review, version, and change *wi
 ****
 ✔ *Verify:* `oc set env deploy/parasol-claims --list` shows `APP_ENV`, `POSTGRESQL_HOST/PORT/DATABASE`, and `QUARKUS_LOG_LEVEL` coming *from configmap claims-config*, and the app serves claims again:
 
-[source,sh,role=execute,subs="attributes"]
+[source,sh,role=execute]
 ----
 oc rollout status deploy/parasol-claims
-curl -s "http://$(oc get route parasol-claims -o jsonpath='{.spec.host}')/api/claims" | head -c 80; echo
+for i in $(seq 1 45); do [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ] && break; sleep 2; done
+sleep 10
+curl -sf --retry 30 --retry-all-errors --retry-delay 2 \
+  "http://$(oc get route parasol-claims -o jsonpath='{.spec.host}')/api/claims" | head -c 80; echo
 ----
+
+The output starts with `[{"claimNumber":"CLM-1001"`.
+The `sleep 10` is for the router, not the app: it refreshes its list of backend pods only every few seconds, so a request sent the moment the old pod is gone can still be routed to that pod's address and come back as a `503` error page.
+`curl -f` with `--retry` waits out any such moment instead of printing the error page.
 ****
 
 == 3. Move credentials into a Secret — and mount config as a file
@@ -598,7 +625,7 @@ Now every setting is sourced from an object, and *nothing* sensitive is inline:
 oc set env deploy/parasol-claims --list
 ----
 
-.Expected output
+.Expected output (the order of the lines can vary)
 [%collapsible]
 =====
 [source,texinfo]
@@ -663,23 +690,27 @@ oc set volume deploy/parasol-claims --add --name=file-config --type=configmap \
 # point Quarkus at the mounted file (the documented quarkus.config.locations pattern)
 oc set env deploy/parasol-claims QUARKUS_CONFIG_LOCATIONS=/mnt/claims-config/application.properties
 oc rollout status deploy/parasol-claims
+for i in $(seq 1 45); do [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ] && break; sleep 2; done
+sleep 10
 ----
 
 The property you put in that file — `quarkus.http.access-log.enabled=true` — turns on HTTP access logging, which nothing else sets.
 So if you now see access-log lines, the mounted file was read.
 Make a couple of requests and look:
 
-[source,sh,role=execute,subs="attributes"]
+[source,sh,role=execute]
 ----
 CLAIMS=$(oc get route parasol-claims -o jsonpath='{.spec.host}')
-curl -s -o /dev/null "http://$CLAIMS/api/claims"; curl -s -o /dev/null "http://$CLAIMS/api/claims"
+for i in 1 2; do curl -sf --retry 30 --retry-all-errors --retry-delay 2 -o /dev/null "http://$CLAIMS/api/claims"; done
 oc logs -l app=parasol-claims --tail=20 | grep access-log
 ----
 
-.Expected output
+.Expected output (sample — the readiness probe's own `GET /q/health/ready` checks are logged too)
 [source,texinfo]
 ----
-... INFO  [io.quarkus.http.access-log] (executor-thread-1) 10.233.2.2 - - [09/Jul/2026:09:38:39 +0000] "GET /api/claims HTTP/1.1" 200 4798
+2026-11-12 17:25:16,492 INFO  [io.quarkus.http.access-log] (vert.x-eventloop-thread-0) 10.233.0.2 - - [12/Nov/2026:17:25:16 +0000] "GET /q/health/ready HTTP/1.1" 200 220
+2026-11-12 17:25:17,990 INFO  [io.quarkus.http.access-log] (executor-thread-1) 10.232.2.2 - - [12/Nov/2026:17:25:17 +0000] "GET /api/claims HTTP/1.1" 200 4798
+2026-11-12 17:25:18,026 INFO  [io.quarkus.http.access-log] (executor-thread-1) 10.232.2.2 - - [12/Nov/2026:17:25:18 +0000] "GET /api/claims HTTP/1.1" 200 4798
 ----
 
 That proves the mounted file was loaded.
@@ -690,6 +721,7 @@ For this app a few environment variables are simpler, so revert the mount and ke
 oc set env deploy/parasol-claims QUARKUS_CONFIG_LOCATIONS-
 oc set volume deploy/parasol-claims --remove --name=file-config
 oc rollout status deploy/parasol-claims
+for i in $(seq 1 45); do [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ] && break; sleep 2; done
 ----
 
 (Leave the `claims-file-config` ConfigMap itself in place — unreferenced, it does no harm, and `ws reset` cleans it up.)
@@ -736,6 +768,7 @@ oc set probe deploy/parasol-claims --startup   --get-url=http://:8080/q/health/s
 oc set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/ready   --period-seconds=10 --failure-threshold=3   # already set in exercise 1; re-applying is a no-op
 oc set probe deploy/parasol-claims --liveness  --get-url=http://:8080/q/health/live    --period-seconds=10 --failure-threshold=3
 oc rollout status deploy/parasol-claims
+for i in $(seq 1 45); do [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ] && break; sleep 2; done
 ----
 --
 ====
@@ -788,7 +821,7 @@ NAME             ENDPOINTS   AGE
 parasol-claims               ...
 ----
 
-(The deprecation warning is expected — the classic Endpoints view is still the quickest way to see the readiness gate; EndpointSlice is its long-form successor.)
+(The deprecation warning is expected, and can print below the table instead of above it — the classic Endpoints view is still the quickest way to see the readiness gate; EndpointSlice is its long-form successor.)
 With no ready pods, the Service has *no endpoints*, and the Route has nowhere to send traffic:
 
 [source,sh,role=execute]
@@ -817,7 +850,10 @@ Now fix readiness and watch the pod return to rotation:
 ----
 oc set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/ready
 oc rollout status deploy/parasol-claims
-curl -s -o /dev/null -w "Route: %{http_code}\n" "http://$(oc get route parasol-claims -o jsonpath='{.spec.host}')/api/claims"
+for i in $(seq 1 45); do [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ] && break; sleep 2; done
+sleep 10
+curl -sf --retry 30 --retry-all-errors --retry-delay 2 -o /dev/null -w "Route: %{http_code}\n" \
+  "http://$(oc get route parasol-claims -o jsonpath='{.spec.host}')/api/claims"
 ----
 
 .Expected output
@@ -870,6 +906,7 @@ oc set resources deploy/parasol-claims \
   --requests=cpu=100m,memory=256Mi \
   --limits=cpu=500m,memory=512Mi
 oc rollout status deploy/parasol-claims
+for i in $(seq 1 45); do [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ] && break; sleep 2; done
 ----
 
 .Expected output
@@ -877,6 +914,8 @@ oc rollout status deploy/parasol-claims
 ----
 default(limit)={"cpu":"1500m","memory":"1Gi"}
 defaultRequest={"cpu":"100m","memory":"256Mi"}
+deployment.apps/parasol-claims resource requirements updated
+Waiting for deployment "parasol-claims" rollout to finish: 1 old replicas are pending termination...
 deployment "parasol-claims" successfully rolled out
 ----
 --
@@ -893,9 +932,9 @@ oc describe resourcequota workshop-quota | grep -E 'requests.cpu|requests.memory
 .Expected output
 [source,texinfo]
 ----
-pods               2       30
-requests.cpu       200m    3
-requests.memory    512Mi   6Gi
+pods                    2       30
+requests.cpu            200m    3
+requests.memory         512Mi   6Gi
 ----
 
 If your numbers are momentarily higher than that, wait a few seconds and run it again — quota
@@ -1053,9 +1092,9 @@ done
 .Expected output (the `digest=` value is from a captured run — yours will be a different image digest, but it must be the *same* one on all three lines)
 [source,texinfo,subs="attributes"]
 ----
-{user}-dev        replicas=1  APP_ENV=dev    digest=sha256:0995ab38
-{user}-stage      replicas=2  APP_ENV=stage  digest=sha256:0995ab38
-{user}-prod       replicas=3  APP_ENV=prod   digest=sha256:0995ab38
+{user}-dev        replicas=1  APP_ENV=dev    digest=sha256:49d01c705
+{user}-stage      replicas=2  APP_ENV=stage  digest=sha256:49d01c705
+{user}-prod       replicas=3  APP_ENV=prod   digest=sha256:49d01c705
 ----
 
 // media-pass: screenshot config-multienv-05-three-envs.png — Three Topology tiles side by side —
@@ -1118,8 +1157,7 @@ Expect stage's count to be *comfortably greater than zero* (its `INFO` threshold
 [.checkpoint]
 ****
 ✔ *Verify:* run `ws verify {module-id}` in the Showroom terminal.
-It confirms the dev app is externalized (ConfigMap + Secret + all three probes + explicit resources) and that stage (2 replicas, `APP_ENV=stage`) and prod (3 replicas, `APP_ENV=prod`) run the promoted app.
-All three environments answer on their own Route with the same 30 seeded claims.
+It confirms the dev app is externalized (ConfigMap + Secret + all three probes + explicit resources), that stage (2 replicas, `APP_ENV=stage`) and prod (3 replicas, `APP_ENV=prod`) run the promoted app, and that all three environments answer on their own Route.
 ****
 
 == 7. [OPTIONAL] Real secret management with External Secrets

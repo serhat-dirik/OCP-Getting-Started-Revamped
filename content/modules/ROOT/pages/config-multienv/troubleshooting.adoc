@@ -56,17 +56,22 @@ oc set env deploy/parasol-claims --from=secret/claims-creds
 Only remove a variable with `NAME-` when you intend the app to stop having it.
 To *change* a value, edit the ConfigMap/Secret instead.
 
-== The Route returns `503` right after a config change
+== The Route returns `503`, or a cut-off HTML page, right after a config change
 
-Symptom:: `curl` to the claims Route returns `503` for a few seconds after an `oc set env`/`oc set probe`/`oc set resources` command.
+Symptom:: `curl` to the claims Route returns `503` — or, piped through `head -c 80`, prints the start of an HTML page (`<html> <head> <meta name="viewport" …`) — for a few seconds after an `oc set env`/`oc set probe`/`oc set resources` command, even after `oc rollout status` printed `successfully rolled out`.
 Cause:: Each of those commands triggers a rolling update.
-While the new pod is booting (and, once you add a startup probe, until it passes), there may be a brief window with no Ready pod — the Route has nowhere to send traffic.
-Fix:: Wait for the rollout to finish, then retry:
+`rollout status` returns as soon as the new pod is Ready, while the old one is still shutting down, and the OpenShift router refreshes its list of backend pods only every few seconds.
+A request sent in that window can still be routed to the old pod's address, hang, and come back as the router's `503` "Application is not available" page.
+Measured at the exercise-2 checkpoint by the 2026-11-12 smoke.
+Fix:: Wait until only the new pod is left, give the router ten seconds, and let `curl` retry instead of printing the error page — the lab's own blocks do exactly this:
 +
 [source,sh,role=execute]
 ----
 oc rollout status deploy/parasol-claims
-curl -s -o /dev/null -w '%{http_code}\n' "http://$(oc get route parasol-claims -o jsonpath='{.spec.host}')/api/claims"
+for i in $(seq 1 45); do [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ] && break; sleep 2; done
+sleep 10
+curl -sf --retry 30 --retry-all-errors --retry-delay 2 -o /dev/null -w '%{http_code}\n' \
+  "http://$(oc get route parasol-claims -o jsonpath='{.spec.host}')/api/claims"
 ----
 +
 A persistent `503` (not transient) means the pod never becomes Ready — check `oc get pods` and the readiness probe path.
@@ -160,7 +165,7 @@ curl -sI {gitea_url}/{user}/claims-config | head -1
 ----
 +
 A `200`/`301` means the repo is there — retry the clone.
-If it is missing, the fork job has not run; ask your instructor to `ws reset {module-id} --user {user}`.
+If it is missing, the fork job has not run; ask your instructor to run `adm reset {module-id} --user {user}`.
 
 == The three-environment digest comparison shows a mismatch, not three identical values
 
@@ -187,4 +192,4 @@ Fix:: This is fixed in the current lab page — it now reads a single named pod 
 
 '''
 
-_Last verified on the build cluster (2026-07-09; exercise-1 readiness-gate rework re-verified 2026-07-15; exercise-1 `--previous` retry and exercise-6 log-count measurement fix added 2026-07-31 from the config-multienv cold-start smoke — the corrected exercise-6 command was re-measured live on 2026-07-31 across four runs and its verification marker cleared; the checkpoint stays qualitative on purpose, because the exact counts drift with the Quarkus version)._
+_Last verified on the build cluster (2026-07-09; re-proven 2026-11-12 as user7 on OCP 4.22.22 with the rollout wait lines; exercise-1 readiness-gate rework re-verified 2026-07-15; exercise-1 `--previous` retry and exercise-6 log-count measurement fix added 2026-07-31 from the config-multienv cold-start smoke — the corrected exercise-6 command was re-measured live on 2026-07-31 across four runs and its verification marker cleared; the checkpoint stays qualitative on purpose, because the exact counts drift with the Quarkus version)._

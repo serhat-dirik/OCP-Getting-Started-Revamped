@@ -8,6 +8,7 @@
 #          app is promoted to stage (>=2 replicas, APP_ENV=stage) and prod (>=3 replicas,
 #          APP_ENV=prod — the overlay's canonical counts; the optional Challenge has the attendee
 #          scale prod to 4, so this is >=, not ==, or a correctly-completed lab false-fails).
+#          Each of dev, stage and prod answers 200 on its own Route (the lab's ex6 checkpoint says so).
 #          End checks are mechanism-agnostic: they pass for BOTH the attendee's
 #          `oc set env --from` wiring (per-key valueFrom) AND `ws solve`'s envFrom wiring.
 # Runnable with only oc + curl (Showroom terminal reality). See tools/verify/README.md.
@@ -119,12 +120,12 @@ cm_app_env() {
 }
 
 # --- entry state (what `ws start config-multienv` materializes) --------------------------
-check "namespace ${DEV} exists"                        oc get ns "$DEV"                            || hint "run: ws prep config-multienv (or ws start config-multienv --user ${USER_NAME})"
+check "namespace ${DEV} exists"                        oc get ns "$DEV"                            || hint "run: ws prep config-multienv (instructor: adm start config-multienv --user ${USER_NAME})"
 check "namespace ${STAGE} exists"                      oc get ns "$STAGE"                          || hint "workshop layer not applied — run bootstrap/install.sh"
 check "namespace ${PROD} exists"                       oc get ns "$PROD"                           || hint "workshop layer not applied — run bootstrap/install.sh"
-check "entry marker ws-entry-config-multienv in ${DEV}"            oc get cm ws-entry-config-multienv -n "$DEV"            || hint "entry app not synced — ws prep config-multienv (or ws start config-multienv --user ${USER_NAME})"
-check "entry marker ws-entry-config-multienv in ${STAGE}"          oc get cm ws-entry-config-multienv -n "$STAGE"          || hint "entry app not synced — ws prep config-multienv (or ws start config-multienv --user ${USER_NAME})"
-check "entry marker ws-entry-config-multienv in ${PROD}"           oc get cm ws-entry-config-multienv -n "$PROD"           || hint "entry app not synced — ws prep config-multienv (or ws start config-multienv --user ${USER_NAME})"
+check "entry marker ws-entry-config-multienv in ${DEV}"            oc get cm ws-entry-config-multienv -n "$DEV"            || hint "entry app not synced — ws prep config-multienv (instructor: adm start config-multienv --user ${USER_NAME})"
+check "entry marker ws-entry-config-multienv in ${STAGE}"          oc get cm ws-entry-config-multienv -n "$STAGE"          || hint "entry app not synced — ws prep config-multienv (instructor: adm start config-multienv --user ${USER_NAME})"
+check "entry marker ws-entry-config-multienv in ${PROD}"           oc get cm ws-entry-config-multienv -n "$PROD"           || hint "entry app not synced — ws prep config-multienv (instructor: adm start config-multienv --user ${USER_NAME})"
 check "workshop quota present in ${DEV}"               oc get resourcequota workshop-quota -n "$DEV" || hint "workshop layer not applied — run bootstrap/install.sh"
 check "Gitea fork ${USER_NAME}/claims-config exists"   fork_exists                                 || hint "fork job didn't run — ws reset config-multienv --user ${USER_NAME} (or check the gitea-fork-config-multienv-${USER_NAME} Job in ns gitea)"
 check "claims-db deployment ready in ${DEV}"           deploy_ready claims-db "$DEV"               || hint "wait for rollout: oc rollout status deploy/claims-db -n ${DEV}"
@@ -152,6 +153,8 @@ else
   check "stage config is APP_ENV=stage"                cm_app_env "$STAGE" stage                   || hint "not done yet? the stage overlay you apply in exercise 6 sets APP_ENV=stage. If you already applied it, re-apply overlays/stage — a wrong value here means the overlay is not the one that landed"
   check "prod parasol-claims ready (>=3 replicas)"     deploy_ready_min parasol-claims "$PROD" 3    || hint "not done yet? promotion is lab exercise 6 (oc apply -k overlays/prod from your claims-config fork) and prod starts EMPTY, so this red is expected before then. If you HAVE promoted and it is short of 3 ready replicas, that one is real: oc get pods -n ${PROD}"
   check "prod config is APP_ENV=prod"                  cm_app_env "$PROD" prod                     || hint "not done yet? the prod overlay you apply in exercise 6 sets APP_ENV=prod. If you already applied it, re-apply overlays/prod — a wrong value here means the overlay is not the one that landed"
+  check "route parasol-claims answers 200 in ${STAGE}" route_ready_200 "$STAGE"                    || hint "not done yet? the stage overlay you apply in exercise 6 creates this Route. If you already applied it, the app is not ready yet — check: oc get pods -n ${STAGE}"
+  check "route parasol-claims answers 200 in ${PROD}"  route_ready_200 "$PROD"                     || hint "not done yet? the prod overlay you apply in exercise 6 creates this Route. If you already applied it, the app is not ready yet — check: oc get pods -n ${PROD}"
 fi
 
 verify_summary
