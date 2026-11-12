@@ -21,6 +21,11 @@ include::partial$version-attributes.adoc[]
 // is the single parasol-web rollout.
 // Exercise 6 (Gateway API) was rewritten 2026-11-12 from an instructor demo into attendee work and
 // performed end to end on OCP 4.22.22 as user8 — see the comment at the top of that section.
+// Smoke fixes 2026-11-12, re-proven twice from a cold reset as user8 in user8's own terminal pod:
+// exercise 5's isolation probe now runs against a temporary allow-web-from-anywhere policy (the
+// terminal connects, the partner does not), because ex3-4's default-deny already blocked the partner;
+// every curl that expects JSON right after a Route/policy/rollout change retries (a plain curl 1 s
+// after `oc create route reencrypt`, and 1 s after the Gateway rollout, printed the router's HTML 503).
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -226,7 +231,7 @@ The connection is dropped because no rule lets it through: `demo-client` was giv
 
 === 5 · A namespace isolated with no policy at all — 2 min
 
-Parasol's partner namespace was created with its own primary network. It holds no NetworkPolicy, and its workload still cannot reach the application.
+Parasol's partner namespace was created with its own primary network. It holds no NetworkPolicy, and even with the front end opened to every source, its workload cannot reach it.
 
 image::networking-dev-devops/networking-dev-devops-03-platform-accretion.svg["The Parasol platform so far shown in grey — the application delivered by GitOps, and tenancy with workload security — with this module's layer highlighted above it: Service and Route for north-south traffic, NetworkPolicy for east-west, and UserDefinedNetwork."]
 
@@ -234,10 +239,20 @@ image::networking-dev-devops/networking-dev-devops-03-platform-accretion.svg["Th
 
 Where isolation is a property of the whole namespace, a UserDefinedNetwork gives it natively: there is no policy to write, and none to get wrong. The trade-off is a hard rule — a primary UDN must exist before the namespace's first pod, so it is a platform decision at namespace-creation time rather than something to retrofit. NetworkPolicy remains the answer wherever the flows are selective.
 
+The front end sits behind the default-deny from step 2, so a blocked connection alone would prove nothing. The block opens `parasol-web` port 8080 to every source, probes it from this terminal and from the partner workload, and then removes that opening again.
+
 [source,sh,role=execute]
 ----
-oc get networkpolicy -n $PARTNER || echo "(no NetworkPolicies)"
+oc get networkpolicy -n $PARTNER
 oc exec deploy/partner-workload -n $PARTNER -- ip -brief addr show ovn-udn1
+oc apply -n $NS -f - <<'EOF'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-web-from-anywhere}
+spec: {podSelector: {matchLabels: {app: parasol-web}}, policyTypes: [Ingress], ingress: [{ports: [{protocol: TCP, port: 8080}]}]}
+EOF
+sleep 3
+echo -n "this terminal    -> parasol-web.$NS.svc:8080 : "; timeout 5 bash -c "</dev/tcp/parasol-web.$NS.svc.cluster.local/8080" 2>/dev/null && echo OPEN || echo "BLOCKED (exit $?)"
 echo -n "partner-workload -> parasol-web.$NS.svc:8080 : "
 OUT=$(oc exec deploy/partner-workload -n $PARTNER -- timeout 5 bash -c "</dev/tcp/parasol-web.$NS.svc.cluster.local/8080 && echo OPEN" 2>&1); rc=$?
 case "$rc:$OUT" in
@@ -245,11 +260,12 @@ case "$rc:$OUT" in
   124:*|*"No route to host"*|*"Network is unreachable"*) echo "BLOCKED (own network — no path to the app)" ;;
   *) echo "step failed (exit $rc): $OUT" ;;
 esac
+oc delete networkpolicy allow-web-from-anywhere -n $NS
 ----
 
 *What just happened*
 
-The partner workload sits on `ovn-udn1`, a separate Layer 2 segment at `10.20.0.0/16`, and simply has no route to the application namespace. The database now answers only the API, and the partner workload is on its own network — none of it a firewall appliance.
+With `parasol-web` open to every source, this terminal, a pod in another namespace on the cluster network, connected. The partner workload did not: it sits on `ovn-udn1`, a separate Layer 2 segment at `10.20.0.0/16`, with no route to the application namespace. No policy stopped it; its network did. The database answers only the API, and the partner workload is on its own network — none of it a firewall appliance.
 
 == Frequently asked questions
 
@@ -260,7 +276,7 @@ That is the policy working. A default-deny denies egress as well as ingress, so 
 Because OVN-Kubernetes evaluates an egress port against the *destination pod*, and the CoreDNS pods listen on `5353` — the `dns-default` Service is what maps 53 to 5353. A rule for `port: 53` never matches the pod, so DNS stays denied. Name the CoreDNS pods' own ports, `dns` and `dns-tcp`, which is what OpenShift's own operators do. It is the most common self-inflicted "my policy is correct but nothing works."
 
 *The partner workload still has an `eth0` on the cluster network — is it really isolated?*::
-Yes. A pod on a primary UDN keeps a cluster-network `eth0` for node-level infrastructure such as kubelet health checks, but its default route leaves through `ovn-udn1` on the UDN's own segment. OVN-Kubernetes enforces the isolation regardless of that extra interface: the pod cannot reach workload pods in other namespaces, as the timed-out connection shows, even though it can still resolve DNS through the shared cluster service.
+Yes. A pod on a primary UDN keeps a cluster-network `eth0` for node-level infrastructure such as kubelet health checks, but its default route leaves through `ovn-udn1` on the UDN's own segment. OVN-Kubernetes enforces the isolation regardless of that extra interface: with the front end open to every source, a pod on the cluster network connects and the partner workload still times out, even though it can resolve DNS through the shared cluster service.
 
 *Why would a `type=LoadBalancer` Service sit at `<pending>`?*::
 Because no provider answered — it means "nothing handed out an address," not "failed." A LoadBalancer Service needs a cloud load balancer or an add-on such as MetalLB on bare metal. Where there is none, the external IP never arrives, and the fix is either a Route, which needs no provider, or installing a provider if an L4 external IP is genuinely required.
@@ -320,9 +336,10 @@ The endpoints are what a packet is really delivered to:
 oc get endpoints -n $NS
 ----
 
-.Expected output (a Warning about EndpointSlice is normal — endpoints is the classic view)
+.Expected output (the Warning about EndpointSlice is normal — endpoints is the classic view, and every `oc get endpoints` below prints it)
 [source,texinfo]
 ----
+Warning: v1 Endpoints is deprecated in v1.33+; use discovery.k8s.io/v1 EndpointSlice
 NAME             ENDPOINTS          AGE
 claims-db        10.234.0.25:5432   2m
 parasol-claims   10.233.0.44:8080   2m
@@ -389,6 +406,8 @@ esac
 .Expected output
 [source,texinfo]
 ----
+service/parasol-claims patched
+Warning: v1 Endpoints is deprecated in v1.33+; use discovery.k8s.io/v1 EndpointSlice
 NAME             ENDPOINTS   AGE
 parasol-claims   <none>      3m
 demo-client -> parasol-claims:8080 now: NO ENDPOINTS — connection refused
@@ -408,6 +427,8 @@ oc get endpoints parasol-claims -n $NS
 .Expected output
 [source,texinfo]
 ----
+service/parasol-claims patched
+Warning: v1 Endpoints is deprecated in v1.33+; use discovery.k8s.io/v1 EndpointSlice
 NAME             ENDPOINTS          AGE
 parasol-claims   10.233.0.44:8080   3m
 ----
@@ -475,12 +496,13 @@ route.route.openshift.io/parasol-web created
 host=parasol-web-{user}-dev.apps.example.com
 ----
 
-Give it a couple of seconds, then reach it *from outside the cluster* — the front end serves its claims:
+Now reach it *from outside the cluster* — the front end serves its claims.
+The router takes a few seconds to load a new Route and answers `503` until it has, so the `--retry` flags keep asking until the JSON arrives:
 
 [source,sh,role=execute]
 ----
 ROUTE=$(oc get route parasol-web -n $NS -o jsonpath='{.spec.host}')
-curl -sk --max-time 10 "https://$ROUTE/api/claims" | head -c 160; echo
+curl -sfk --retry 30 --retry-all-errors --retry-delay 2 --max-time 10 "https://$ROUTE/api/claims" | head -c 160; echo
 ----
 
 .Expected output (the front end's claims JSON)
@@ -638,7 +660,8 @@ Confirm the pod really opened a TLS listener — this is the step people skip an
 
 [source,sh,role=execute]
 ----
-oc logs deploy/parasol-web -n $NS | grep -o 'Listening on:.*'
+WEBPOD=$(oc get pods -n $NS -l app=parasol-web --sort-by=.metadata.creationTimestamp -o name | tail -1)   # the newest pod; the old one may still be terminating
+oc logs $WEBPOD -n $NS | grep -o 'Listening on:.*'
 oc get svc parasol-web -n $NS
 ----
 
@@ -688,12 +711,12 @@ route.route.openshift.io/parasol-web-secure created
 termination=reencrypt  host=parasol-web-secure-{user}-dev.apps.example.com
 ----
 
-Reach it from outside, exactly as you did the edge Route:
+Reach it from outside, exactly as you did the edge Route — the same `--retry` flags ride out the router loading the new Route:
 
 [source,sh,role=execute]
 ----
 SECURE=$(oc get route parasol-web-secure -n $NS -o jsonpath='{.spec.host}')
-curl -sk --max-time 15 "https://$SECURE/api/claims" | head -c 120; echo
+curl -sfk --retry 30 --retry-all-errors --retry-delay 2 --max-time 15 "https://$SECURE/api/claims" | head -c 120; echo
 ----
 
 .Expected output
@@ -790,11 +813,11 @@ oc get pods -n $NS -l app=parasol-claims
 oc logs -n $NS deploy/parasol-claims --tail=1
 ----
 
-.Expected output
+.Expected output (a `RESTARTS` of `1` dates from the pod's first start, before the database was up)
 [source,texinfo]
 ----
-NAME                              READY   STATUS    RESTARTS   AGE
-parasol-claims-799cbb5958-r7246   0/1     Running   0          9m
+NAME                             READY   STATUS    RESTARTS      AGE
+parasol-claims-5bf7bdb78-gw7dh   0/1     Running   1 (9m ago)    9m
 ... Reporting health down status: {"status":"DOWN","checks":[{"name":"Database connections health check","status":"DOWN","data":{"<default>":"Unable to execute the validation check for the default DataSource: Acquisition timeout while waiting for new connection"}}]}
 ----
 
@@ -1067,12 +1090,12 @@ networkpolicy.networking.k8s.io/allow-web-from-router created
 NetworkPolicies now in {user}-dev: 7
 ----
 
-Confirm the Route still works through the locked-down namespace — the router is allowed in, so the front end still answers from outside:
+Confirm the Route still works through the locked-down namespace — the router is allowed in, so the front end still answers from outside (the `--retry` flags cover the few seconds a new policy takes to program):
 
 [source,sh,role=execute]
 ----
 ROUTE=$(oc get route parasol-web -n $NS -o jsonpath='{.spec.host}')
-curl -sk --max-time 10 "https://$ROUTE/api/claims" | head -c 80; echo
+curl -sfk --retry 30 --retry-all-errors --retry-delay 2 --max-time 10 "https://$ROUTE/api/claims" | head -c 80; echo
 ----
 
 .Expected output
@@ -1089,14 +1112,14 @@ Seven policies: one default-deny, one DNS allow, and five precise allows that sp
 ****
 
 == 5. Native isolation with a UserDefinedNetwork
-⏱ *~6 min* · a partner namespace isolated with zero policy
+⏱ *~7 min* · a partner namespace isolated with zero policy — proven with your own policies opened up
 
 You just wrote seven NetworkPolicies to segment one namespace.
 Sometimes you want a whole namespace isolated and you want it *for free* — no policy to write or maintain.
 That is a *UserDefinedNetwork*.
 
 Your `{user}-partner` namespace was created with a *Layer 2 Primary UDN*: it has its *own* pod network, so its workloads are isolated from `{user}-dev` *natively*.
-First, confirm there is *no NetworkPolicy* here at all — whatever isolation you find is the network itself, not a rule:
+First, confirm the partner namespace holds *no NetworkPolicy* and read its network:
 
 [source,sh,role=execute]
 ----
@@ -1143,31 +1166,52 @@ default via 10.20.0.1 dev ovn-udn1
 ----
 
 The pod's *default route* leaves through `ovn-udn1` — this workload lives on the UDN, not the shared pod network.
-Now prove the isolation.
-The partner workload can still *resolve* names (DNS is a shared cluster service), but it *cannot reach* your app — with no NetworkPolicy anywhere:
+
+Now prove the isolation — and prove it is not *your* policies.
+`parasol-web` sits behind your exercise-3 default-deny, which admits only the router, so a blocked connection on its own proves nothing.
+For one block, open `parasol-web` port `8080` to *every* source, then probe it from two places: your terminal, which runs in another namespace on the cluster network, and the partner workload.
+The block removes the opening again at the end:
 
 [source,sh,role=execute]
 ----
-echo -n "resolve parasol-web.$NS.svc            : "; oc exec deploy/partner-workload -n $PARTNER -- timeout 6 bash -c "getent hosts parasol-web.$NS.svc.cluster.local >/dev/null && echo RESOLVED"; rc=$?
+oc apply -n $NS -f - <<'EOF'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-web-from-anywhere      # temporary: deleted at the end of this block
+spec:
+  podSelector: {matchLabels: {app: parasol-web}}
+  policyTypes: [Ingress]
+  ingress: [{ports: [{protocol: TCP, port: 8080}]}]   # no "from" = every source
+EOF
+sleep 3
+echo -n "resolve parasol-web.$NS.svc                 : "; oc exec deploy/partner-workload -n $PARTNER -- timeout 6 bash -c "getent hosts parasol-web.$NS.svc.cluster.local >/dev/null && echo RESOLVED"; rc=$?
 [ $rc -ne 0 ] && echo "no answer (exit $rc) — DNS is a shared service and should resolve; check the partner-workload pod exists (oc get pods -n $PARTNER)"
-echo -n "partner-workload -> parasol-web:8080   : "
+echo -n "your terminal (cluster network) -> parasol-web:8080 : "; timeout 6 bash -c "</dev/tcp/parasol-web.$NS.svc.cluster.local/8080" 2>/dev/null && echo OPEN || echo "BLOCKED (exit $?) — the opening is not programmed yet; re-run this block"
+echo -n "partner-workload (own UDN)      -> parasol-web:8080 : "
 OUT=$(oc exec deploy/partner-workload -n $PARTNER -- timeout 6 bash -c "</dev/tcp/parasol-web.$NS.svc.cluster.local/8080 && echo OPEN" 2>&1); rc=$?
 case "$rc:$OUT" in
   0:*OPEN*) echo "OPEN — NOT isolated (unexpected: is partner-workload really on the UDN?)" ;;
   124:*|*"No route to host"*|*"Network is unreachable"*) echo "BLOCKED (isolated network)" ;;
   *) echo "step failed (exit $rc): $OUT" ;;
 esac
+oc delete networkpolicy allow-web-from-anywhere -n $NS
 ----
 
 .Expected output
 [source,texinfo,subs="attributes"]
 ----
-resolve parasol-web.{user}-dev.svc            : RESOLVED
-partner-workload -> parasol-web:8080   : BLOCKED (isolated network)
+networkpolicy.networking.k8s.io/allow-web-from-anywhere created
+resolve parasol-web.{user}-dev.svc                 : RESOLVED
+your terminal (cluster network) -> parasol-web:8080 : OPEN
+partner-workload (own UDN)      -> parasol-web:8080 : BLOCKED (isolated network)
+networkpolicy.networking.k8s.io "allow-web-from-anywhere" deleted from {user}-dev namespace
 ----
 
-Name resolution works, but the *connection* does not — the partner workload is on a different Layer 2 network and simply cannot route to your app's pods.
-No default-deny, no allow rules, no seven-policy sprawl: the isolation is a property of the *network*, decided when the namespace was created.
+*Same open door, two answers.*
+Your terminal got in, so no NetworkPolicy stood in the way.
+The partner workload resolved the name but could not connect: it is on a different Layer 2 network and cannot route to your app's pods.
+The partner namespace holds no policy at all — the isolation is a property of the *network*, decided when the namespace was created.
 
 [NOTE]
 .NetworkPolicy or UDN — which to reach for
@@ -1179,7 +1223,7 @@ The catch that makes UDN a platform-team decision: a Primary UDN must exist *bef
 
 [.checkpoint]
 ****
-✔ *Verify:* `{user}-partner` has *no* NetworkPolicy, yet its `partner-workload` sits on `ovn-udn1` (`10.20.0.0/16`, the Layer 2 Primary UDN) with its default route through that interface, can resolve `parasol-web` but *cannot connect* to it — native isolation with zero policy.
+✔ *Verify:* `{user}-partner` has *no* NetworkPolicy, yet its `partner-workload` sits on `ovn-udn1` (`10.20.0.0/16`, the Layer 2 Primary UDN) with its default route through that interface; with `parasol-web` open to every source, your terminal connected while the partner workload resolved the name but *could not connect* — native isolation with zero policy, and `allow-web-from-anywhere` is gone again.
 ****
 
 == 6. Expose the front end through the Gateway API
@@ -1471,12 +1515,12 @@ Waiting for deployment "parasol-gateway-openshift-default" rollout to finish: 0 
 deployment "parasol-gateway-openshift-default" successfully rolled out
 ----
 
-Reach the app through the Gateway again:
+Reach the app through the Gateway again — the router takes a few seconds to notice the proxy is Ready, and answers `503` until it does, so the `--retry` flags ride that out:
 
 [source,sh,role=execute]
 ----
 GW=$(oc get route parasol-gw -n $NS -o jsonpath='{.spec.host}')
-curl -sk --max-time 10 "https://$GW/api/claims" | head -c 80; echo
+curl -sfk --retry 30 --retry-all-errors --retry-delay 2 --max-time 10 "https://$GW/api/claims" | head -c 80; echo
 ----
 
 .Expected output

@@ -6,6 +6,8 @@ include::partial$version-attributes.adoc[]
 // as user1 on 2026-07-13 by performing every exercise. Exercise 6 (Gateway API) was an instructor
 // demo until 2026-11-12, when it became attendee work and was performed end to end as user8 on OCP
 // 4.22.22. Cluster-domain values in output are scrubbed to the placeholder apps.example.com.
+// Re-measured 2026-11-12 after the smoke fixes: the whole lab twice from a cold reset as user8, in
+// user8's own terminal pod (see the timing NOTE and Provenance).
 
 This module has two beats that land, and they bracket the hands-on.
 It *opens* on the flat network — a `demo-client` pod that has nothing to do with the app opening a connection straight to the database (exercise 1) — and it *closes* on the reveal that the same pod is now *blocked* while the API still gets through (exercise 4), followed by a partner namespace isolated *natively* by a UserDefinedNetwork with zero policy (exercise 5).
@@ -20,18 +22,18 @@ include::partial$prep-before-you-teach.adoc[]
 
 == Timing
 
-Total hands-on: *~44 min* (add ~15 min of concept up front, ~5 min buffer).
+Total hands-on: *~45 min* (add ~15 min of concept up front, ~5 min buffer).
 
 [cols="1,4,1,2",options="header"]
 |===
 | # | Exercise group | Attendee time | Measured core
 
-| 1 | Map the network and trace a packet | ~4 min | `oc get svc/endpoints` instant; selector break → endpoints `<none>` in *~2 s*; reachability probes instant (TCP connect). Whole group measured at *21 s* of command time
-| 2 | Expose the front end to the world | ~11 min | edge Route create → external `curl` succeeds in *~2 s*; NodePort create/inspect/delete instant; LoadBalancer `<pending>` visible immediately; then the re-encrypt beat at *46 s* of command time (26 s of it the single `parasol-web` rollout)
-| 3 | Lock the namespace down with default-deny | ~5 min | policy apply instant; `parasol-claims` drops to `0/1` within *~30–70 s* (periodSeconds 10 × failureThreshold 3, plus policy-propagation lag); reading the break is the time cost
-| 4 | Re-open only what the app needs | ~10 min | DNS allow → resolves in *~4 s*; db allow pair → `parasol-claims` back to `1/1` in *~10–20 s*; probes instant; the payoff is the point
-| 5 | Native isolation with a UDN | ~6 min | all `oc exec` reads; the isolation probe *times out by design* (~6 s); reading + the "no policy" reveal. Whole group measured at *20 s* of command time
-| 6 | Expose the front end through the Gateway API | ~8 min | Gateway `PROGRAMMED True` in *~3 s*; HTTPRoute `Accepted` in *~2 s*; the deliberate `503` is immediate; after the policy fix the Envoy proxy goes Ready in *5–60 s* (the kubelet's restart backoff, not the policy). Whole group measured at *~38 s* of command time
+| 1 | Map the network and trace a packet | ~4 min | `oc get svc/endpoints` instant; selector break → endpoints `<none>` in *~2 s*; reachability probes instant (TCP connect). Whole group measured at *21 s* of command time (*7–9 s* on 2026-11-12)
+| 2 | Expose the front end to the world | ~11 min | edge Route create → external `curl` returns the JSON in *1–3 s* (its `--retry` rides out the router's reload); NodePort create/inspect/delete instant; LoadBalancer `<pending>` visible immediately; then the re-encrypt beat at *46 s* of command time (26 s of it the single `parasol-web` rollout). Whole group *30–44 s* on 2026-11-12, 14 s of it the rollout and up to 7 s the re-encrypt `curl` retrying
+| 3 | Lock the namespace down with default-deny | ~5 min | policy apply instant; `parasol-claims` drops to `0/1` within *~30–70 s* (periodSeconds 10 × failureThreshold 3, plus policy-propagation lag; *28–32 s* in every 2026-11-12 run); reading the break is the time cost
+| 4 | Re-open only what the app needs | ~10 min | DNS allow → resolves in *~4 s*; db allow pair → `parasol-claims` back to `1/1` in *~10–20 s* (*1–11 s* on 2026-11-12); probes instant; the payoff is the point. Whole group *12–23 s* on 2026-11-12
+| 5 | Native isolation with a UDN | ~7 min | `oc exec` reads, then the open-door block: a temporary `allow-web-from-anywhere`, the terminal probe `OPEN` at once, the partner probe *timing out by design* (~6 s), the policy deleted — *10–11 s*. Whole group *12 s* of command time; reading + the "no policy, open door, still blocked" reveal
+| 6 | Expose the front end through the Gateway API | ~8 min | Gateway `PROGRAMMED True` in *~3 s*; HTTPRoute `Accepted` in *~2 s*; the deliberate `503` is immediate; after the policy fix the Envoy proxy goes Ready in *5–60 s* (the kubelet's restart backoff, not the policy). Whole group measured at *~38 s* of command time (*21–25 s* on 2026-11-12, the proxy Ready *8–10 s* after the fix)
 |===
 
 [NOTE]
@@ -51,6 +53,10 @@ The total stayed at *40 min* then.
 
 Exercise 6 became hands-on on 2026-11-12 and was measured as `user8` on OCP 4.22.22: *~38 s* of command time, plus the Envoy proxy's recovery after the policy fix — *5 s* when the policies went in at once, *6–9 s* after a 40 s reading pause, *~60 s* after it had spent two minutes in restart backoff.
 The group is budgeted at *8 min* for reading the three-object model and the break; the module total rose to *44 min*.
+
+After the 2026-11-12 smoke, the whole lab was re-run twice from a cold `adm reset` as `user8`, in that user's own terminal pod with every block fed verbatim and no pauses: *139 s* and *152 s* of command time from the first `oc get svc` to the Gateway access-log line, and `ws verify` *19/19* both times.
+Exercise 5 gained the open-door block (*10–11 s*) and one minute of reading; the module total is now *45 min*.
+The four `curl` commands that expect JSON right after a Route, policy or rollout change now retry; in those runs they waited *1–7 s* for the router.
 ====
 
 == How to know the room can move on
@@ -193,6 +199,8 @@ After `default-deny`, pause on `parasol-claims` at `0/1` and the DB health-`DOWN
 "Same database, same namespace, two pods, two answers." Say it while both probe results are on screen — the API `OPEN`, the `demo-client` `BLOCKED`.
 * *The UDN reveal needs the `oc get networkpolicy` first (beat 5).*
 Show there is *no* policy in the partner namespace *before* the isolation probe, or the punchline ("no policy at all") doesn't register.
+* *Beat 5 opens a door on purpose.*
+By beat 5 `parasol-web` sits behind beat 2's default-deny, so a blocked partner proves nothing by itself. The block adds `allow-web-from-anywhere` (8080 from every source), shows the presenter's terminal getting in and the partner timing out, then deletes the policy. Say it in that order: "the door is open — and the partner still can't get through."
 
 == Top questions attendees ask
 
@@ -231,7 +239,8 @@ Add the `parasol-claims → claims-db` egress allow (and the matching db ingress
 *6. "The partner workload still has an `eth0` on the cluster network — is it really isolated?"*::
 Yes.
 A Primary UDN pod keeps a cluster-network `eth0` for node-level infrastructure (kubelet health checks and the like), but its *default route* leaves through `ovn-udn1` on the UDN's `10.20.0.0/16` segment — that is its primary network.
-OVN-Kubernetes enforces the isolation regardless of the extra interface: the pod cannot reach workload pods in other namespaces (verified — the connection to `parasol-web` times out), even though it can still resolve DNS via the shared cluster service.
+OVN-Kubernetes enforces the isolation regardless of the extra interface: the pod cannot reach workload pods in other namespaces, even though it can still resolve DNS via the shared cluster service.
+Exercise 5 proves it against an open door: with `parasol-web` admitting every source on `8080`, the attendee's own terminal connects and the partner workload still times out (and gets `No route to host` on the pod IP directly).
 The presence of `eth0` is an implementation detail, not a leak.
 
 *7. "Why does my Gateway need a Route in front of it? Isn't the Gateway the ingress?"*::
@@ -250,6 +259,8 @@ Both are expected in exercise 3. Don't let a confused attendee "fix" it by delet
 `allow-web-from-router` (namespaceSelector `policy-group.network.openshift.io/ingress: ""`) is what lets the ingress router reach `parasol-web` once default-deny is on. Without it, the Route returns an error even though the Service is fine — a subtle one to debug if an attendee skips it.
 * *The `demo-client` block is over-determined — frame it honestly.*
 Under the end state, `demo-client` is blocked both because default-deny denies its egress (it got no allow) *and* because the `claims-db` ingress admits only `parasol-claims`. Present it as "no rule lets it through," not "the db ingress policy alone stops it" — both point the same way, and that is the correct mental model.
+* *A new Route answers `503` for its first seconds.*
+The router has not loaded it yet, and the `503` is an HTML page, so a bare `curl` prints `<html> <head> …` — measured 1 s after `oc create route reencrypt`. Every lab `curl` that expects JSON right after a Route, policy or rollout change carries `--retry 30 --retry-all-errors --retry-delay 2` and prints the JSON once the router catches up.
 * *The re-encrypt beat's real failure mode is a Route pointed at the plaintext port.*
 If an attendee creates the reencrypt Route against `--port=http` (8080) instead of `--port=https` (8443), the router tries to open TLS to a plaintext listener and the Route returns *503* with the router's "Application is not available" page — not a TLS error, which is what makes it confusing. Confirmed live. Check `spec.port.targetPort` first; it is `https` when correct.
 * *The pod must be serving TLS before the Route will work, and `1/1 Ready` does not prove it.*
@@ -278,3 +289,7 @@ Exercise 6 was rebuilt on 2026-11-12 from a read-only instructor demo into atten
 Two behaviours were measured rather than assumed: the same annotation under `spec.infrastructure.annotations` left the Service `LoadBalancer` and the Gateway `AddressNotAssigned`, while the `metadata` annotation switched it to `ClusterIP` in 2 s; and the proxy's recovery after the fix ranged from 5 s to ~60 s with the time it had spent in restart backoff.
 The same day the lab's Gateway was switched to the workshop's `ogsr-gateway-proxy` sizing and the whole exercise re-run as `user8`: one replica at 50m/128Mi requests and 500m/512Mi limits, read back from the Deployment.
 With the whole lab applied, `ws verify networking-dev-devops --user user8` reported *all 19 checks passed*.
+
+A smoke on 2026-11-12 found two real defects, fixed the same day and re-proven by two cold-start runs of the whole lab as `user8` in that user's own terminal pod (`ws verify` *19/19* both times), plus one run of the demo flavor from the entry state.
+Exercise 5's isolation probe was confounded: by then `{user}-dev` carries exercise 3–4's default-deny, so a plain pod in any other namespace was blocked just the same. The probe now runs with a temporary `allow-web-from-anywhere` in place: the attendee's terminal connected in every run and the partner workload timed out, and the policy is deleted in the same block. The same open door showed the partner getting `No route to host` on the `parasol-web` pod IP directly.
+A plain `curl` 1 s after `oc create route reencrypt`, and 1 s after the Gateway proxy's rollout, printed the router's HTML `503` page; the JSON `curl` commands now carry `--retry 30 --retry-all-errors --retry-delay 2`.

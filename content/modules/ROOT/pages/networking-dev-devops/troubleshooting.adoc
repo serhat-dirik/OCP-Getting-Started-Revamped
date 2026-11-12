@@ -122,18 +122,27 @@ curl -sk --max-time 10 "https://$ROUTE/api/claims" | head -c 60; echo
 
 == My re-encrypt Route returns 503 "Application is not available"
 
-Symptom:: The reencrypt Route was created and admitted, but every request returns *503* with the router's error page. There is no TLS error anywhere — which is what makes it confusing.
-Cause:: Almost always the Route is pointed at the *plaintext* port. The router opens a TLS connection to the backend, the backend is speaking plain HTTP on `8080`, the handshake gets nothing, and the router reports the backend as unavailable. Reproduced deliberately while building this module by creating the Route with `--port=http`.
-Fix:: Check the target port — it must be the *TLS* port, not the plaintext one:
+Symptom:: The reencrypt Route was created and admitted, but `curl` prints an HTML page (`<html> <head> <meta name="viewport" …`) instead of the claims JSON — the router's *503* error page. There is no TLS error anywhere — which is what makes it confusing.
+Cause:: Two causes, told apart by time:
+* *In the first seconds after Create* — the router has not loaded the new Route yet, as with the edge Route above. A plain `curl` run 1 s after `oc create route reencrypt` returned the HTML page on the build cluster; the lab's `curl --retry` returned the JSON on its own.
+* *Still 503 after ~20 s* — the Route is pointed at the *plaintext* port. The router opens a TLS connection to the backend, the backend is speaking plain HTTP on `8080`, the handshake gets nothing, and the router reports the backend as unavailable. Reproduced deliberately while building this module by creating the Route with `--port=http`.
+Fix:: Retry first; only then check the target port — it must be the *TLS* port, not the plaintext one:
 +
 [source,sh,role=execute]
 ----
+SECURE=$(oc get route parasol-web-secure -n $NS -o jsonpath='{.spec.host}')
+curl -sfk --retry 30 --retry-all-errors --retry-delay 2 --max-time 15 "https://$SECURE/api/claims" | head -c 120; echo
 oc get route parasol-web-secure -n $NS -o jsonpath='targetPort={.spec.port.targetPort}  termination={.spec.tls.termination}{"\n"}'
+----
++
+JSON from the `curl` means it was the router settling, and nothing needs fixing.
+If the `curl` prints nothing after its retries, read the target port: `targetPort=https` is correct; `targetPort=http` is the bug — re-create the Route against the TLS port. A re-encrypt Route must terminate against something that actually speaks TLS.
++
+[source,sh,role=execute]
+----
 oc delete route parasol-web-secure -n $NS
 oc create route reencrypt parasol-web-secure --service=parasol-web --port=https -n $NS
 ----
-+
-`targetPort=https` is correct; `targetPort=http` is the bug. A re-encrypt Route must terminate against something that actually speaks TLS.
 
 == The pod is `1/1 Ready` but the re-encrypt Route still 503s
 
@@ -143,7 +152,7 @@ Fix:: Read the startup line and confirm *both* listeners, then confirm the Servi
 +
 [source,sh,role=execute]
 ----
-oc logs deploy/parasol-web -n $NS | grep -o 'Listening on:.*'
+oc logs $(oc get pods -n $NS -l app=parasol-web --sort-by=.metadata.creationTimestamp -o name | tail -1) -n $NS | grep -o 'Listening on:.*'
 oc get svc parasol-web -n $NS -o jsonpath='ports={range .spec.ports[*]}{.name}:{.port} {end}{"\n"}'
 oc set volume deploy/parasol-web -n $NS   # confirm the tls secret is actually mounted at /etc/tls
 ----
@@ -165,6 +174,7 @@ echo -n "hop 2  issued by        : "; oc exec deploy/demo-client -n $NS -- curl 
 ----
 +
 This gives the same two lines the lab is after — the inside hop's certificate `subject`/`issuer` — using only `curl`, which every step in this module already relies on.
+Run it during exercise 2: from exercise 3 on, `demo-client` has no egress allow, so both the `openssl` and the `curl` probe print nothing.
 
 == The serving-cert Secret never appears
 
@@ -226,17 +236,18 @@ If two workloads *must* talk across a UDN boundary, that is an exposure decision
 
 == The partner pod has an `eth0` on the cluster network — did the UDN fail?
 
-Symptom:: `ip addr` in the partner pod shows *two* interfaces — `eth0` on a `10.235.x.x` address *and* `ovn-udn1` on `10.20.x.x`. It looks like it's on both networks.
+Symptom:: `ip addr` in the partner pod shows *two* interfaces — `eth0` on a cluster-network address *and* `ovn-udn1` on `10.20.x.x`. It looks like it's on both networks.
 Cause:: A Primary UDN pod keeps a cluster-network `eth0` for node-level infrastructure (kubelet health probes), but `ovn-udn1` is its *primary* network — the default route leaves through it, and OVN enforces isolation regardless of the extra interface.
 Fix:: No fix needed. Verify the primary is the UDN:
 +
 [source,sh,role=execute]
 ----
 oc exec deploy/partner-workload -n $PARTNER -- ip route show default
-oc get pod -n $PARTNER -l app=partner-workload -o jsonpath='{.items[0].metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}' | grep -o '"interface": "ovn-udn1"[^}]*"default": true' || true
+oc get pod -n $PARTNER -l app=partner-workload -o jsonpath='{.items[0].metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}' | tr -d ' \n' | grep -o '"interface":"ovn-udn1"[^}]*"default":true' || echo "ovn-udn1 is NOT the default network"
 ----
 +
-The `"default": true` on `ovn-udn1` in the network-status annotation confirms the UDN is the primary network; `eth0` is an infrastructure detail, not a leak.
+The annotation is pretty-printed over several lines, so `tr` joins it before the `grep`.
+A line ending in `"default":true` for `ovn-udn1` confirms the UDN is the primary network; `eth0` carries no such flag and is an infrastructure detail, not a leak.
 
 == The UDN didn't attach — `ovn-udn1` is missing from the partner pod
 
@@ -280,6 +291,7 @@ oc rollout status deploy/parasol-gateway-openshift-default -n $NS --timeout=150s
 ----
 +
 Recovery took 5 s on the build cluster when the policies went in straight away, and about 60 s when the pods had already spent a couple of minutes in restart backoff — the wait is the kubelet's backoff, not the policy.
+A `503` in the first seconds *after* the rollout completes is the router catching up with the newly Ready proxy: a plain `curl` 1 s after `oc rollout status` returned the router's HTML page on the build cluster. The lab's `curl --retry` rides it out.
 
 == `oc apply` of the Gateway is `Forbidden`
 
@@ -289,4 +301,4 @@ Fix:: Nothing to fix from the attendee side — tell your instructor. The instru
 
 '''
 
-_Last verified on OpenShift 4.21.22 (OVN-Kubernetes, 2026-07-13; the three re-encrypt entries 2026-07-25; the three Gateway entries on OpenShift 4.22.22, 2026-11-12)._
+_Last verified on OpenShift 4.21.22 (OVN-Kubernetes, 2026-07-13; the three re-encrypt entries 2026-07-25; the three Gateway entries on OpenShift 4.22.22, 2026-11-12; the re-encrypt `503`, `openssl` and UDN `eth0` entries re-run on OpenShift 4.22.22, 2026-11-12)._
