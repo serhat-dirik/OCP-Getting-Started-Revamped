@@ -153,6 +153,9 @@ ping_endpoint_pushed() {
 # asked at all. Either way a read that could not be answered has to be an explicit "cannot grade",
 # never a silent pass. (An earlier revision of this comment asserted the refusal "cannot happen";
 # it can, routinely, for anyone who verifies before exercise 1.)
+# SINCE 2026-11-12 THE ENTRY CHART BINDS THOSE SAME TWO ROLES ITSELF (templates/devspaces-user-rbac.yaml),
+# so on a current entry state the reads answer from `ws prep` onward and the first cause no longer
+# occurs; rc=2 stays for an API that could not be asked, or an entry state materialized before that.
 
 # Read one resource in the workspace namespace and CLASSIFY the server's answer. Deliberately not
 # `oc auth can-i`: run by an instructor or CI the caller is cluster-admin, so can-i would answer for
