@@ -178,6 +178,7 @@ k8s.keycloak.org                  component:keycloak-operator   rhbk-operator
 # removes the controller. Attributed to the component, which is the conservative reading.
 gateway.networking.k8s.io         component:gateway-api         our GatewayClass activates istiod
 skupper.io                        component:service-interconnect skupper-operator
+external-secrets.io               component:external-secrets    external-secrets-operator (secrets stack)
 "
 
 # ── [1] the teardown phase model still exists ─────────────────────────────────
@@ -244,10 +245,12 @@ render_workshop_layer() {  # → "<group>|<Kind>|<source>" per rendered resource
                 --set appRepoSeed.enabled=true \
                 --set showroom.enabled=true \
                 --set showroomDemos.enabled=true \
-                --set clusterDomain=apps.example.invalid 2>&1)"; then
-    echo "RENDERFAIL|workshop-config|$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+                --set clusterDomain=apps.example.invalid 2>"${WORK}/helm.err")"; then
+    echo "RENDERFAIL|workshop-config|$(grep -v '^WARNING:' "${WORK}/helm.err" | tr '\n' ' ' | cut -c1-160)"
     return 0
   fi
+  # stderr goes to a file, never into $out: helm's own WARNINGs (a group-readable kubeconfig) would
+  # otherwise land in the manifest stream and fail every parse below on an otherwise clean render.
   # `if !` around each parse, not a bare pipeline: under `set -e` + pipefail a yq failure here would
   # abort the whole check silently, which reads as a pass to anyone watching the exit code.
   if ! printf '%s\n' "$out" | to_group_kind "workshop-config"; then
@@ -256,8 +259,8 @@ render_workshop_layer() {  # → "<group>|<Kind>|<source>" per rendered resource
   for d in "${ENTRY_STATES_DIR}"/*/; do
     [[ -f "${d}Chart.yaml" ]] || continue
     slug="$(basename "$d")"
-    if ! out="$(helm template es "$d" 2>&1)"; then
-      echo "RENDERFAIL|entry-states/${slug}|$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+    if ! out="$(helm template es "$d" 2>"${WORK}/helm.err")"; then
+      echo "RENDERFAIL|entry-states/${slug}|$(grep -v '^WARNING:' "${WORK}/helm.err" | tr '\n' ' ' | cut -c1-160)"
       continue
     fi
     if ! printf '%s\n' "$out" | to_group_kind "entry-states/${slug}"; then
