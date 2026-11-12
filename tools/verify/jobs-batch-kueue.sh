@@ -138,6 +138,11 @@ seeded_rows_state() {
 any_attendee_job_complete() {
   oc_read get jobs -n "$NS" -l '!workshop.redhat.com/owner' \
     -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Complete")].status}{"\n"}{end}' || return 1
+  [[ "$OC_OUT" == *True* ]] && return 0
+  # `adm solve` stands in for the attendee's Job with monthly-statement-solve. The chart owns it, so it
+  # carries the owner label the selector above excludes; without this, verify after solve is always red.
+  oc_read get job monthly-statement-solve -n "$NS" \
+    -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' || return 1
   [[ "$OC_OUT" == *True* ]]
 }
 
