@@ -15,7 +15,7 @@ Set the shortcuts first: `NS={user}-dev`, `BROKER=$(oc get broker default -n $NS
 == My first POST to the broker takes ~14 seconds (or a short-timeout curl fails)
 
 Symptom:: The first `curl` POST to the broker hangs for about 14 seconds before returning `202`, or a `curl -m 5` returns `HTTP 000` / exit `28`.
-Cause:: This is the *consumer cold start on the delivery path*, not a fault. The default in-memory broker (`MTChannelBasedBroker`) delivers *synchronously* — the `202` comes back only after the trigger *completes* delivery — and if the consumer is scaled to *zero* it must cold-start first (roughly 14-30 s for this JVM consumer, varying with cluster load). A client timeout *shorter* than the cold start abandons the request before it finishes.
+Cause:: This is the *consumer cold start on the delivery path*, not a fault. The default in-memory broker (`MTChannelBasedBroker`) delivers *synchronously* — the `202` comes back only after the trigger *completes* delivery — and if the consumer is scaled to *zero* it must cold-start first (roughly 10-30 s for this JVM consumer, varying with cluster load). A client timeout *shorter* than the cold start abandons the request before it finishes.
 Fix:: Give the producer a realistic timeout (the lab uses `-m 30` for the cold path). The next POST, with the consumer warm, is sub-second:
 +
 [source,sh,role=execute]
@@ -27,11 +27,17 @@ oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -m 30 -o /dev/null -w "HT
 +
 The cold start is the same JVM wake from Serverless, now on the delivery path. It's honest — plan the timeout around it.
 
+== Exercise 3's "cold" broker POST came back in under a second
+
+Symptom:: The first broker POST in exercise 3 returns `202` in well under a second, and `oc get pods` shows a `claims-consumer` pod that is already a minute or so old.
+Cause:: A `claim-ticker` ping got there first. It fires into the same broker every five minutes, the catch-all `claims-events` Trigger delivers it to `claims-consumer`, and that delivery starts the pod your POST then finds warm. It happens when a tick lands between the wait-for-zero block and the POST (measured 2026-11-12: a tick at :35:00 left a 54-second-old pod, and the "cold" POST took 0.36 s).
+Fix:: Nothing is broken. Re-run exercise 3's wait-for-zero block until it prints `0`, then run the POST block again straight away.
+
 == A POST to the broker hangs to a timeout and *no* consumer ever wakes
 
 Symptom:: Every POST to the broker returns `HTTP 000` (timeout) no matter how long you wait, the scheduled `PingSource` events never arrive, and the consumer never even cold-starts.
-Cause:: The broker's in-memory channel is *poisoned by a stale subscriber* — a subscriber for a Trigger that was *deleted* but never removed from the channel's `spec.subscribers`. The `imc-dispatcher` returns `500` to the broker ingress for *every* event, so nothing is delivered. The Broker still shows `Ready` (its objects are fine); only *delivery* is broken. This was hit at build time after a `adm solve`/reset cycle left a `claims-audit` subscriber behind.
-Fix:: Confirm the stale subscriber, then re-materialize a clean Broker with `ws reset`:
+Cause:: The broker's in-memory channel is *poisoned by a stale subscriber* — a subscriber for a Trigger that was *deleted* but never removed from the channel's `spec.subscribers`. The `imc-dispatcher` returns `500` to the broker ingress for *every* event, so nothing is delivered. The Broker still shows `Ready` (its objects are fine); only *delivery* is broken. This was hit while building the module, after a solve-then-reset cycle left a `claims-audit` subscriber behind.
+Fix:: Confirm the stale subscriber first:
 +
 [source,sh,role=execute,subs="attributes"]
 ----
@@ -39,11 +45,16 @@ Fix:: Confirm the stale subscriber, then re-materialize a clean Broker with `ws 
 oc get trigger -n $NS
 # the channel's subscriber list — a name here that ISN'T a Trigger above is stale:
 oc get imc default-kne-trigger -n $NS -o jsonpath='{range .spec.subscribers[*]}{.name}{"\n"}\{end}'
-# re-materialize a clean Broker + channel (instructor verb):
-# ws reset eventing-deep-dive --user {user}
 ----
 +
-`ws reset eventing-deep-dive --user {user}` deletes and recreates the Broker, rebuilding the channel from the current Triggers. (Reported to the platform team — the channel's subscriber list can outlive the Trigger that owned it.)
+If a stale name shows up, put the module back to its starting point yourself:
++
+[source,sh,role=execute]
+----
+ws reset eventing-deep-dive
+----
++
+`ws reset` purges your `{user}-dev` project and re-materializes the module's entry state, so the Broker and its channel are rebuilt clean. It also removes the Triggers you added, so redo exercise 4 onward afterwards. (Reported to the platform team — the channel's subscriber list can outlive the Trigger that owned it.)
 
 == My event returned `202` but the consumer never processed it
 
