@@ -1,10 +1,10 @@
 # stack: mta
 
-The platform prerequisite for **M23 — Application Modernization (MTA + AI)**. Installs the shared,
-cluster-wide **Migration Toolkit for Applications 8 (MTA)** — the `mta-operator` + a single **Tackle**
-Hub — as an Argo CD app-of-apps. Everything here is a **single shared install** — never per-user;
-per-user modernization state (`{user}-modernize` + the seeded `parasol-legacy-claims` repo + the MTA
-Application entry) is the workshop layer / M23 entry state on top.
+Installs the shared, cluster-wide **Migration Toolkit for Applications 8 (MTA)** — the `mta-operator` +
+a single **Tackle** Hub — as an Argo CD app-of-apps. Everything here is a **single shared install** —
+never per-user; any per-user state (namespaces, Git repos, MTA Application entries) belongs to whatever
+layer consumes the Hub. No module of the OGSR workshop requests this stack since app-modernization left
+its catalog (2026-11-12); it stays here as a reusable PoC stack.
 
 ```bash
 ./argocd-bootstrap/install.sh --stacks mta
@@ -34,7 +34,7 @@ Git repos in the workshop layer, not MTA logins.
 
 **Developer Lightspeed for MTA ([ADS]) is NOT configured on the Tackle CR** — verified live (v8.1.2)
 that the CR carries no genAI provider/model fields. The AI refactor's LLM is wired in the VS Code
-extension per workspace (MaaS endpoint/model + key), by the M23 entry state.
+extension per workspace (MaaS endpoint/model + key), by the consuming layer.
 
 ## Namespaces
 
@@ -42,16 +42,10 @@ extension per workspace (MaaS endpoint/model + key), by the M23 entry state.
 |---|---|
 | `openshift-mta` | the mta-operator + the Tackle Hub: `mta-hub` + `mta-ui` pods, DB embedded on a PVC. No separate Postgres; no Keycloak pod while `feature_auth_required: false` (the RHBK operator installs as a dependency but runs no instance); the server-side Kai/AI solution server stays gated (`KaiSolutionServerReady=False`) until its API-keys Secret exists. Verified v8.1.2 on-cluster 2026-07-13 (no `pathfinder` — that was MTA 6). |
 
-## The M23 entry-state seam (NOT installed here)
+## Per-user wiring (NOT installed here)
 
-Workshop-agnostic by design. The **per-user** wiring lives in the workshop layer, on top of this
-shared Hub:
-
-- `gitops/workshop-config/templates/per-user-modernize.yaml` — the `{user}-modernize` namespace
-  (quota/limits/RBAC).
-- `gitops/entry-states/app-modernization/` — the per-user `parasol-legacy-claims` Gitea fork (the migration target),
-  the MaaS credentials for Developer Lightspeed, and the entry marker; `ws solve` deploys the
-  modernized service.
+Workshop-agnostic by design. A consumer adds per-user namespaces (quota/limits/RBAC), the Git repos
+to analyze, and any MaaS credentials for Developer Lightspeed on top of this shared Hub.
 
 ## Verify
 

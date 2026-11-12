@@ -225,7 +225,6 @@ AUTH="$(stack_toggle auth auth)"
 RESILIENCE="$(stack_toggle resilience resilience)"
 MESH="$(stack_toggle mesh mesh)"
 SERVERLESS="$(stack_toggle serverless serverless)"
-MTA="$(stack_toggle mta mta)"
 OBSERVABILITY="$(stack_toggle observability observability)"
 APPSEC="$(stack_toggle appsec appsec)"
 PORTAL="$(stack_toggle portal portal)"
@@ -279,16 +278,16 @@ discover_maas_model() {
     # How hard this fails depends on what the key is FOR on this cluster. If we are installing
     # Lightspeed ourselves the key is a hard dependency of that install, so abort. If Lightspeed was
     # already here (adopted) the key only feeds the AI *modules*: aborting would deny the operator the
-    # other 22 modules over an optional beat. Their entry-state hooks now validate the credential
+    # other 24 modules over an optional beat. Their entry-state hooks now validate the credential
     # themselves and degrade to an explicit aiPathAvailable=false, so a loud warning is the honest
     # stopping point — the failure is visible here AND recorded per module, not silently swallowed.
     if [[ "$LIGHTSPEED" == "true" && "$LIGHTSPEED_PREINSTALLED" == "false" ]]; then
       die "refusing to guess a model name: MaaS keys are model-scoped, so a guess fails inside the AI modules rather than here. Fix maas.endpoint / maas.api_key in ${VARS}, or set 'lightspeed: false' to install without the AI modules."
     fi
-    warn "continuing WITHOUT a usable MaaS credential — the AI beats (agentic-ai, ai-assisted-development,"
-    warn "   app-modernization, jobs-batch-kueue) will report 'AI path unavailable'; every other module is unaffected."
-    warn "   To enable them: fix maas.endpoint / maas.api_key in ${VARS}, re-run this installer, then"
-    warn "   ws reset <module> --user <userN> for each AI module."
+    warn "continuing WITHOUT a usable MaaS credential — the AI beat (jobs-batch-kueue) will report"
+    warn "   'AI path unavailable'; every other module is unaffected."
+    warn "   To enable it: fix maas.endpoint / maas.api_key in ${VARS}, re-run this installer, then"
+    warn "   adm reset jobs-batch-kueue --user <userN>."
     MAAS_KEY=""
     return 0
   fi
@@ -1064,7 +1063,6 @@ STACKS="core-devtools,batch,progressive-delivery"
 # are simply absent from the cluster (module independence holds — nothing else breaks).
 [[ "$MESH" == "true" ]] && STACKS="${STACKS},mesh"
 [[ "$SERVERLESS" == "true" ]] && STACKS="${STACKS},serverless"
-[[ "$MTA" == "true" ]] && STACKS="${STACKS},mta"
 [[ "$OBSERVABILITY" == "true" ]] && STACKS="${STACKS},observability"
 [[ "$APPSEC" == "true" ]] && STACKS="${STACKS},appsec"
 [[ "$PORTAL" == "true" ]] && STACKS="${STACKS},portal"

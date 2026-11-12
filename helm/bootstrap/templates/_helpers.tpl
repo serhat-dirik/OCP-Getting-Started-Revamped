@@ -124,7 +124,7 @@ governed separately (see lightspeedEnabled).
 {{- end -}}
 {{- end -}}
 {{- $ov := .Values.stacks | default dict -}}
-{{- range $name := (list "auth" "resilience" "mesh" "serverless" "mta" "observability" "appsec" "portal" "trust") -}}
+{{- range $name := (list "auth" "resilience" "mesh" "serverless" "observability" "appsec" "portal" "trust") -}}
 {{- if index $ov $name -}}{{- if not (has $name $stacks) -}}{{- $stacks = append $stacks $name -}}{{- end -}}{{- end -}}
 {{- end -}}
 {{- if $ov.trustDemo -}}{{- if not (has "trust-demo" $stacks) -}}{{- $stacks = append $stacks "trust-demo" -}}{{- end -}}{{- end -}}

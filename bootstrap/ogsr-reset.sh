@@ -59,9 +59,9 @@
 #   • per-user Keycloak realm CONTENTS. realm-<user> is created once by a KeycloakRealmImport that
 #     the operator does not re-import over a realm that already exists, so clients/users the
 #     securing-apps-keycloak lab created stay.
-#   • server-side state in shared tools: SonarQube projects and analyses, RHDH catalog entities,
-#     MTA/Tackle portfolio applications. These live in those products' databases, not as per-user
-#     Kubernetes objects, so no namespace purge reaches them.
+#   • server-side state in shared tools: SonarQube projects and analyses, RHDH catalog entities.
+#     These live in those products' databases, not as per-user Kubernetes objects, so no namespace
+#     purge reaches them.
 #   • Gitea personal access tokens and SSH keys on the attendee's account (the account is kept by
 #     design; only its REPOSITORIES are cleared).
 #
@@ -253,7 +253,7 @@ echo "handing the cluster to a NEW group; see the header for the detail):"
 echo "  • the cockpit HOME directory — /home/lab-user is a per-user PVC; --restart-terminals re-mounts"
 echo "    the same volume rather than emptying it"
 echo "  • per-user Keycloak realm CONTENTS (clients/users the securing-apps-keycloak lab created)"
-echo "  • SonarQube projects/analyses, RHDH catalog entities, MTA portfolio apps (product databases)"
+echo "  • SonarQube projects/analyses, RHDH catalog entities (product databases)"
 echo "  • Gitea personal access tokens and SSH keys on the kept attendee account"
 echo
 print_duration_estimate

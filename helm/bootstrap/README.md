@@ -52,7 +52,7 @@ oc get applications -n openshift-gitops
 By default the whole workshop is delivered and every platform stack the modules need is
 installed. To run a shorter workshop, set `modulesDisabled` on the order (module numbers or
 slugs) — the disabled modules are hidden from the cockpit and any stack needed only by them is
-skipped, e.g. `modulesDisabled={m19,m20,m21,m22,m23,m24,m25}`. For the MaaS assistant, set
+skipped, e.g. `modulesDisabled={m21,m22,m23,m24,m25}`. For the MaaS assistant, set
 `litemaas.enabled=true` with `litemaas.apiUrl` + `litemaas.apiKey` (Lightspeed auto-skips when
 they are absent). The per-stack `stacks.*` booleans remain only as expert additive overrides.
 
@@ -157,7 +157,7 @@ comments in `values.yaml`).
 | `deployer.domain` / `deployer.apiUrl` | `""` | injected cluster coordinates — never hardcode a domain |
 | `gitops.repoURL` / `.revision` / `.path` | this repo / `main` / `helm/bootstrap` | self-reference for child app sources |
 | `litemaas.enabled` / `.apiUrl` / `.apiKey` / `.model` | `false` / `""` / `""` / `""` | MaaS LLM; Lightspeed installs only when enabled AND apiUrl + apiKey are set, else auto-skips. **`model` empty = discover** from the endpoint — MaaS keys are model-scoped, so a guessed name is a 401 inside the AI modules. A key the endpoint refuses is never staged |
-| `lightspeed` | unset | set `false` to hard-off the assistant while keeping the workshop's own MaaS credential (which four modules' AI beats read). Not the same as `litemaas.enabled=false`, which withholds that credential too |
+| `lightspeed` | unset | set `false` to hard-off the assistant while keeping the workshop's own MaaS credential (which jobs-batch-kueue's AI beat reads). Not the same as `litemaas.enabled=false`, which withholds that credential too |
 | `showroom.ocpVersion` | `""` | the OpenShift release the lab pages name (`{cluster_ocp_version}`). **Deployer-asserted: nothing that renders this chart can read a cluster** (see Known differences). Release-shaped or it is rejected. Empty = pages show a visible placeholder. `ogsr-cockpit-attributes` prints the exact value to set |
 | `argocd.manageControllerResources` / `.controllerResources` | `true` / 6Gi limit, 2Gi request | raise the application-controller above the operator-default 2Gi. **2Gi is OOMKilled before the workshop layer materializes.** Set `false` only when the Argo CD belongs to your organisation and you will raise it yourself; the prior value is recorded before patching so `ogsr-uninstall.sh` restores it |
 | `multi_user.num_users` / `.users` / `.userPrefix` / `.manageHtpasswd` | `5` / `[]` / `user` / `true` | attendee roster; `manageHtpasswd=false` if the base CI provisions userN |
