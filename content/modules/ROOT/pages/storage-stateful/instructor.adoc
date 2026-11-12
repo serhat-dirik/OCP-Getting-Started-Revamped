@@ -3,8 +3,9 @@
 include::partial$version-attributes.adoc[]
 
 // Internal delivery runbook. Timings MEASURED on the build cluster (OCP 4.21.22,
-// ODF/Ceph external mode) as user7 on 2026-07-09 by performing every exercise and timing
-// the rollouts; see "how timing was measured" below.
+// ODF/Ceph external mode) as user7 on 2026-07-09, and re-measured as user5 in the attendee
+// terminal on OCP 4.22.22 on 2026-11-12 (two cold-start runs of the whole lab plus the challenge);
+// see "how timing was measured" below.
 
 This module is built around one emotional beat: attendees *lose a database* to a routine Pod restart, then save it by changing one thing — the volume.
 Optimize the room for that contrast in exercises 2 and 4.
@@ -26,30 +27,32 @@ Add ~10–15 min of concept discussion up front.
 |===
 | # | Exercise group | Attendee time | Measured core
 
-| 1 | Seed the claims database | ~5 min | POST/GET each < 1 s
-| 2 | Lose the data (ephemeral trap) | ~5 min | DB Pod recreate *~15 s*; app recover-restart *~34 s*
-| 3 | Add a PersistentVolumeClaim | ~5 min | PVC `Pending`→`Bound` after Pod schedules *~30–50 s* (provision + attach)
+| 1 | Seed the claims database | ~5 min | all commands *~5 s*
+| 2 | Lose the data (ephemeral trap) | ~5 min | DB Pod recreate *~30 s*; app recover-restart to the Route answering *~16 s*
+| 3 | Add a PersistentVolumeClaim | ~5 min | PVC `Pending`→`Bound` with the new DB Pod ready *~55 s*; app restart + reseed *~25 s*
 | 4 | Prove the data survives | ~5 min | persistent DB Pod recreate *~33 s* (RWO detach+attach)
-| 5 | Inspect the storage chain | ~5 min | read-only, instant
-| 6 | Run a StatefulSet | ~5 min | 2 Pods ordered to `2/2` *~50 s*
-| 7 | Partitioned update | ~5 min | roll one ordinal *~15 s*; finish *~15 s*
-| 8 | Init container + resize | ~5 min | migration *~15 s*; resize 2Gi→3Gi *~15–45 s*
+| 5 | Inspect the storage chain | ~5 min | read-only plus the RWX probe, *~13 s*
+| 6 | Run a StatefulSet | ~5 min | 2 Pods ordered to `2/2` *~60 s*; `pg-sts-0` delete and return *~30 s*
+| 7 | Partitioned update | ~5 min | roll one ordinal *~17 s*; finish *~20 s*
+| 8 | Init container + resize | ~5 min | migration *~3 s* (images cached); resize 2Gi→3Gi *~40 s*
+| – | Challenge (optional) | ~10 min | all three bullets *~2.5 min* of commands
 |===
 
 [NOTE]
 .How this timing was measured
 ====
 The *Measured core* column is real.
-On the build cluster (OCP 4.21.22, OpenShift Data Foundation external Ceph) on 2026-07-09, every exercise was performed as `user7` and the rollouts timed:
+It was first measured on OCP 4.21.22 as `user7` on 2026-07-09, and re-measured on OCP 4.22.22 (OpenShift Data Foundation external Ceph) on 2026-11-12 by running every block of the page as `user5` in the attendee's own terminal, twice from a cold `adm reset`:
 
-* *Ephemeral DB Pod recreate* — delete Pod, new Pod `Ready`: *~15 s* (no volume to attach).
-* *Persistent DB Pod recreate* — same, but the RWO Ceph-RBD volume must detach from the old node and attach to the new: *~33 s*.
+* *Ephemeral DB Pod recreate* — delete Pod to `rollout status` done: *~30 s* (no volume to attach; most of it is the readiness probe).
+* *Persistent DB Pod recreate* — same, but the RWO Ceph-RBD volume must detach from the old node and attach to the new: *~33 s*, and up to ~55 s when the volume is slow to detach.
 This is the honest cost of RWO on this backend; if the Pod lands on the same node it is faster.
-* *App recover-restart* — `rollout restart deploy/parasol-claims` to `Ready`: *~34 s* (Quarkus boot + readiness `initialDelay`).
-* *PVC bind* — `WaitForFirstConsumer` means the PVC stays `Pending` until the new DB Pod schedules; provision + attach + Pod ready measured *~30–50 s*.
-* *StatefulSet* — two Pods created *in order* (0 then 1) to `2/2`: *~50 s*.
-* *Partitioned update* — rolling one ordinal: *~15 s*; the second on `partition:0`: *~15 s*.
-* *Resize* — `2Gi → 3Gi` transitioned through `Resizing`/`FileSystemResizePending` to `3Gi` in *~15–45 s* (Ceph's filesystem-resize step varies by cluster; measured 40 s on one), online, zero restarts.
+* *App recover-restart* — `rollout restart deploy/parasol-claims` until the Route answers `/q/health/ready`: *~16 s* (the Deployment is `Recreate`, so the old Pod stops first; Quarkus boots in ~3 s).
+* *PVC bind* — `WaitForFirstConsumer` means the PVC stays `Pending` until the new DB Pod schedules; provision + attach + Pod ready measured *~55 s*.
+* *StatefulSet* — two Pods created *in order* (0 then 1) to `2/2`: *~60 s*.
+* *Partitioned update* — rolling one ordinal: *~17 s*; the second on `partition:0`: *~20 s*.
+* *Resize* — `2Gi → 3Gi` transitioned through `Resizing`/`FileSystemResizePending` to `3Gi` in *~40 s*, online, zero restarts.
+* *Whole lab* — about 6.5 minutes of commands for exercises 1–8, plus ~2.5 minutes for the challenge.
 
 The *Attendee time* adds reading, the deliberate break-and-fix in exercise 3, and checkpoint overhead.
 ====
@@ -127,9 +130,9 @@ The audience must believe this is normal, because it is; that is why ephemeral s
 After the ephemeral kill, the app returns `500`, not an empty list — because the *table* is gone, not just the rows.
 That is a stronger beat than an empty list; narrate it ("even the schema lived in that volume").
 * *Do not restart the app in the persistent step.*
-The payoff in step 4 is that the app *keeps working* through the DB Pod restart.
+The payoff in step 3 is that the app *keeps working* through the DB Pod restart.
 If you restart the app there, you throw away the contrast.
-Only restart the app in the *ephemeral* recovery (step 2) and in the PVC *setup* (step 3, to build the schema on the new volume).
+Only restart the app in the *ephemeral* recovery (step 1) and in the PVC *setup* (step 2, to build the schema on the new volume).
 * *Keep one terminal, large font.*
 This module is all CLI; there is no console view to switch to.
 
@@ -176,6 +179,13 @@ Say so *before* exercise 3 so nobody spins on it.
 This module was built on ODF/Ceph (default RWO `ceph-rbd`, RWX `cephfs`, expansion on, `WaitForFirstConsumer`).
 On a cloud cluster the default may be EBS/PD (RWO only, often `WaitForFirstConsumer`, expansion on) with *no* RWX at all.
 The lab and verify script *detect* the default class rather than hardcoding it, but the RWX-on-CephFS step (exercise 5) is ODF-specific — on a block-only cluster, say so and skip the probe.
+* *The app survives the database restart because of a module-local pool setting.*
+This module's `parasol-claims` Deployment sets `QUARKUS_DATASOURCE_JDBC_VALIDATE_ON_BORROW=true`, so the connection pool replaces connections to the deleted database Pod instead of failing the first request on one.
+The observability module runs the image default on purpose and teaches that failure, so an attendee who has done both may ask why the app needed a restart there and not here: that setting is the answer, and exercise 4's note shows it.
+The same Deployment uses the `Recreate` strategy, so when the lab restarts the app to rebuild its schema, the broken Pod is gone before the new one starts and no request lands on it.
+* *Every post-restart block waits for the Route.*
+`oc rollout status` returns when the new Pod is ready; the router needs a few more seconds, and during a long database outage the app's readiness check takes it out of rotation.
+The lab's `for … /q/health/ready` line covers both. An attendee who runs a `curl` by hand straight after a restart can see the router's *Application is not available* page; tell them to wait a few seconds and repeat it.
 * *RWO reattach is not instant.*
 Deleting the persistent DB Pod took ~33 s here because the RWO Ceph volume must detach from one node and attach to another.
 If attendees expect the ~15 s ephemeral speed, the wait reads as a hang — it is not.
@@ -186,8 +196,12 @@ If someone edits that back to `drop-and-create`, exercises 2 and 4 stop making s
 * *PVC reclaim on reset is destructive and quota-bound.*
 `ws reset` runs `oc delete all,pvc --all` in `{user}-dev`, which deletes PVCs (reclaim `Delete` → the Ceph volumes go too).
 That is intended.
-Also: each user's PVC quota is *10* — the module uses 3 (claims-db-data + two StatefulSet PVCs), so an attendee who forgets to clean up a challenge PVC can hit the cap.
+Also: each user's PVC quota is *10* — the module uses 3 (claims-db-data + two StatefulSet PVCs), and 4 after the challenge leaves `data-pg-sts-2` behind, so an attendee who keeps experimenting can hit the cap.
 `ws reset` clears it.
+* *CPU quota is the tighter limit.*
+Every container gets a 1500m CPU limit from the project's LimitRange, against a quota of 8 CPUs.
+The claims app, its database and the two StatefulSet Pods take 6, and the challenge's third replica takes the total to 7.5.
+That is why exercise 8 deletes `schema-init-demo` once its logs are read: left running, it holds the 1.5 CPUs the third replica needs, `pg-sts-2` is never created, and `oc rollout status` waits forever (troubleshooting covers it).
 * *Shared Ceph at seat scale.*
 ODF external mode is one Ceph shared across all users.
 Sample volumes are kept to 1–2Gi; at ~30 users that is still ~90 PVCs on one backend.

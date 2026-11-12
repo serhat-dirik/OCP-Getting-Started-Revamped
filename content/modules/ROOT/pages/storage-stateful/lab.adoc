@@ -7,7 +7,8 @@ include::partial$version-attributes.adoc[]
 // [source,sh,role=execute] (click-to-run). Parameterized commands add subs="attributes" to
 // interpolate {user}. Expected-output blocks are byte-faithful captures with no subs, EXCEPT the
 // ones that would otherwise print the capture user's own namespace — those interpolate {user} too.
-// All commands + outputs were performed on OCP 4.21.22 (ODF/Ceph) on 2026-07-09.
+// All commands + outputs were performed on OCP 4.21.22 (ODF/Ceph) on 2026-07-09, and the whole workshop
+// flavor plus the challenge re-performed twice as user5 in the attendee terminal on OCP 4.22.22 on 2026-11-12.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -140,7 +141,7 @@ curl -s -D - -o /dev/null "http://$CLAIMS/api/claims" | grep -i x-total-count
 
 The claim was `Pending` for a moment — the default class waits for the first consumer, so the volume is created where the Pod lands — then `Bound`, and the database came back writing to it instead of to the Pod.
 
-=== 3 · The same restart, the opposite outcome — 1 min
+=== 3 · The same restart, the opposite outcome — 2 min
 
 Delete the database Pod again, exactly as in step 1, and read the claims straight back. The application is not restarted this time.
 
@@ -162,7 +163,7 @@ curl -s -D - -o /dev/null "http://$CLAIMS/api/claims" | grep -i x-total-count
 
 Three claims, through the restart that emptied the database two steps ago. The only difference between the two outcomes is what the `data` volume is.
 
-=== 4 · Where the disk came from — 2 min
+=== 4 · Where the disk came from — 1 min
 
 Follow the chain in the terminal: the claim in the project, the PersistentVolume bound to it, and the StorageClass that created it.
 
@@ -302,7 +303,7 @@ for i in $(seq 1 30); do curl -sf -o /dev/null "http://$CLAIMS/q/health/ready" &
 curl -s "http://$CLAIMS/api/claims" -w '\n[HTTP %\{http_code}]\n'
 ----
 
-You get an *HTTP 500*, not an empty list.
+You get a short `500 - Internal Server Error` page ending in `[HTTP 500]` — not an empty list.
 That is worse than it looks, and it is the point: the database came back so empty that even the *table* is gone — the app can't query a table that no longer exists.
 
 [NOTE]
@@ -483,6 +484,17 @@ done
 curl -s -D - -o /dev/null "http://$CLAIMS/api/claims" | grep -i x-total-count
 ----
 
+The block ends with:
+
+[source,texinfo]
+----
+deployment "parasol-claims" successfully rolled out
+created 201
+created 201
+created 201
+x-total-count: 3
+----
+
 [.checkpoint]
 ****
 ✔ *Verify:* `oc get pvc claims-db-data` shows `Bound`, the `claims-db` Deployment's `data` volume is now a `persistentVolumeClaim`, and the API lists three claims again.
@@ -516,6 +528,15 @@ curl -s -D - -o /dev/null "http://$CLAIMS/api/claims" | grep -i x-total-count
 curl -s "http://$CLAIMS/api/claims" | tr ',' '\n' | grep claimant
 ----
 
+.Expected output
+[source,texinfo]
+----
+x-total-count: 3
+"claimant":"Persistent Pat"
+"claimant":"Durable Dana"
+"claimant":"Lasting Lee"
+----
+
 `x-total-count: 3`, and Persistent Pat, Durable Dana, and Lasting Lee are all there.
 Same Pod deletion as before; this time the app didn't even error, because the data *and* the schema live on the PersistentVolume, not in the Pod.
 
@@ -531,6 +552,7 @@ And this module's claims Deployment tells the app's connection pool to check eac
 oc -n {user}-dev set env deploy/parasol-claims --list | grep VALIDATE
 ----
 
+It prints `QUARKUS_DATASOURCE_JDBC_VALIDATE_ON_BORROW=true`.
 Without that setting, the first request after a database restart fails on a stale connection and the next one succeeds. It is worth checking in your own applications' pool settings.
 ====
 
@@ -794,6 +816,7 @@ oc -n {user}-dev rollout status statefulset/pg-sts
 --
 ====
 
+`rollout status` ends with `partitioned roll out complete: 2 new pods have been updated...` even though you set no partition; that is how `oc` words every finished StatefulSet rollout, and exercise 7 shows what a partition really does.
 Look at what the StatefulSet created — Pods with *ordinal names*, and one PVC *per Pod*:
 
 [source,sh,role=execute,subs="attributes"]
@@ -1035,6 +1058,14 @@ else
   echo "Lesson: expansion is a per-StorageClass opt-in. On a class where allowVolumeExpansion is false, the API server rejects a resize patch outright — no partial resize, no risk — and you'd pick a different class or ask your platform team to enable it."
 fi
 ----
+
+.Expected output — on a class that allows expansion
+[source,texinfo]
+----
+/dev/rbd12      2.0G   46M  1.9G   3% /var/lib/pgsql/data
+StorageClass ocs-external-storagecluster-ceph-rbd allowVolumeExpansion=true
+persistentvolumeclaim/claims-db-data patched
+----
 --
 ====
 
@@ -1064,19 +1095,18 @@ else
 fi
 ----
 
-.Expected output — on a class that allows expansion
+.Expected output — on a class that allows expansion (trimmed: on this cluster the `capacity=2Gi` line repeated for about 35 seconds)
 [source,texinfo]
 ----
-StorageClass ocs-external-storagecluster-ceph-rbd allowVolumeExpansion=true
 capacity=2Gi  conditions=[Resizing=True FileSystemResizePending=True ]
 capacity=2Gi  conditions=[Resizing=True FileSystemResizePending=True ]
 capacity=3Gi  conditions=[none]
-/dev/rbd2       2.9G   46M  2.9G   2% /var/lib/pgsql/data
+/dev/rbd12      2.9G   46M  2.9G   2% /var/lib/pgsql/data
 ----
 
 The volume grew from ~2Gi to ~2.9Gi while the database kept running — the Pod never restarted.
 (Expansion only ever grows a volume; you cannot shrink a PVC.)
-If your class doesn't allow expansion, expect instead a single `StorageClass ... allowVolumeExpansion=false` line and the skip message — the PVC stays at `2Gi`, nothing failed, and the lesson stands: check `allowVolumeExpansion` before you promise online resize to anyone.
+If your class doesn't allow expansion, the CLI tab prints `StorageClass ... allowVolumeExpansion=false` and the skip message, and this block prints its own skip message — the PVC stays at `2Gi`, nothing failed, and the lesson stands: check `allowVolumeExpansion` before you promise online resize to anyone.
 
 [.checkpoint]
 ****
@@ -1085,7 +1115,7 @@ If your StorageClass allows expansion, `oc get pvc claims-db-data` now reports `
 ****
 
 == Challenge (optional)
-⏱ *no hand-holding*
+⏱ *~10 min* · no hand-holding
 
 You have the mechanics.
 Try these on your own:

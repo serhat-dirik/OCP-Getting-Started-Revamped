@@ -3,7 +3,8 @@
 include::partial$version-attributes.adoc[]
 
 // Real entries from performing the module on OCP 4.21.22 / ODF external Ceph
-// (2026-07-09) plus the build-note failure-mode seeds. Format: Symptom / Cause / Fix.
+// (2026-07-09) plus the build-note failure-mode seeds; the 503/missing-claim, mount-path and
+// scale-up entries were reproduced as user5 on OCP 4.22.22 (2026-11-12). Format: Symptom / Cause / Fix.
 
 Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
 
@@ -51,7 +52,7 @@ oc -n {user}-dev set volume deploy/claims-db --add --overwrite --name data \
 
 == The claims API returns HTTP 500 after a database Pod restart
 
-Symptom:: `curl .../api/claims` returns `500 - Internal Server Error`; the app log shows a PostgreSQL error such as `An I/O error occurred while sending to the backend` or `relation "claim" does not exist`.
+Symptom:: `curl .../api/claims` returns `500 - Internal Server Error`; the app log (`oc -n {user}-dev logs deploy/parasol-claims`) shows `relation "claim" does not exist`.
 Cause:: The database came back *empty*.
 If the DB volume was an emptyDir (the entry state), a Pod restart wiped everything — including the schema, so the `claim` table no longer exists.
 The app reuses an existing schema and does not recreate it on its own, so it fails honestly against the empty database.
@@ -71,18 +72,47 @@ If you have *already* added the PVC and still see this, confirm the Pod actually
 oc -n {user}-dev get deploy claims-db -o jsonpath='{.spec.template.spec.volumes[?(@.name=="data")]}{"\n"}'
 oc -n {user}-dev get pvc claims-db-data
 ----
++
+If the log shows `An I/O error occurred while sending to the backend` instead, the app used a pooled connection to a database Pod that no longer exists.
+This module's claims Deployment checks every connection before using it, which prevents that; confirm the setting is still there (`ws reset {module-id}` restores it):
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n {user}-dev set env deploy/parasol-claims --list | grep VALIDATE
+----
+
+== `curl` prints an HTML "Application is not available" page, or a claim goes missing
+
+Symptom:: A `curl` to the claims API prints an HTML page titled *Application is not available* (HTTP 503), a `grep -i x-total-count` prints nothing, or a seeding loop prints `created 503` and the count comes out one short.
+Cause:: The router has no ready Pod to send the request to. Either:
++
+* `$CLAIMS` is empty, because the terminal reconnected and shell variables do not survive that. `curl` then reads `http:///api/claims` as a request to a host named `api`, which reaches the cluster's router under a name no Route serves, and the router answers with that page.
+* The request went out in the seconds after a restart: `oc rollout status` returns as soon as the new Pod is ready, and the router needs a few more seconds to route to it. While the database Pod is gone, the app's readiness check also fails, and after three failures in a row the app is taken out of rotation until the check passes again.
+Fix:: Capture the address again and wait until the app answers through its Route, then repeat the request:
++
+[source,sh,role=execute,subs="attributes"]
+----
+CLAIMS=$(oc -n {user}-dev get route parasol-claims -o jsonpath='{.spec.host}')
+for i in $(seq 1 30); do curl -sf -o /dev/null "http://$CLAIMS/q/health/ready" && break; sleep 2; done
+curl -s -D - -o /dev/null "http://$CLAIMS/api/claims" | grep -i x-total-count
+----
++
+A seeding `POST` that got `503` never reached the app, so nothing was written; send that claim again.
 
 == The database initializes an empty data directory / ignores the PVC
 
 Symptom:: After attaching a PVC, the database starts fresh every time and never keeps data, even though the PVC is `Bound`.
 Cause:: The volume is mounted at the *wrong path*.
-PostgreSQL for RHEL9 stores its data under `/var/lib/pgsql/data`; mount the PVC anywhere else (for example `/var/lib/pgsql`) and the server writes its real data to the container's ephemeral layer while your persistent volume sits unused.
-Fix:: Confirm the mount path is exactly `/var/lib/pgsql/data`:
+PostgreSQL for RHEL9 stores its data under `/var/lib/pgsql/data`.
+Mount the PVC at a path the server does not use — `/var/lib/postgresql/data`, the community PostgreSQL image's path, is the usual copy-paste culprit — and the server writes its real data to the container's ephemeral layer while your persistent volume sits unused.
+(A *parent* path such as `/var/lib/pgsql` is not this failure: the data directory is then inside the volume, so it persists.)
+Fix:: Confirm the mount path, and check which filesystem the data directory is really on — `overlay` is the container's own layer, gone with the Pod:
 +
 [source,sh,role=execute,subs="attributes"]
 ----
 oc -n {user}-dev get deploy claims-db \
   -o jsonpath='{range .spec.template.spec.containers[0].volumeMounts[*]}{.name}{" -> "}{.mountPath}{"\n"}\{end}'
+oc -n {user}-dev exec deploy/claims-db -- df -h /var/lib/pgsql/data | tail -1
 ----
 +
 If it is wrong, re-run the `oc set volume --add --overwrite --name data ... --mount-path=/var/lib/pgsql/data` command with the correct path.
@@ -118,19 +148,38 @@ oc -n {user}-dev delete pvc -l app=pg-sts
 +
 `ws reset {module-id}` does this for you — it purges all PVCs in `{user}-dev` for exactly this reason.
 
-== A StatefulSet Pod is stuck `Pending` on scale-up
+== A StatefulSet Pod never appears on scale-up
 
-Symptom:: After `oc scale statefulset/pg-sts --replicas=3`, `pg-sts-2` stays `Pending`.
-Cause:: Usually one of two things: the new PVC cannot be provisioned (no default StorageClass, or the backend is out of capacity), or the namespace PVC quota is reached (each user's quota here is *10* PVCs).
-Fix:: Check the quota and the new PVC:
+Symptom:: After `oc scale statefulset/pg-sts --replicas=3`, there is no `pg-sts-2` in `oc get pods`, `oc describe pod pg-sts-2` answers `NotFound`, and `oc rollout status statefulset/pg-sts` keeps printing `Waiting for 1 pods to be ready...`.
+Cause:: The StatefulSet controller was refused permission to create the Pod, so there is no Pod to describe; the reason is an event on the StatefulSet.
+In this lab it is almost always the project's *CPU* quota.
+Every container gets a 1500m CPU limit by default, against a quota of 8 CPUs: the claims app, its database and two StatefulSet Pods take 6, and a still-running `schema-init-demo` from exercise 8 takes the total to 7.5, leaving no room for a third replica.
+Less often it is the PVC quota (10 per project) or a volume that cannot be provisioned, which shows as a `Pending` PVC instead.
+Fix:: Read the StatefulSet's events and the quota:
 +
 [source,sh,role=execute,subs="attributes"]
 ----
-oc -n {user}-dev get resourcequota workshop-quota -o jsonpath='pvcs: {.status.used.persistentvolumeclaims}/{.status.hard.persistentvolumeclaims}{"\n"}'
-oc -n {user}-dev describe pod pg-sts-2 | tail -5
+oc -n {user}-dev get events --field-selector involvedObject.name=pg-sts --sort-by=.lastTimestamp | tail -3
+oc -n {user}-dev get resourcequota workshop-quota -o jsonpath='cpu limits: {.status.used.limits\.cpu}/{.status.hard.limits\.cpu}  PVCs: {.status.used.persistentvolumeclaims}/{.status.hard.persistentvolumeclaims}{"\n"}'
 ----
 +
-If you are at the PVC cap, delete PVCs you no longer need (or `ws reset {module-id}`), then scale again.
+The CPU case looks like this:
++
+[source,texinfo]
+----
+6s          Warning   FailedCreate       statefulset/pg-sts   Create Pod pg-sts-2 in StatefulSet pg-sts failed error: pods "pg-sts-2" is forbidden: exceeded quota: workshop-quota, requested: limits.cpu=1500m, used: limits.cpu=7500m, limited: limits.cpu=8
+cpu limits: 7500m/8  PVCs: 4/10
+----
++
+Delete what you no longer need — here the finished init-container demo — and the StatefulSet retries on its own; `pg-sts-2` was running about 80 seconds later on this cluster:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n {user}-dev delete deploy/schema-init-demo
+oc -n {user}-dev rollout status statefulset/pg-sts
+----
++
+If the PVC count is at its cap instead, delete PVCs you no longer need (or `ws reset {module-id}`), then scale again.
 
 == The claims database shows 0 claims right after `ws prep`
 
@@ -142,4 +191,4 @@ Starting empty is what makes the data-loss and data-survival exercises meaningfu
 
 '''
 
-_Last verified on OpenShift 4.22.6 / OpenShift Data Foundation external Ceph (2026-07-31). Previously verified on OpenShift 4.21.22 (2026-07-09)._
+_Last verified on OpenShift 4.22.22 / OpenShift Data Foundation external Ceph (2026-11-12). Previously verified on OpenShift 4.22.6 (2026-07-31) and 4.21.22 (2026-07-09)._
