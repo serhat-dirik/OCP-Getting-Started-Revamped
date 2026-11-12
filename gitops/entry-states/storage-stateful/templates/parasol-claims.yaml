@@ -13,6 +13,16 @@ metadata:
     workshop.redhat.com/owner: ogsr
 spec:
   replicas: 1
+  # Recreate, not RollingUpdate: exercises 2 and 3 restart the app to REBUILD its schema on an empty
+  # database, and the pod being replaced is the broken one (500 on every claims call). Under
+  # RollingUpdate it is still in the router for a few seconds after `rollout status` returns, so the
+  # lab's first POST landed on it and a claim was lost (smoke 2026-11-12: 503/500 then x-total-count 2).
+  # A preStop sleep makes that worse, not better: the old pod keeps answering 500 while the router
+  # drains. With Recreate the old pod is gone before the new one starts, so the lab's
+  # "wait until /q/health/ready answers through the Route" loop can only be satisfied by the new pod
+  # (measured 3/3: 201 201 201). It also frees the surge pod's 1500m from the CPU quota.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: parasol-claims
@@ -46,6 +56,19 @@ spec:
             # create by switching this to drop-and-create; that reseeds 30 claims and breaks the module.
             - name: QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY
               value: update
+            # Exercise 4 deletes the DATABASE pod and proves the app keeps working with no restart.
+            # The image's pool (Agroal) only validates idle connections every 2 minutes, so the first
+            # request after the DB came back failed on a pooled connection to the deleted pod
+            # (JDBCConnectionException, HTTP 500 — smoke 2026-11-12, reproduced 1/1). Validating each
+            # connection as it is borrowed replaces a dead one transparently (measured 3/3: 200,
+            # x-total-count 3). MODULE-LOCAL on purpose: observability-health-scale teaches the
+            # stale-pool failure with the image default, so never move this into apps/.
+            # Property names checked against quarkus-agroal 3.33.3.1 (the version apps/ builds on).
+            - name: QUARKUS_DATASOURCE_JDBC_VALIDATE_ON_BORROW
+              value: "true"
+            # Bounds Connection.isValid() so a peer that vanished without a reset cannot stall a request.
+            - name: QUARKUS_DATASOURCE_JDBC_VALIDATION_QUERY_TIMEOUT
+              value: 2S
           envFrom:
             # POSTGRESQL_USER / _PASSWORD / _DATABASE — the same Secret the DB was initialized with.
             - secretRef:

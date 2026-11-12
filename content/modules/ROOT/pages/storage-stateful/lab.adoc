@@ -48,7 +48,7 @@ It inspects the project first and offers to clear anything left from an earlier 
 
 Every step runs in the *Terminal* tab as `{user}`, in the `{user}-dev` project. Nothing here needs the web console, so enlarge the terminal font beforehand if the output goes to a shared screen.
 
-NOTE: The application's connection pool needs a second or two to reconnect after the database Pod restarts. If the first `curl` after a restart blips, run it once more — it settles immediately. Step 3 deliberately never restarts the application; that it keeps working is the result being shown.
+NOTE: After every restart, the block waits until the claims application answers its readiness check through its Route before it reads or writes, so no request reaches a Pod that is already gone. The application checks each pooled database connection before using it, which is why step 3 needs no application restart; that it keeps working is the result being shown.
 
 CAUTION: Deleting the *persistent* database Pod in step 3 takes around 30 seconds, because a ReadWriteOnce volume has to detach from one node before it attaches to another; the ephemeral Pod in step 1 comes back in about 15. Neither is a hang. After a rehearsal, run `ws prep storage-stateful` again and accept the wipe — the demo has to start with an ephemeral database and no PersistentVolumeClaim.
 ====
@@ -104,6 +104,7 @@ Three claims, in a real PostgreSQL running on the cluster. Now restart the datab
 oc -n {user}-dev delete pod -l app=claims-db
 oc -n {user}-dev rollout status deploy/claims-db
 oc -n {user}-dev rollout restart deploy/parasol-claims && oc -n {user}-dev rollout status deploy/parasol-claims
+for i in $(seq 1 30); do curl -sf -o /dev/null "http://$CLAIMS/q/health/ready" && break; sleep 2; done
 curl -s -D - -o /dev/null "http://$CLAIMS/api/claims" | grep -i x-total-count
 ----
 
@@ -127,6 +128,7 @@ oc -n {user}-dev set volume deploy/claims-db --add --overwrite --name data \
   -t pvc --claim-name=claims-db-data --claim-size=2Gi --mount-path=/var/lib/pgsql/data
 oc -n {user}-dev rollout status deploy/claims-db
 oc -n {user}-dev rollout restart deploy/parasol-claims && oc -n {user}-dev rollout status deploy/parasol-claims
+for i in $(seq 1 30); do curl -sf -o /dev/null "http://$CLAIMS/q/health/ready" && break; sleep 2; done
 for c in '{"claimant":"Persistent Pat","type":"auto","amount":4100}' \
          '{"claimant":"Durable Dana","type":"home","amount":22500}' \
          '{"claimant":"Lasting Lee","type":"life","amount":65000}'; do
@@ -152,6 +154,7 @@ The same Pod restart, the opposite outcome, and no recovery procedure in between
 ----
 oc -n {user}-dev delete pod -l app=claims-db
 oc -n {user}-dev rollout status deploy/claims-db
+for i in $(seq 1 30); do curl -sf -o /dev/null "http://$CLAIMS/q/health/ready" && break; sleep 2; done
 curl -s -D - -o /dev/null "http://$CLAIMS/api/claims" | grep -i x-total-count
 ----
 
@@ -216,6 +219,9 @@ curl -s "http://$CLAIMS/api/claims"
 ----
 
 You get back an empty list, `[]`.
+
+TIP: `CLAIMS` is a shell variable, so it lasts only as long as this terminal session. Each later exercise captures it again in its first block; if your terminal reconnects partway through an exercise, re-run that `CLAIMS=` line.
+
 Now create three claims through the API — Parasol's claims team filing today's work:
 
 [source,sh,role=execute]
@@ -286,11 +292,14 @@ oc -n {user}-dev rollout status deploy/claims-db
 ====
 
 The new Pod is `Running` in seconds — but it started with a *fresh, empty* emptyDir.
-Ask the app for your claims:
+Ask the app for your claims.
+The `for` line waits until the app passes its readiness check through its Route; that check includes the app's database connection, so a pass means the app is up and connected to the new database Pod:
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
-curl -s "http://$CLAIMS/api/claims" -w '\n[HTTP %{http_code}]\n'
+CLAIMS=$(oc -n {user}-dev get route parasol-claims -o jsonpath='{.spec.host}')
+for i in $(seq 1 30); do curl -sf -o /dev/null "http://$CLAIMS/q/health/ready" && break; sleep 2; done
+curl -s "http://$CLAIMS/api/claims" -w '\n[HTTP %\{http_code}]\n'
 ----
 
 You get an *HTTP 500*, not an empty list.
@@ -310,9 +319,11 @@ Recover the app by restarting it so it rebuilds the (empty) schema, then count t
 ----
 oc -n {user}-dev rollout restart deploy/parasol-claims
 oc -n {user}-dev rollout status deploy/parasol-claims
+for i in $(seq 1 30); do curl -sf -o /dev/null "http://$CLAIMS/q/health/ready" && break; sleep 2; done
 curl -s -D - -o /dev/null "http://$CLAIMS/api/claims" | grep -i x-total-count
 ----
 
+The same `for` line again: `rollout status` returns as soon as the new Pod is ready, and the router needs a few more seconds to send traffic to it.
 `x-total-count: 0`.
 Your three claims are gone.
 Confirm the specific claims you created now return `404`:
@@ -456,12 +467,14 @@ claims-db-data   Bound    pvc-0dcf5e0b-7dd7-4230-baba-c3fb1e76b976   2Gi        
 
 `Bound`, with a real PersistentVolume behind it.
 The database now writes to durable storage.
-Restart the app so it builds its schema on the fresh persistent volume, then re-seed your three claims:
+Restart the app so it builds its schema on the fresh persistent volume, wait until the Route answers, then re-seed your three claims:
 
 [source,sh,role=execute,subs="attributes"]
 ----
+CLAIMS=$(oc -n {user}-dev get route parasol-claims -o jsonpath='{.spec.host}')
 oc -n {user}-dev rollout restart deploy/parasol-claims
 oc -n {user}-dev rollout status deploy/parasol-claims
+for i in $(seq 1 30); do curl -sf -o /dev/null "http://$CLAIMS/q/health/ready" && break; sleep 2; done
 for c in '{"claimant":"Persistent Pat","type":"auto","amount":4100}' \
          '{"claimant":"Durable Dana","type":"home","amount":22500}' \
          '{"claimant":"Lasting Lee","type":"life","amount":65000}'; do
@@ -495,14 +508,31 @@ oc -n {user}-dev get pvc claims-db-data -o jsonpath='claims-db-data → {.status
 
 Now read your claims back — with no app restart:
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
+CLAIMS=$(oc -n {user}-dev get route parasol-claims -o jsonpath='{.spec.host}')
+for i in $(seq 1 30); do curl -sf -o /dev/null "http://$CLAIMS/q/health/ready" && break; sleep 2; done
 curl -s -D - -o /dev/null "http://$CLAIMS/api/claims" | grep -i x-total-count
 curl -s "http://$CLAIMS/api/claims" | tr ',' '\n' | grep claimant
 ----
 
 `x-total-count: 3`, and Persistent Pat, Durable Dana, and Lasting Lee are all there.
 Same Pod deletion as before; this time the app didn't even error, because the data *and* the schema live on the PersistentVolume, not in the Pod.
+
+[NOTE]
+.Why the app needed no restart
+====
+Two things carried the app through the database restart on its own.
+While the database Pod was gone, the app's readiness check failed; after three failures in a row OpenShift stops routing requests to the app until the check passes again, and the `for` line waits for that.
+And this module's claims Deployment tells the app's connection pool to check each database connection before handing it out, so connections to the deleted Pod are discarded and replaced instead of failing your first request:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n {user}-dev set env deploy/parasol-claims --list | grep VALIDATE
+----
+
+Without that setting, the first request after a database restart fails on a stale connection and the next one succeeds. It is worth checking in your own applications' pool settings.
+====
 
 [.checkpoint]
 ****
@@ -957,6 +987,14 @@ app starting — schema is already migrated:
 
 The app never had to guard against a missing table — the init container guaranteed the schema first.
 
+The demo has done its job, but its app container is still running (`sleep 3600`), and every running Pod counts against your project's CPU quota.
+Remove it, so the challenge at the end has room for a third StatefulSet Pod:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n {user}-dev delete deploy/schema-init-demo
+----
+
 Now *resize a volume*.
 Your claims database is on a 2Gi PVC.
 Not every StorageClass allows expansion — it's a per-class opt-in (`allowVolumeExpansion`) — so the CLI path below checks your own PVC's class before growing it, rather than assuming.
@@ -1000,10 +1038,13 @@ fi
 --
 ====
 
-If your class allows it, watch the resize progress through its conditions, then land at 3Gi — bounded to 60 seconds so a stuck resize doesn't hang the lab:
+If your class allows it, watch the resize progress through its conditions, then land at 3Gi — bounded to 60 seconds so a stuck resize doesn't hang the lab.
+This block looks up the database Pod and the class again, so it works after either tab:
 
 [source,sh,role=execute,subs="attributes"]
 ----
+DBPOD=$(oc -n {user}-dev get pod -l app=claims-db -o jsonpath='{.items[0].metadata.name}')
+EXPANDABLE=$(oc get sc "$(oc -n {user}-dev get pvc claims-db-data -o jsonpath='{.spec.storageClassName}')" -o jsonpath='{.allowVolumeExpansion}')
 if [ "$EXPANDABLE" = "true" ]; then
   for i in $(seq 1 12); do
     cap=$(oc -n {user}-dev get pvc claims-db-data -o jsonpath='{.status.capacity.storage}')
@@ -1054,9 +1095,14 @@ Run `oc scale statefulset/pg-sts --replicas=3`, watch `pg-sts-2` and `data-pg-st
 * *Feel the reclaim policy.*
 Delete the `pg-sts` StatefulSet with `oc delete statefulset pg-sts`, then run `oc get pvc -l app=pg-sts` — the PVCs are still there.
 That leaked storage is exactly why `ws reset {module-id}` purges PVCs explicitly.
+Now run the exercise 6 block again: `pg-sts-0` and `pg-sts-1` come back on the very same PVCs, and the `schema_history` row from exercise 8 is still in `pg-sts-0`.
 * *Break a mount path.*
-Point a throwaway PostgreSQL Deployment's PVC at the wrong path (say `/var/lib/pgsql`) instead of `/var/lib/pgsql/data`, and watch the database initialize an *empty* data directory — a subtle failure the troubleshooting page explains.
+Point the claims database's `data` volume at `/var/lib/postgresql/data`, the path the community PostgreSQL image uses, instead of `/var/lib/pgsql/data` — the same `oc set volume ... --overwrite --name data` command as exercise 3, with a different `--mount-path`.
+The PVC stays `Bound`, yet the claims API fails: the database initialized an *empty* data directory on the container's own filesystem, and your volume sits unused.
+Put the path back, and your claims return without an app restart; they never left the volume.
+The troubleshooting page shows how to spot this.
 
-When you are done, run `ws verify {module-id}` in the Terminal — or run `ws prep {module-id} --yes` to return your world to a fresh (ephemeral) claims app and start over.
+When you are done, run `ws verify {module-id}` in the Terminal; every check passes once the StatefulSet is back at two replicas and the database is on its proper path.
+Or run `ws prep {module-id} --yes` to return your world to a fresh (ephemeral) claims app and start over.
 
 endif::demo[]
