@@ -59,7 +59,8 @@ rhdh_up() {
   [[ "$HTTP_CODE" == "200" ]]
 }
 
-# A short-lived guest token for the catalog/scaffolder API (guest sign-in is the workshop default).
+# A short-lived guest token for the catalog/scaffolder API. Attendees sign in to the portal through
+# Keycloak; the guest provider stays enabled for API tokens only (platform-portfolio/components/rhdh).
 #
 # GLOBAL, not echo-shaped — the same reason ingress_domain()/rhdh_host()/gitea_host() are global:
 # read as `tok="$(rhdh_guest_token)"` the entire body runs in a SUBSHELL, and the
