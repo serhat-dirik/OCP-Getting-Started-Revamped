@@ -743,12 +743,45 @@ meta_apps() {  # module user → "namespace project" if the module declares atte
   echo "${ns} ${proj//\$\{USER\}/${2}}"
 }
 
+purge_devworkspaces() {  # ns — delete every Dev Spaces workspace in ns and WAIT until it is gone.
+  # Must run BEFORE anything else in that namespace is deleted. A workspace's editor is a
+  # DevWorkspaceTemplate in the same namespace (devspaces-inner-loop's che-code-editor), and the
+  # DevWorkspace operator's mutating webhook re-resolves it on EVERY update of the workspace — the
+  # controller's own finalizer removal included. Delete the template first (a namespace delete, an
+  # entry app's cascade) and that update is refused ("plugin for component editor not found"): the
+  # workspace and its namespace hang in Terminating, and a plain admin finalizer strip is refused too
+  # (reproduced on user13, 2026-11-12, by evicting devspaces-inner-loop with its workspace running).
+  # Deleting the workspace first also lets its per-user storage cleanup Job mount a PVC that is not
+  # yet being deleted. Deletion stops a running workspace itself; no separate stop is needed.
+  local ns="$1" t=0 dw
+  [[ -n "$(oc get devworkspaces.workspace.devfile.io -n "$ns" -o name 2>/dev/null)" ]] || return 0
+  info "deleting the Dev Spaces workspace(s) in ${ns} first, while their editor template still exists…"
+  oc delete devworkspaces.workspace.devfile.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
+  while [[ -n "$(oc get devworkspaces.workspace.devfile.io -n "$ns" -o name 2>/dev/null)" ]]; do
+    if (( t >= 180 )); then
+      # Already wedged (the template went first). The webhook admits exactly one update then: dropping
+      # the editor contribution together with the finalizers. purge_ns deletes the storage right after.
+      for dw in $(oc get devworkspaces.workspace.devfile.io -n "$ns" -o name 2>/dev/null); do
+        oc patch "$dw" -n "$ns" --type merge \
+          -p '{"spec":{"contributions":null},"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
+      done
+      sleep 3
+      [[ -z "$(oc get devworkspaces.workspace.devfile.io -n "$ns" -o name 2>/dev/null)" ]] && break
+      err "Dev Spaces workspace(s) in ${ns} still deleting after ${t}s — inspect: oc get devworkspaces -n ${ns} -o yaml"
+      return 1
+    fi
+    sleep 3; t=$((t+3))
+  done
+  ok "Dev Spaces workspace(s) in ${ns} deleted (${t}s)"
+}
+
 purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve system objects
   # and ONLY the keep-module's entry marker. Preserving ALL ws-entry-* markers let stale
   # markers of long-gone modules survive every reset and false-green marker checks (G4-F9).
   local ns="$1" keep="${2:-}" kind name
   oc get ns "$ns" >/dev/null 2>&1 || return 0
   info "purging user workloads in ${ns}…"
+  purge_devworkspaces "$ns" || true
   # CONCURRENT, not one after another (2026-11-12). Every delete in this subshell is independent and
   # --wait=false, so each `oc` call is just an API round trip; issued in sequence they were 58-69s of
   # an app-security-testing prep on an RHDP cluster. The subshell's `wait` returns only once every
@@ -756,11 +789,10 @@ purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve s
   # A subshell, not a bare `wait`, so it can never block on a background job of its caller.
   (
   oc delete all,pvc --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
-  # CRs 'oc delete all' misses: workspaces (M03+), Tekton runs (M07+), ImagePolicies (M09+) — extend
-  # as modules add types. PipelineRuns cascade to their TaskRuns; deleting them also releases per-run
-  # workspace PVCs. A leftover trusted-supply-chain ImagePolicy (block-unsigned) would otherwise block
-  # the next module's image pulls in this namespace, so purge it too.
-  oc delete devworkspaces.workspace.devfile.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
+  # CRs 'oc delete all' misses: Tekton runs (M07+), ImagePolicies (M09+) — extend as modules add types
+  # (Dev Spaces workspaces went first, above). PipelineRuns cascade to their TaskRuns; deleting them
+  # also releases per-run workspace PVCs. A leftover trusted-supply-chain ImagePolicy (block-unsigned)
+  # would otherwise block the next module's image pulls in this namespace, so purge it too.
   oc delete pipelineruns.tekton.dev --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
   # Pipelines too: `kn func deploy --remote` (serverless-zero-to-hero) leaves its generated
   # <fn>-s2i-upload-pipeline behind. Chart-owned Pipelines (pipelines-fundamentals,
@@ -1087,8 +1119,11 @@ gc_conflicts_evict() {  # user module → rc 0 if anything was evicted or orphan
       info "evicting conflicting entry app ${app} (shares workloads with ${module})…"
       # gc_conflicts reaches here BEFORE any purge, so take the PAC Repositories out first: left to
       # the app's foreground cascade they wedge in deletion (see purge_ns).
+      # Dev Spaces workspaces too, and to completion: the cascade deletes their editor template with
+      # them, which wedges them and their namespace in Terminating (see purge_devworkspaces).
       for ns in $(meta_namespaces "$c" "$user"); do
         oc delete repositories.pipelinesascode.tekton.dev --all -n "$ns" --wait=false >/dev/null 2>&1 || true
+        purge_devworkspaces "$ns" || true
       done
       oc delete application "$app" -n "$ARGO_NS" --wait=true --timeout=180s || true
       evicted=0
