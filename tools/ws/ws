@@ -748,82 +748,91 @@ purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve s
   local ns="$1" keep="${2:-}" kind name
   oc get ns "$ns" >/dev/null 2>&1 || return 0
   info "purging user workloads in ${ns}…"
-  oc delete all,pvc --all -n "$ns" --wait=false >/dev/null 2>&1 || true
+  # CONCURRENT, not one after another (2026-11-12). Every delete in this subshell is independent and
+  # --wait=false, so each `oc` call is just an API round trip; issued in sequence they were 58-69s of
+  # an app-security-testing prep on an RHDP cluster. The subshell's `wait` returns only once every
+  # request has been sent, so purge_ns still finishes before its caller deletes the Application.
+  # A subshell, not a bare `wait`, so it can never block on a background job of its caller.
+  (
+  oc delete all,pvc --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
   # CRs 'oc delete all' misses: workspaces (M03+), Tekton runs (M07+), ImagePolicies (M09+) — extend
   # as modules add types. PipelineRuns cascade to their TaskRuns; deleting them also releases per-run
   # workspace PVCs. A leftover trusted-supply-chain ImagePolicy (block-unsigned) would otherwise block
   # the next module's image pulls in this namespace, so purge it too.
-  oc delete devworkspaces.workspace.devfile.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
-  oc delete pipelineruns.tekton.dev --all -n "$ns" --wait=false >/dev/null 2>&1 || true
+  oc delete devworkspaces.workspace.devfile.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
+  oc delete pipelineruns.tekton.dev --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
   # Pipelines too: `kn func deploy --remote` (serverless-zero-to-hero) leaves its generated
   # <fn>-s2i-upload-pipeline behind. Chart-owned Pipelines (pipelines-fundamentals,
   # app-security-testing, trusted-supply-chain) come back when the entry state re-materializes.
-  oc delete pipelines.tekton.dev --all -n "$ns" --wait=false >/dev/null 2>&1 || true
+  oc delete pipelines.tekton.dev --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
   # PAC Repositories are purged HERE, by the caller, never left to the entry app's cascade: Argo
   # deletes with foreground propagation, and the Pipelines-as-Code webhook then refuses the garbage
   # collector's finalizer removal ("generic-garbage-collector does not have permission to create
   # PipelineRuns"), so the Repository sits in deletion forever and the re-materialized app waits on
   # it until timeout (pipelines-fundamentals reset, measured 2026-11-12). A plain delete adds no
   # finalizer. The chart's Repository comes back with the entry state.
-  oc delete repositories.pipelinesascode.tekton.dev --all -n "$ns" --wait=false >/dev/null 2>&1 || true
-  oc delete imagepolicies.config.openshift.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
+  oc delete repositories.pipelinesascode.tekton.dev --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
+  oc delete imagepolicies.config.openshift.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
   # PodDisruptionBudgets aren't in `oc delete all`; an attendee's leftover observability-health-scale PDB
   # survives reset and then trips the next start's entry verify (found at M12 G1, 2026-07-11).
-  oc delete poddisruptionbudgets.policy --all -n "$ns" --wait=false >/dev/null 2>&1 || true
+  oc delete poddisruptionbudgets.policy --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
   # Same for the observability-health-scale attendee-created PrometheusRule — not in `oc delete all`,
   # survives reset and red-fails the next entry verify ("no PrometheusRule yet") (M12 G3, 2026-07-11 —
   # sibling of the PDB gap).
-  oc delete prometheusrules.monitoring.coreos.com --all -n "$ns" --wait=false >/dev/null 2>&1 || true
+  oc delete prometheusrules.monitoring.coreos.com --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
   # NetworkPolicies aren't in `oc delete all` either; networking-dev-devops's whole lab is attendee-
   # authored netpols (default-deny + precise allows), which survive reset and red-fail the next entry
   # verify ("no default-deny yet") — the exact sibling of the PDB/PrometheusRule gaps above (found at
   # M15 G1, 2026-07-13). Any chart-owned entry netpol is re-created by re-materialize, so this is safe.
-  oc delete networkpolicy --all -n "$ns" --wait=false >/dev/null 2>&1 || true
+  oc delete networkpolicy --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
   # Namespaced Templates aren't in `oc delete all` either; registry-images-catalog-governance's catalog-
   # governance beat adds a Template to the attendee's own namespace (and `ws solve
   # registry-images-catalog-governance` renders one), which survives reset and red-fails the next entry
   # verify ("no custom Template yet") — the exact sibling of the PDB/NetworkPolicy gaps above (found at
   # M17 build, 2026-07-13). Any chart-owned entry Template is re-created by re-materialize.
-  oc delete templates.template.openshift.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
+  oc delete templates.template.openshift.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
   # Istio config CRs the service-mesh-advanced-gateways attendee creates in a mesh namespace aren't in
   # `oc delete all`; a leftover VirtualService/DestinationRule/AuthorizationPolicy/PeerAuthentication/
   # Gateway/EnvoyFilter survives reset and red-fails the next entry verify ("no mesh config yet") — the
   # exact sibling of the PDB/NetworkPolicy/Template gaps above (M18 build, 2026-07-13). No-op on
   # non-mesh clusters (the istio CRDs are absent).
-  oc delete virtualservices.networking.istio.io,destinationrules.networking.istio.io,gateways.networking.istio.io,serviceentries.networking.istio.io,sidecars.networking.istio.io,envoyfilters.networking.istio.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
-  oc delete authorizationpolicies.security.istio.io,peerauthentications.security.istio.io,requestauthentications.security.istio.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
+  oc delete virtualservices.networking.istio.io,destinationrules.networking.istio.io,gateways.networking.istio.io,serviceentries.networking.istio.io,sidecars.networking.istio.io,envoyfilters.networking.istio.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
+  oc delete authorizationpolicies.security.istio.io,peerauthentications.security.istio.io,requestauthentications.security.istio.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
   # Gateway API objects aren't in `oc delete all` either. An attendee's own Gateway (networking-dev-devops
   # lets them create one) survives reset, istiod rebuilds its proxy pods, and the module's entry check
   # "no Gateway yet" goes red. Routes and grants go with it so nothing dangles off a deleted Gateway.
-  oc delete gateways.gateway.networking.k8s.io,httproutes.gateway.networking.k8s.io,grpcroutes.gateway.networking.k8s.io,referencegrants.gateway.networking.k8s.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
+  oc delete gateways.gateway.networking.k8s.io,httproutes.gateway.networking.k8s.io,grpcroutes.gateway.networking.k8s.io,referencegrants.gateway.networking.k8s.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
   # Knative Serving/Eventing CRs the serverless-zero-to-hero attendee creates in {user}-dev aren't in
   # `oc delete all`; a leftover ksvc (Service→Configuration/Revision/Route cascade), Broker, Trigger or
   # PingSource survives reset and red-fails the next entry verify ("a ksvc already exists / eventing
   # already wired") — the exact sibling of the PDB/NetworkPolicy/Template/istio purge gaps above (M19
   # build, 2026-07-13). Deleting the ksvc Service cascades to its Configuration/Revision/Route via owner
   # refs. No-op on clusters without Serverless installed (the serving/eventing CRDs are absent).
-  oc delete services.serving.knative.dev --all -n "$ns" --wait=false >/dev/null 2>&1 || true
-  oc delete triggers.eventing.knative.dev,brokers.eventing.knative.dev,pingsources.sources.knative.dev --all -n "$ns" --wait=false >/dev/null 2>&1 || true
+  oc delete services.serving.knative.dev --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
+  oc delete triggers.eventing.knative.dev,brokers.eventing.knative.dev,pingsources.sources.knative.dev --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
   # Velero (OADP) Backup/Restore CRs the resilience-multicluster-dr lab creates in a resilience namespace
   # aren't in `oc delete all`; a leftover backup/restore/schedule.velero.io — plus the Tech-Preview
   # NonAdmin* self-service CRs (nonadmin{backups,restores,backupstoragelocations}.oadp.openshift.io) —
   # survives reset and red-fails the next entry verify ("a backup already exists"). No-op on clusters
   # without OADP (the CRDs are absent).
-  oc delete backups.velero.io,restores.velero.io,schedules.velero.io,podvolumebackups.velero.io,podvolumerestores.velero.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
-  oc delete nonadminbackups.oadp.openshift.io,nonadminrestores.oadp.openshift.io,nonadminbackupstoragelocations.oadp.openshift.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
+  oc delete backups.velero.io,restores.velero.io,schedules.velero.io,podvolumebackups.velero.io,podvolumerestores.velero.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
+  oc delete nonadminbackups.oadp.openshift.io,nonadminrestores.oadp.openshift.io,nonadminbackupstoragelocations.oadp.openshift.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
   # Skupper v2 (RHSI) CRs the resilience-multicluster-dr attendee creates to link sites aren't in
   # `oc delete all`; a leftover Site/Link/Listener/Connector/AccessGrant/AccessToken survives reset and
   # red-fails the next entry verify — the sibling of the istio/knative purge gaps above. No-op on
   # clusters without RHSI (the skupper.io CRDs absent).
-  oc delete sites.skupper.io,links.skupper.io,listeners.skupper.io,connectors.skupper.io,accessgrants.skupper.io,accesstokens.skupper.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
+  oc delete sites.skupper.io,links.skupper.io,listeners.skupper.io,connectors.skupper.io,accessgrants.skupper.io,accesstokens.skupper.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
   # And STRIP the sidecar-injection labels the service-mesh-advanced-gateways attendee added when
   # enrolling. The {user}-mesh namespace is workshop-layer (survives reset) and keeps its STABLE
   # istio-discovery label, but a leftover istio-injection / istio.io/rev would inject sidecars into the
   # re-materialized "un-meshed" app and red-fail the next entry verify. Harmless no-op on namespaces
   # that never carried them.
-  oc label ns "$ns" istio-injection- istio.io/rev- >/dev/null 2>&1 || true
+  oc label ns "$ns" istio-injection- istio.io/rev- >/dev/null 2>&1 || true &
+  wait
+  )
   # Secrets/ConfigMaps the user created (e.g. template-instantiated DB creds) leak past
   # 'oc delete all' — purge them EXCEPT system objects and the current module's marker.
+  (
   for kind in secret configmap; do
     for name in $(oc get "$kind" -n "$ns" -o name 2>/dev/null); do
       case "$name" in
@@ -833,12 +842,14 @@ purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve s
         # OpenShift Pipelines injects these CA bundles into every namespace ONCE and never recreates them;
         # purged, every later Tekton push to the internal registry fails x509 (measured, user10-dev).
         configmap/config-service-cabundle|configmap/config-trusted-cabundle) ;;
-        */ws-entry-${keep}) [[ -n "$keep" ]] || oc delete "$name" -n "$ns" --wait=false >/dev/null 2>&1 || true;;
-        */ws-entry-*) oc delete "$name" -n "$ns" --wait=false >/dev/null 2>&1 || true;;
-        *) oc delete "$name" -n "$ns" --wait=false >/dev/null 2>&1 || true;;
+        */ws-entry-${keep}) [[ -n "$keep" ]] || { oc delete "$name" -n "$ns" --wait=false >/dev/null 2>&1 || true; } & ;;
+        */ws-entry-*) { oc delete "$name" -n "$ns" --wait=false >/dev/null 2>&1 || true; } & ;;
+        *) { oc delete "$name" -n "$ns" --wait=false >/dev/null 2>&1 || true; } & ;;
       esac
     done
   done
+  wait
+  )
   # Dangling ServiceAccount secret links aren't in `oc delete all` either: M18's Ex4 links the sample
   # pull Secret into the default SA (`oc secrets link … --for=pull`); the loop above deletes the Secret
   # but the SA's imagePullSecrets/secrets entries survive reset and red-fail the next entry verify
@@ -871,6 +882,7 @@ purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve s
   # preserve-set. Field delimiter is '|' NOT tab: IFS tab is whitespace and COALESCES empty fields, which
   # would shift a managed-by/ownerRef value into the owner slot and mis-preserve. Sibling of the SA-unlink gap.
   local rbname rbowner rbmgr rbref
+  (
   for kind in role rolebinding; do
     while IFS='|' read -r rbname rbowner rbmgr rbref; do
       [[ -n "$rbname" ]] || continue
@@ -878,9 +890,11 @@ purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve s
       [[ -n "$rbmgr" ]] && continue
       [[ -n "$rbref" ]] && continue
       case "$rbname" in system:*) continue;; esac
-      oc delete "$kind" "$rbname" -n "$ns" --wait=false >/dev/null 2>&1 || true
+      oc delete "$kind" "$rbname" -n "$ns" --wait=false >/dev/null 2>&1 || true &
     done < <(oc get "$kind" -n "$ns" -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.metadata.labels.workshop\.redhat\.com/owner}{"|"}{.metadata.labels.app\.kubernetes\.io/managed-by}{"|"}{.metadata.ownerReferences[0].kind}{"\n"}{end}' 2>/dev/null)
   done
+  wait
+  )
   ok "purge requested in ${ns}"
 }
 
