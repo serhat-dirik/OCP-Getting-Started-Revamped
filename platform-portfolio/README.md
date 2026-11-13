@@ -66,7 +66,8 @@ Fourteen stacks. Each is a group of components installed and kept in sync togeth
 | `appsec` | SonarQube | Static analysis in a pipeline |
 | `trust` | RHACS (Central + SecuredCluster), Trusted Artifact Signer, Tekton Chains signing key, Zero Trust Workload Identity Manager (SPIRE; Fulcio trusts its issuer) | Image scanning, signing (key-based and keyless by a workload's SPIFFE identity), attestation and admission control. ZTWIM needs a connected cluster |
 | `mta` | Migration Toolkit for Applications | Legacy application analysis |
-| `resilience` | OADP (backup/restore), Service Interconnect | Backup and cross-site connectivity |
+| `resilience` | Service Interconnect (Skupper v2) | Cross-site connectivity |
+| `backup` | OADP (backup/restore to an in-cluster S3 bucket) | Namespace backup and restore. Needs ODF; no workshop module installs it |
 | `ai-assist` | OpenShift Lightspeed | In-console AI assistant. Needs a model endpoint — see `components/openshift-lightspeed/README.md` |
 | `trust-demo` | RHTPA (Trusted Profile Analyzer) | Optional add-on to `trust`; off by default |
 

@@ -81,7 +81,7 @@ Blockers 1 and 2 are hard stops. Blocker 3 is a silent one. **None of this is a 
 every manifest is correct and was proven on a cluster (below); what is missing is the automation that
 would make the proven thing install itself.
 
-The contrast worth studying is `components/oadp`, which is **wired** (the `resilience` stack) and solves
+The contrast worth studying is `components/oadp`, which is **wired** (the `backup` stack) and solves
 the identical NooBaa-OBC-to-Secret problem: it ships `bsl-glue.yaml`, a sync-hook Job that reads the OBC's
 ConfigMap and Secret and writes Velero's `cloud-credentials` automatically. This component was never given
 that Job. That is the entire distance between "proven once, by hand" and "installs unattended."

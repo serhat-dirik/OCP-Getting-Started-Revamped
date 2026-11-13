@@ -1,31 +1,31 @@
-# stacks/resilience — M22 Resilience, Multi-Cluster & DR
+# stacks/resilience — Resilience, Multi-Cluster & DR
 
-app-of-apps installed with `--stacks resilience`. Two children:
+App-of-apps installed with `--stacks resilience`. One child:
 
-| App | Entitlement | Default | Purpose |
-|---|---|---|---|
-| `pp-oadp` (`components/oadp`) | `[OCP]` | **on** | OADP/Velero + in-cluster NooBaa S3 → backup / restore an app namespace incl. PVC data |
-| `pp-service-interconnect` (`components/service-interconnect`) | `[ADD-ON]` | **off (commented out)** | Skupper v2 → cross-site L7 connectivity for M22's optional section |
+| App | Entitlement | Purpose |
+|---|---|---|
+| `pp-service-interconnect` (`components/service-interconnect`) | `[ADD-ON]` | Skupper v2: cross-site L7 connectivity for the module's optional section |
 
-## Enable the RHSI add-on
-
-Only on a cluster whose catalog offers Skupper **v2** (channel `stable-2`):
-
-```
-oc get packagemanifest skupper-operator -o jsonpath='{range .status.channels[*]}{.name}{"\n"}{end}' | grep stable-2
-```
-
-If present, uncomment `- apps/service-interconnect.yaml` in `kustomization.yaml`. If absent (e.g. Cluster 2
-/ km7vw, which tops out at `stable-1.9`), leave it off — OADP-only resilience is fully functional.
+OADP (backup and restore) moved to its own `backup` stack on 2026-11-13 — no module uses it, and its ODF
+prerequisite held `pp-oadp` Missing on every cluster without ODF. See `stacks/backup/README.md`.
 
 ## Prerequisites
 
-- **ODF / MCG (NooBaa)** for the in-cluster S3 backup target (`components/oadp` README).
-- Synthetic node labels `workshop.redhat.com/zone={a,b,c}` for the M22 chaos-drill zone-spread narrative
-  are applied by `bootstrap/install.sh` (workshop substrate, not the portfolio).
+- A catalog that offers Skupper **v2** (channel `stable-2` from `redhat-operators`):
+
+  ```
+  oc get packagemanifests -n openshift-marketplace --field-selector=metadata.name=skupper-operator \
+    -o json | jq -r '.items[]|select(.status.catalogSource=="redhat-operators").status.channels[].name' | grep stable-2
+  ```
+
+  Without it (e.g. a catalog that tops out at `stable-1.9`), don't install this stack. The module's core
+  labs run over the `mesh` stack and need nothing here.
+- Synthetic node labels `workshop.redhat.com/zone={a,b,c}` for the chaos-drill zone-spread narrative are
+  applied by `bootstrap/install.sh` (workshop substrate, not the portfolio).
 
 ## Bootstrap wiring
 
-`bootstrap/install.sh` appends `resilience` to the installed stacks when `resilience: true` in `vars.yaml`
-(opt-in, like `auth`). The workshop layer then adds per-user `{user}-resilience` / `{user}-site-b`
-namespaces (`gitops/workshop-config/templates/per-user-resilience.yaml`) and the M22 entry state.
+`bootstrap/install.sh` adds `resilience` when an enabled module lists it in `modules.yaml`
+(resilience-multicluster-dr does), or when `resilience: true` is set in `vars.yaml`. The workshop layer then
+adds per-user `{user}-resilience` / `{user}-site-b` namespaces
+(`gitops/workshop-config/templates/per-user-resilience.yaml`) and the module's entry state.

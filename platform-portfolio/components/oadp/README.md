@@ -2,8 +2,8 @@
 
 Installs the **OADP operator** (`redhat-oadp-operator`, channel `stable`, OwnNamespace in `openshift-adp`)
 and a **`DataProtectionApplication`** wired to an **in-cluster NooBaa (ODF MCG) S3 bucket** — no external
-AWS S3 required. Backs the M22 "Resilience, Multi-Cluster & DR" module (backup / restore an app namespace
-incl. PVC data). Entitlement `[OCP]` (included with an OpenShift subscription).
+AWS S3 required: back up and restore an app namespace, PVC data included. Installed by the `backup` stack;
+no workshop module uses it. Entitlement `[OCP]` (included with an OpenShift subscription).
 
 ## What it creates
 
@@ -35,5 +35,5 @@ component uses `[openshift, csi, aws]`. Without `aws`, Velero cannot read/write 
 
 ## Reusability
 
-`--stacks resilience` on any OCP 4.20+ cluster **with ODF** installs this cleanly. Verified against OADP
+`--stacks backup` on any OCP 4.20+ cluster **with ODF** installs this cleanly. Verified against OADP
 1.5.7 on OCP 4.21.22.

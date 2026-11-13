@@ -1085,8 +1085,8 @@ STACKS="core-devtools,batch,progressive-delivery"
 # auth stack (Red Hat build of Keycloak) for securing-apps-keycloak. Workshop-agnostic; per-user realms are seeded by the
 # workshop layer below (sso.enabled). Its own OwnNamespace operator never touches a cluster login IdP.
 [[ "$AUTH" == "true" || "$CIDP_PROVISION" == "true" ]] && STACKS="${STACKS},auth"
-# resilience stack (OADP/Velero + in-cluster NooBaa S3) for resilience-multicluster-dr. Opt-in; PREREQ ODF/MCG for the S3 target.
-# The RHSI (Skupper v2) add-on stays commented out in the stack unless the catalog offers channel stable-2.
+# resilience stack (Service Interconnect / Skupper v2) for resilience-multicluster-dr's add-on section; needs a
+# catalog with skupper-operator channel stable-2. OADP is NOT here: it is the `backup` stack, which no module uses.
 [[ "$RESILIENCE" == "true" ]] && STACKS="${STACKS},resilience"
 # Elective stacks for the D-block / DevSecOps modules. Each is a plain portfolio stack; prereqs
 # (if any) are documented in the stack's own kustomization. Without these, the matching modules

@@ -25,5 +25,5 @@ Cluster 2 (km7vw) offers `skupper-operator` from the Red Hat catalog with channe
 oc get packagemanifest skupper-operator -o jsonpath='{range .status.channels[*]}{.name}{"\n"}{end}' | grep stable-2
 ```
 
-That is why `stacks/resilience` leaves this app **commented out** (opt-in) — OADP-only resilience installs
-cleanly everywhere; RHSI is enabled where the catalog supports v2.
+That is why the `resilience` stack (this app is its only child) belongs only on a cluster whose catalog
+supports v2. The module's core labs run over the `mesh` stack and need nothing from it.
