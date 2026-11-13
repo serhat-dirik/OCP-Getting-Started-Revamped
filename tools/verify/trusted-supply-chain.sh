@@ -353,7 +353,7 @@ else
         || hint "exercise 1: clone your fork's seed-vulnerable branch to ~/parasol-claims and run the cyclonedx makeBom command"
       check "exercise 4: your SBOM is signed keylessly and Rekor holds the receipt (~/sbom.bundle)" keyless_bundle_recorded \
         || { hint "exercise 4, step 1 (trust root): export PATH=\"\$HOME/bin:\$PATH\"; TUF=https://tuf-trusted-artifact-signer.\$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}'); cosign initialize --mirror=\"\$TUF\" --root=\"\$TUF/root.json\""
-             hint "exercise 4, step 2 (identity): your signer pod must be Running in ${NS} with the label workshop.redhat.com/spiffe-signer=true and the csi.spiffe.io volume — oc get pod sbom-signer -n ${NS} --show-labels"
+             hint "exercise 4, step 2 (identity): your signer pod must be Running in ${NS} as service account pipeline and mount the csi.spiffe.io volume — that mount is what gets it an identity. oc get pod sbom-signer -n ${NS} -o jsonpath='{.status.phase} {.spec.serviceAccountName}'"
              hint "exercise 4, step 3 (sign + log, ONE block — the token lives 5 minutes): TOKEN=\$(oc exec sbom-signer -n ${NS} -- /spire-agent api fetch jwt -audience sigstore -socketPath /spiffe-workload-api/spire-agent.sock -output json | jq -r '.[0].svids[0].svid'); cd ~/parasol-claims && cosign sign-blob -y --identity-token=\"\$TOKEN\" --bundle ~/sbom.bundle target/parasol-claims-sbom.json"; }
       check "exercise 4: the signing certificate names YOUR workload (SPIFFE ID …/ns/${NS}/sa/…)" keyless_bundle_is_mine \
         || hint "the bundle was signed by another identity — an older run, or a token fetched from a pod outside ${NS}. Sign again with a token from your own sbom-signer pod (exercise 4, steps 2–3)"
