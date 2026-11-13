@@ -31,6 +31,18 @@ include::partial$version-attributes.adoc[]
 // claims-unsigned SignatureValidationFailed "A signature was required, but no signature exists"; the
 // Challenge's signed :candidate refused "Signature for identity … is not accepted". Ex 4's keyless
 // sign-blob was NOT re-run on 5vqxc (it mints a ServiceAccount token); cosign initialize + loginfo were.
+// 2026-11-13, as user2 in user2's own terminal pod on the dev cluster (OCP 4.22.22, Zero Trust Workload
+// Identity Manager 1.1.3 / SPIRE agent 1.14.9, RHTAS 1.5.1, cosign v3.0.4): ex 4 rewritten for keyless
+// signing with a SPIFFE workload identity (owner's option A: the attendee's pod signs; Chains stays
+// key-based, so ex 1-3, 5 and the Challenge are unchanged). Its code blocks are the block that ran green,
+// split into steps: sbom-signer Ready in seconds (image pre-pulled), token on try 1, signed in 2 s, one
+// clean SAN line naming user2-cicd, Verified OK, user9's identity refused (rc 1). Measured traps the
+// blocks encode: the binary is /spire-agent (not on PATH); `aud` is an array; protojson drops
+// logIndex when it is 0 (hence `// "0"`); the naive SAN grep prints two junk-suffixed lines (hence the
+// anchored grep + sort -u). ZTWIM's fallback ClusterSPIFFEID gives ANY pod mounting csi.spiffe.io an
+// identity: the spiffe-signer label is our explicit registration, never the grant. Two additions beyond
+// the run: `${TOKEN:?…}` (an empty token must not drop cosign into an interactive OIDC flow) and the
+// NEIGHBOUR guard (user9 would otherwise verify their own identity).
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -303,7 +315,7 @@ No, that is the design. The scan runs after the build, because an image has to e
 Three different facts. The signature proves the image is intact and came from you. The attestation is signed provenance: the builder, the build type, the build tool, the timestamps, as a SLSA statement. The SBOM is what is inside — every component and version. Tekton Chains produces the first two automatically; the build produces the SBOM.
 
 *Key-based or keyless signing — which should we use?*::
-Key-based signing is deterministic and needs no per-build identity, which makes it the simpler, sufficient choice for a controlled build system like this one; the private key lives in the cluster and anyone verifies with the public key, offline. Keyless removes the long-lived key: Trusted Artifact Signer issues a short-lived certificate bound to the build's own identity and records the signature in the transparency log. Reach for keyless when you need public verifiability or per-identity signing.
+Key-based signing is deterministic and needs no per-build identity, which makes it the simpler, sufficient choice for a controlled build system like this one; the private key lives in the cluster and anyone verifies with the public key, offline. Keyless removes the long-lived key: Trusted Artifact Signer issues a short-lived certificate bound to an identity the signer proves, and records the signature in the transparency log. On OpenShift that identity can be a workload identity: the Zero Trust Workload Identity Manager gives a pod a SPIFFE ID naming its namespace and service account, attested on the node, so the certificate names the workload that signed and no secret changes hands. Reach for keyless when you need public verifiability or per-identity signing.
 
 *How does the transparency log actually help?*::
 It makes signing auditable by someone outside your organization. A key-based signature proves "signed with a key we hold". An entry in the log proves "signed by this identity, at this time, on an append-only record that nobody — including us — can quietly alter". That is what "prove it" usually means in an audit.
@@ -863,62 +875,156 @@ You have now seen the three artifacts of a trustworthy image, each answering a d
 ✔ *Verify:* `parasol-claims-trusted` shows `.sig` and `.att` tags beside `latest`, and `parasol-claims` shows its own pair beside your `candidate`; `cosign verify-attestation` confirms the attestation's signature; and `cosign download attestation` yields a SLSA provenance predicate naming `buildType: tekton.dev/v1/TaskRun` and `builder: https://tekton.dev/chains/v2`.
 ****
 
-== 4. Keyless signing and the transparency log
-⏱ *~10 min* · sign the SBOM with a short-lived identity and find it in Rekor
+== 4. Keyless signing with a workload identity, and the transparency log
+⏱ *~12 min* · give a pod a SPIFFE identity, sign the SBOM with it, and find your own entry in Rekor
 
 The signature you verified uses a *cosign key pair* (the private key lives in the cluster).
-The enterprise alternative is *keyless* signing: *Red Hat Trusted Artifact Signer* issues a *short-lived certificate* tied to your build identity (via *Fulcio*), and records every signature in a public, append-only *transparency log* (*Rekor*) — so there is no long-lived key to steal, and no signature can be quietly backdated or hidden.
+The enterprise alternative is *keyless* signing: *Red Hat Trusted Artifact Signer* issues a *short-lived certificate* (via *Fulcio*) to a signer that proves an identity, and records every signature in a public, append-only *transparency log* (*Rekor*) — so there is no long-lived key to steal, and no signature can be quietly backdated or hidden.
 
-You will sign your *SBOM* keylessly and then find its record in the log.
-First point cosign at the RHTAS trust root, and mint a short-lived *identity token* (a Kubernetes service-account token — the identity Fulcio issues a certificate for):
+A keyless signature is only as good as the identity behind it, and here that identity belongs to a *workload*, not a person.
+*SPIFFE* (Secure Production Identity Framework for Everyone) names a workload `spiffe://<trust domain>/ns/<namespace>/sa/<service account>`.
+On this cluster the *Zero Trust Workload Identity Manager* runs *SPIRE* (the SPIFFE Runtime Environment) on every node, and SPIRE hands that name to a pod only after checking, on the node, which namespace and service account the pod really runs as.
+Fulcio trusts SPIRE as an identity issuer, so the certificate that signs your SBOM carries your workload's SPIFFE ID — and nobody handed your pod a key or a password to make that happen.
+
+*Set up.*
+Point cosign at the RHTAS trust root, and read the two values that name identities on this cluster: the issuer Fulcio trusts, and the SPIFFE *trust domain* (on this cluster, its apps domain).
+Both are read from the cluster, never typed:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
+export PATH="$HOME/bin:$PATH"
 NS={user}-cicd
 REKOR=https://rekor-server-trusted-artifact-signer.{cluster_domain}
 TUF=https://tuf-trusted-artifact-signer.{cluster_domain}
+ISSUER=$(oc get spireoidcdiscoveryprovider cluster -o jsonpath='{.spec.jwtIssuer}')
+TD=$(oc get zerotrustworkloadidentitymanager cluster -o jsonpath='{.spec.trustDomain}')
 cosign initialize --mirror=$TUF --root=$TUF/root.json
-TOKEN=$(oc create token pipeline --audience trusted-artifact-signer -n $NS)
+echo "issuer: $ISSUER"
+echo "trust domain: $TD"
 ----
 
 .Expected output
 [source,texinfo]
 ----
 WARNING: Fetching initial root from URL without providing its checksum is deprecated and will be disallowed in a future Cosign release. Please provide the initial root checksum via the --root-checksum argument.
+issuer: https://oidc-discovery.<cluster-domain>
+trust domain: <cluster-domain>
 ----
 
 The warning is cosign v3 asking you to pin the trust root's checksum; initialization still completes (troubleshooting has the details).
 
-Now *sign the SBOM* keylessly.
-cosign gets a certificate from Fulcio for your identity, signs, and uploads the record to Rekor — writing a *bundle* (certificate + signature + log proof) beside the file:
+*Give a workload an identity.*
+Create a pod in your project that runs as the `pipeline` service account and mounts the SPIFFE CSI volume (`csi.spiffe.io`), the socket through which SPIRE hands out identities.
+Its image is the one SPIRE's own agent runs, read from the cluster, because it carries the `spire-agent` client you will ask for a token with:
 
 [source,sh,role=execute]
 ----
+SPIRE_IMG=$(oc get ds spire-agent -n zero-trust-workload-identity-manager -o jsonpath='{.spec.template.spec.containers[0].image}')
+oc apply -n $NS -f - <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sbom-signer
+  labels:
+    workshop.redhat.com/spiffe-signer: "true"
+spec:
+  serviceAccountName: pipeline
+  containers:
+    - name: signer
+      image: ${SPIRE_IMG}
+      command: ["/bin/sh", "-c", "sleep infinity"]
+      volumeMounts:
+        - name: spiffe-workload-api
+          mountPath: /spiffe-workload-api
+          readOnly: true
+  volumes:
+    - name: spiffe-workload-api
+      csi:
+        driver: csi.spiffe.io
+        readOnly: true
+EOF
+oc wait pod/sbom-signer -n $NS --for=condition=Ready --timeout=120s
+----
+
+.Expected output
+[source,texinfo]
+----
+pod/sbom-signer created
+pod/sbom-signer condition met
+----
+
+[NOTE]
+.What gave this pod its identity, and what keeps it yours
+====
+Nothing in that manifest is a credential.
+The operator registers *every* pod that mounts the `csi.spiffe.io` volume, so any pod can ask SPIRE for an identity; the `workshop.redhat.com/spiffe-signer` label only matches the workshop's own, explicit registration of signer pods.
+What a pod *cannot* choose is *which* identity it gets: SPIRE attests the namespace and service account on the node, so this pod only ever receives `…/ns/{user}-cicd/sa/pipeline`.
+To hold a neighbour's identity you would have to run a pod in their namespace, and RBAC does not let you.
+====
+
+*Fetch the identity token and sign, in one block.*
+The token SPIRE issues lives *five minutes*, so the fetch and the signature stay together: if you get distracted, run the whole block again and it fetches a fresh one.
+The loop retries for up to a minute in case SPIRE has not registered your pod yet (it prints `no identity issued yet — retry N` while it waits).
+The `jq` line decodes the token so you can read whom it names; then cosign gets a certificate from Fulcio for that identity, signs, and uploads the record to Rekor, writing a *bundle* (certificate + signature + log proof) beside the file:
+
+[source,sh,role=execute]
+----
+TOKEN=""
+for i in $(seq 1 12); do
+  TOKEN=$(oc exec sbom-signer -n $NS -- /spire-agent api fetch jwt -audience sigstore \
+    -socketPath /spiffe-workload-api/spire-agent.sock -output json 2>/dev/null | jq -r '.[0].svids[0].svid // empty')
+  [ -n "$TOKEN" ] && break
+  echo "no identity issued yet — retry $i"; sleep 5
+done
+echo "$TOKEN" | jq -R 'split(".")[1] | @base64d | fromjson | {sub, aud, exp}'
 cd ~/parasol-claims
-cosign sign-blob -y --identity-token="${TOKEN:?is empty - run the trust-root block above again}" \
-  --bundle ~/sbom.bundle target/parasol-claims-sbom.json > /dev/null \
+cosign sign-blob -y --identity-token="${TOKEN:?no identity token - see troubleshooting}" --bundle ~/sbom.bundle target/parasol-claims-sbom.json > /dev/null \
   && echo "signed; bundle written to ~/sbom.bundle"
 ----
 
-The signature is now in the transparency log.
-*Find it* — search Rekor for your artifact, and read the log's growth:
+.Expected output (your `exp` differs)
+[source,texinfo,subs="attributes+"]
+----
+{
+  "sub": "spiffe://<cluster-domain>/ns/{user}-cicd/sa/pipeline",
+  "aud": [
+    "sigstore"
+  ],
+  "exp": <a Unix time about five minutes from now>
+}
+signed; bundle written to ~/sbom.bundle
+----
+
+`sub` is your workload's SPIFFE ID: your namespace, your `pipeline` service account.
+`aud` is `sigstore`, the audience Fulcio accepts, and `exp` is five minutes after the token was minted — by then the signature is long done.
+
+*Find your entry.*
+Everyone in the room is writing to the same log, and one SBOM looks much like another, so do not search the log for "an SBOM".
+Read your entry's *log index* straight from your own bundle and fetch exactly that entry, then read the identity in the certificate Fulcio issued:
 
 [source,sh,role=execute]
 ----
-rekor-cli search --rekor_server $REKOR --artifact target/parasol-claims-sbom.json
+IDX=$(jq -r '.verificationMaterial.tlogEntries[0].logIndex // "0"' ~/sbom.bundle)
+rekor-cli get --rekor_server $REKOR --log-index "$IDX" | grep -E '^(Index|IntegratedTime|UUID):'
+jq -r '.verificationMaterial.certificate.rawBytes' ~/sbom.bundle | base64 -d \
+  | grep -aoE 'spiffe://[a-z0-9.-]+/ns/[a-z0-9-]+/sa/[a-z]+' | sort -u
 rekor-cli loginfo --rekor_server $REKOR | grep -E 'Tree Size'
 ----
 
-.Expected output (your UUID differs; the log is shared and append-only, so the tree size is a running total)
-[source,texinfo]
+.Expected output (your index, time and UUID differ; the log is shared and append-only, so the tree size is a running total)
+[source,texinfo,subs="attributes+"]
 ----
-Found matching entries (listed by UUID):
-<a 64-character entry UUID>
+Index: <your log index>
+IntegratedTime: <when Rekor recorded your entry>
+UUID: <your entry's UUID>
+spiffe://<cluster-domain>/ns/{user}-cicd/sa/pipeline
 Active Tree Size:       <a running total — your signature is now one of them>
 Total Tree Size:        <a running total — your signature is now one of them>
 ----
 
-That UUID is a permanent, tamper-evident record: *this artifact was signed by this identity at this time.*
+The `// "0"` matters once per log: the bundle leaves the index out when it is zero, which happens only to the very first entry a fresh log records.
+The SPIFFE ID line is the certificate's *Subject Alternative Name*: Fulcio copied it from your token, so the receipt names the workload that signed.
+That entry is a permanent, tamper-evident record: *this artifact was signed by this workload, at this time.*
 Anyone can audit it without contacting you.
 
 // Captured 2026-08-01 from the Rekor Search UI, which is PUBLIC — no login, no session, no token.
@@ -931,14 +1037,15 @@ Anyone can audit it without contacting you.
 .The transparency-log receipt in the Rekor Search UI: one entry, its log index, when it was integrated, and the short-lived certificate that signed it
 image::trusted-supply-chain/trusted-supply-chain-04-rekor-entry.png["Rekor Search UI, branded Red Hat Trusted Artifact Signer, searched by Hash and reporting \"Showing 1 - 1 of 1\". The result card gives the Entry UUID, Type hashedrekord, Log Index, and an Integrated time timestamp, then the searched sha256 hash of the SBOM, the signature, and the decoded Public Key Certificate. In the certificate, Issuer reads \"O=Parasol Workshop, CN=fulcio.trusted-artifact-signer\" and the Validity window is only ten minutes wide — Not Before and Not After are minutes apart. That narrow window is the point: the certificate that signed this SBOM had already expired, and the log entry is still permanently verifiable."]
 
-Finally, *verify the keyless signature* — cosign checks the certificate identity, the issuer, and the log proof from the bundle:
+*Verify.*
+cosign checks the certificate's identity and issuer, and the log proof, from the bundle.
+Pin your own workload's identity:
 
-[source,sh,role=execute,subs="attributes+"]
+[source,sh,role=execute]
 ----
 cosign verify-blob --bundle ~/sbom.bundle \
-  --certificate-identity=https://kubernetes.io/namespaces/{user}-cicd/serviceaccounts/pipeline \
-  --certificate-oidc-issuer=https://kubernetes.default.svc \
-  ~/parasol-claims/target/parasol-claims-sbom.json
+  --certificate-identity "spiffe://$TD/ns/$NS/sa/pipeline" \
+  --certificate-oidc-issuer "$ISSUER" target/parasol-claims-sbom.json
 ----
 
 .Expected output
@@ -947,7 +1054,24 @@ cosign verify-blob --bundle ~/sbom.bundle \
 Verified OK
 ----
 
-`Verified OK`: the SBOM was signed by the `pipeline` identity in your namespace, and Rekor has the receipt.
+*Try a neighbour's identity.*
+The same check, pinned to another attendee's workload (`user9-cicd`, or `user8-cicd` if you are `user9`):
+
+[source,sh,role=execute]
+----
+NEIGHBOUR=user9-cicd; [ "$NS" = "$NEIGHBOUR" ] && NEIGHBOUR=user8-cicd
+cosign verify-blob --bundle ~/sbom.bundle \
+  --certificate-identity "spiffe://$TD/ns/$NEIGHBOUR/sa/pipeline" \
+  --certificate-oidc-issuer "$ISSUER" target/parasol-claims-sbom.json 2>&1 | tail -1
+----
+
+.Expected output (sample — read the end: what cosign expected, and what the certificate holds)
+[source,texinfo,subs="attributes+"]
+----
+Error: failed to verify certificate identity: no matching CertificateIdentity found, last error: expected SAN value "spiffe://<cluster-domain>/ns/user9-cicd/sa/pipeline", got "spiffe://<cluster-domain>/ns/{user}-cicd/sa/pipeline"
+----
+
+`Verified OK` for you, refused for your neighbour: the signature belongs to one workload, in one namespace, and the transparency log says so publicly.
 
 [NOTE]
 .Why sign the SBOM, and not push the keyless signature onto the image
@@ -960,7 +1084,7 @@ You can browse every entry in this log on the *Rekor Search* page of the Trusted
 
 [.checkpoint]
 ****
-✔ *Verify:* `cosign sign-blob` recorded your SBOM in Rekor; `rekor-cli search --artifact` returns a matching entry UUID and `loginfo` shows the tree grew; and `cosign verify-blob --bundle` returns *"Verified OK"* against your namespace's `pipeline` identity and the `kubernetes.default.svc` issuer.
+✔ *Verify:* `sbom-signer` is `Running` in `{user}-cicd`; the decoded token's `sub` is `spiffe://…/ns/{user}-cicd/sa/pipeline`; `rekor-cli get` returns your entry by the log index in `~/sbom.bundle`, and the certificate's SPIFFE ID names `{user}-cicd`; and `cosign verify-blob` returns *"Verified OK"* for your own identity and refuses your neighbour's (`expected SAN value … got …`).
 ****
 
 == 5. Only signed images run: admission control

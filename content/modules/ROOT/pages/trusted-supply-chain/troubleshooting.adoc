@@ -10,6 +10,10 @@ include::partial$version-attributes.adoc[]
 // gzip error (seen before the install served the client server), Tree Size 0 and the Rekor Search 503
 // were all observed in the attendee-admission rework; the old "ImagePolicy is forbidden" entry is gone
 // with the instructor demo it explained.
+// 2026-11-13 (user2, dev cluster, OCP 4.22.22 / ZTWIM 1.1.3 / RHTAS 1.5.1): exercise 4 moved to a SPIFFE
+// workload identity. Observed in that run: /spire-agent is not on the image's PATH. The other five
+// identity entries (no identity issued, expired token, identity mismatch, unknown authority, CSI mount)
+// are the failure modes the design and the install hooks guard against (plan §2/§5), not run-time hits.
 
 Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
 Most terminal commands assume you set `NS={user}-cicd`, `CLI`, `REKOR`, and `TUF` (and downloaded `cosign`/`rekor-cli`) as in the lab's setup blocks.
@@ -38,7 +42,7 @@ Cause:: A page reload or a terminal reconnect opens a fresh shell.
 `$NS`, `$IMG` and the other shortcuts are gone, so `-n $NS` collapses to `-n` and `oc` reads the next flag as the namespace.
 The downloaded `cosign` and `rekor-cli` are still in `~/bin`, which every new terminal puts on `PATH`; this is not an RBAC problem.
 Fix:: Run the first block of the exercise you are in again — it re-sets the shortcuts that exercise uses (in exercise 1, the block at the top of the lab page).
-In exercise 4 that is the trust-root block, which also mints `$TOKEN` again.
+In exercise 4 that is the set-up block, which also reads `$ISSUER` and `$TD` again; the sign block fetches a fresh token every time it runs.
 
 == `cosign: command not found` (or `rekor-cli: command not found`)
 
@@ -86,6 +90,60 @@ For keyless *image* signatures, push to an external registry (Quay), where `cosi
 Symptom:: After `cosign initialize`, `cosign sign … --fulcio-url … --rekor-url …` errors with `cannot specify service URLs and use signing config`.
 Cause:: cosign v3 sources the Fulcio and Rekor endpoints from the TUF *signing config* that `cosign initialize` installed — you must not also pass them as flags.
 Fix:: Drop `--fulcio-url`/`--rekor-url` from the `sign`/`sign-blob` command; pass only `--identity-token` (the lab commands already do this).
+
+== `executable file not found in $PATH` from `oc exec … spire-agent`
+
+Symptom:: Fetching the token fails: `oc exec sbom-signer … -- spire-agent api fetch jwt …` reports `exec: "spire-agent": executable file not found in $PATH`, and the loop never gets a token.
+Cause:: The SPIRE agent image keeps its binary at the root of the file system, `/spire-agent`, outside the image's `PATH`.
+Fix:: Call it by its full path, as the lab's sign block does: `/spire-agent api fetch jwt …`.
+
+== The token loop prints `no identity issued yet` twelve times
+
+Symptom:: In exercise 4 the sign block prints `no identity issued yet — retry 1` through `retry 12`, then stops with `TOKEN: no identity token - see troubleshooting`.
+Cause:: SPIRE has not given the pod an identity. Either the pod is not `Running` (see the next entry), its manifest lost the `csi.spiffe.io` volume or its mount at `/spiffe-workload-api`, or SPIRE is slow to register a new pod.
+The `workshop.redhat.com/spiffe-signer` label is *not* the cause: the operator registers every pod that mounts the volume, with or without it.
+Fix:: Check the pod and its volume, then run the sign block again:
++
+[source,sh,role=execute]
+----
+oc get pod sbom-signer -n $NS -o jsonpath='{.status.phase}{"  "}{.spec.volumes[*].csi.driver}{"\n"}'
+oc exec sbom-signer -n $NS -- ls /spiffe-workload-api
+----
++
+Expect `Running  csi.spiffe.io` and `spire-agent.sock`.
+If both hold and the loop still gets nothing, tell your instructor: the SPIRE server or the agent on that node is unhealthy (`oc get pods -n zero-trust-workload-identity-manager`).
+
+== `sbom-signer` stays in `ContainerCreating`
+
+Symptom:: `oc wait pod/sbom-signer` times out, and the pod stays in `ContainerCreating`.
+Cause:: The node cannot mount the `csi.spiffe.io` volume, because the SPIFFE CSI driver or the SPIRE agent is not running on that node.
+Both run as DaemonSets, which skip tainted nodes; a pod that lands on a node without them waits for a volume that never comes.
+Fix:: Read the pod's events, then tell your instructor what they say:
++
+[source,sh,role=execute]
+----
+oc describe pod sbom-signer -n $NS | sed -n '/^Events:/,$p'
+----
++
+The instructor checks `oc get ds -n zero-trust-workload-identity-manager` (desired and ready counts should match). Once that is fixed, `oc delete pod sbom-signer -n $NS` and run the pod block again.
+
+== `cosign sign-blob` refuses an expired token
+
+Symptom:: `cosign sign-blob --identity-token=…` fails with an error from Fulcio saying the token is expired or not valid.
+Cause:: The SPIFFE token lives five minutes. A token fetched in one block and used in a later one, after a break, is already dead.
+Fix:: Run the lab's sign block as a whole again: it fetches a fresh token and signs straight away. Never reuse a `$TOKEN` from earlier.
+
+== `verify-blob` refuses *your own* identity: `expected SAN value … got …`
+
+Symptom:: `cosign verify-blob --certificate-identity "spiffe://$TD/ns/$NS/sa/pipeline" …` fails with `expected SAN value "…", got "spiffe://…/ns/{user}-cicd/sa/pipeline"`, even though you signed it yourself.
+Cause:: The identity you passed is not the one in the certificate. Usually `$TD` or `$NS` is empty after a terminal reconnect, so cosign expected something like `spiffe:///ns//sa/pipeline`; less often the bundle was signed from another pod or namespace.
+Fix:: Compare the two values in the message. Run exercise 4's set-up block again (it re-reads `$TD` and `$ISSUER` and sets `$NS`), then repeat the `verify-blob`.
+
+== `x509: certificate signed by unknown authority` when cosign asks Fulcio for a certificate
+
+Symptom:: `cosign sign-blob` fails, and Fulcio's error mentions `x509: certificate signed by unknown authority`.
+Cause:: Fulcio validates each token against the SPIRE issuer's discovery endpoint, over TLS. On a cluster whose ingress certificate is not publicly trusted, Fulcio cannot verify that endpoint. The install gives Fulcio the ingress CA (`spec.fulcio.trustedCA`, from `openshift-config-managed/default-ingress-cert`, key `ca-bundle.crt`) only when it detects this, so a cluster whose certificate changed after install can miss it.
+Fix:: Tell your instructor. They confirm with `oc get securesign -n trusted-artifact-signer -o jsonpath='{.items[0].spec.fulcio.trustedCA}'` and re-sync `pp-rhtas`, whose issuer hook sets the CA when the issuer's certificate is not publicly trusted.
 
 == `mvn …:makeBom` produces no SBOM file
 
@@ -161,6 +219,7 @@ curl -ksI $CLI/clients/linux/cosign-amd64.gz | head -1
 Symptom:: `rekor-cli loginfo` prints `Active Tree Size: 0` and `No previous log state stored, unable to prove consistency`.
 Cause:: Nobody has signed keylessly on this cluster yet; the transparency log starts empty on a fresh install.
 Fix:: Nothing is wrong. Your `cosign sign-blob` in exercise 4 adds the first entry, and the next `loginfo` shows the tree grow.
+The first entry has log index `0`, which the bundle leaves out; that is why the lab reads the index with `// "0"`.
 
 == The Rekor Search UI link returns `503`
 
@@ -191,4 +250,4 @@ Fix:: Ignore it — `roxctl` authenticates to Central with the token from `rox-a
 
 '''
 
-_Last verified on OpenShift 4.21.22 / RHACS 4.11.1 / OpenShift Pipelines 1.23.0 / RHTAS 1.4.2 (Tekton Chains) — 2026-07-18; admission, client-server and Rekor entries on OpenShift 4.22.22 / RHTAS 1.5.1 as user11 — 2026-11-12._
+_Last verified on OpenShift 4.21.22 / RHACS 4.11.1 / OpenShift Pipelines 1.23.0 / RHTAS 1.4.2 (Tekton Chains) — 2026-07-18; admission, client-server and Rekor entries on OpenShift 4.22.22 / RHTAS 1.5.1 as user11 — 2026-11-12; exercise 4's workload-identity entries on OpenShift 4.22.22 / Zero Trust Workload Identity Manager 1.1.3 / RHTAS 1.5.1 as user2 — 2026-11-13._
