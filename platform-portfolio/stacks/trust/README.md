@@ -73,8 +73,11 @@ This stack is workshop-agnostic. The **per-user** wiring is the `trusted-supply-
 
 - Copies the shared `stackrox/rox-api-token` and `openshift-pipelines/chains-cosign-pub` into
   `{user}-cicd` (least-privilege cross-namespace RBAC).
-- The workshop layer's `ClusterSPIFFEID ogsr-attendee-signers` mints an identity only for a pod
-  labelled `workshop.redhat.com/spiffe-signer: "true"` in an attendee namespace.
+- The workshop layer's `ClusterSPIFFEID ogsr-attendee-signers` registers attendee pods labelled
+  `workshop.redhat.com/spiffe-signer: "true"`. The operator's own fallback ClusterSPIFFEID
+  (`zero-trust-workload-identity-manager-spire-default`) gives the same ID shape to any pod that mounts
+  `csi.spiffe.io`, so the label documents intent; attestation (own namespace and service account) is
+  what keeps one attendee from holding another's identity.
 - The attendee's Gitea fork of `parasol-claims` with a `seed-vulnerable` branch (older base tag +
   log4j-core CVE) and the `parasol-claims-supply-chain` pipeline.
 
