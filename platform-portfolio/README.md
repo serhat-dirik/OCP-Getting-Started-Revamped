@@ -64,7 +64,7 @@ Fourteen stacks. Each is a group of components installed and kept in sync togeth
 | `auth` | Red Hat build of Keycloak (operator + instance) | Application login, OIDC, realms |
 | `portal` | Red Hat Developer Hub (operator + instance) | Software catalog and golden-path templates |
 | `appsec` | SonarQube | Static analysis in a pipeline |
-| `trust` | RHACS (Central + SecuredCluster), Trusted Artifact Signer, Tekton Chains signing key | Image scanning, signing, attestation and admission control |
+| `trust` | RHACS (Central + SecuredCluster), Trusted Artifact Signer, Tekton Chains signing key, Zero Trust Workload Identity Manager (SPIRE; Fulcio trusts its issuer) | Image scanning, signing (key-based and keyless by a workload's SPIFFE identity), attestation and admission control. ZTWIM needs a connected cluster |
 | `mta` | Migration Toolkit for Applications | Legacy application analysis |
 | `resilience` | OADP (backup/restore), Service Interconnect | Backup and cross-site connectivity |
 | `ai-assist` | OpenShift Lightspeed | In-console AI assistant. Needs a model endpoint — see `components/openshift-lightspeed/README.md` |
@@ -213,6 +213,10 @@ and then the configuration half applies your CRs to **their** operator, silently
 
 Until a component can declare which operator it configures, do not use the split-operator-from-config
 pattern here. Measured 1 August 2026; a known limitation, not yet fixed.
+
+`workload-identity` (trust stack) is split from its operator anyway, and is safe because it ships no
+operand manifests: its hook creates the SPIRE operands only when the cluster has none, and changes
+nothing when the cluster already runs SPIRE.
 
 ---
 

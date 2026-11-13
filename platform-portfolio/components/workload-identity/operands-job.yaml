@@ -1,0 +1,189 @@
+# Give this cluster a SPIFFE workload identity plane, without ever touching one the cluster owner runs.
+#
+# WHY A HOOK, NOT MANIFESTS. Every operand is a cluster-scoped singleton named `cluster`, and two of
+# its values are cluster-specific AND immutable once set: the trust domain (the product docs say: use
+# the apps domain) and the JWT issuer (https://oidc-discovery.<apps domain>, which must equal on the
+# server and the OIDC provider). Both are read from ingresses.config.openshift.io/cluster at runtime,
+# so the component needs no per-cluster value file.
+#
+# THREE CASES, decided from the ZeroTrustWorkloadIdentityManager CR, which the docs make the root:
+#   absent                 → create all five operands, owner-labelled, in the docs' order.
+#   present, our label     → a previous run of this hook: re-apply the same five (idempotent; this
+#                            finishes a run that died part-way).
+#   present, no label      → the organisation's own SPIRE (adopted): change NOTHING, only wait for its
+#                            OIDC issuer. Fulcio then trusts that issuer, scoped by spiffeTrustDomain.
+# That runtime check is what makes the operator/operand split safe on an adopted cluster — the
+# portfolio's "known gap" (README § Adoption) is about operand MANIFESTS, and there are none here.
+#
+# LAST STEP: run the rhtas component's Fulcio issuer script if RHTAS is installed. The rhtas PostSync
+# hook runs the same script; whichever hook finishes last finds both halves ready, so no ordering
+# between the two Applications is assumed (child Applications carry no health, so app waves order
+# their creation, not their readiness).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: workload-identity-operands
+  namespace: ogsr-workload-identity
+  labels:
+    portfolio.redhat.com/component: workload-identity
+  annotations:
+    # Re-runs on every sync of pp-workload-identity; every step is idempotent.
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 2700
+  template:
+    metadata:
+      labels:
+        app: workload-identity-operands
+    spec:
+      serviceAccountName: workload-identity-operands
+      restartPolicy: Never
+      containers:
+        - name: operands
+          # Digest-pinned; el8 `ose-cli:latest` was frozen on v4.15.0 with unapplied Critical errata.
+          image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              memory: 512Mi
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              G=operator.openshift.io
+              echo "▶ waiting for the Zero Trust Workload Identity Manager CRDs (operator install)…"
+              for k in zerotrustworkloadidentitymanagers spireservers spireagents spiffecsidrivers spireoidcdiscoveryproviders; do
+                oc wait --for=create "crd/${k}.${G}" --timeout=900s >/dev/null
+                oc wait --for=condition=Established "crd/${k}.${G}" --timeout=120s >/dev/null
+              done
+              echo "  ✓ CRDs established"
+
+              APPS="$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')"
+              [[ -n "$APPS" ]] || { echo "❌ ingresses.config.openshift.io/cluster has no spec.domain"; exit 1; }
+              ISSUER="https://oidc-discovery.${APPS}"
+
+              OWNER=""
+              if oc get "zerotrustworkloadidentitymanagers.${G}" cluster >/dev/null 2>&1; then
+                OWNER="$(oc get "zerotrustworkloadidentitymanagers.${G}" cluster -o jsonpath='{.metadata.labels.workshop\.redhat\.com/owner}')"
+                [[ "$OWNER" == "ogsr" ]] || OWNER="adopted"
+              fi
+
+              if [[ "$OWNER" == "adopted" ]]; then
+                echo "✓ this cluster already runs SPIRE (ZeroTrustWorkloadIdentityManager/cluster is not ours) — changing nothing"
+                ISSUER="$(oc get "spireoidcdiscoveryproviders.${G}" cluster -o jsonpath='{.spec.jwtIssuer}' 2>/dev/null || true)"
+                [[ -n "$ISSUER" ]] || { echo "❌ the adopted SPIRE has no SpireOIDCDiscoveryProvider/cluster, so Fulcio has no issuer to trust"; echo "   fix: the cluster owner creates one (managedRoute \"true\"), then re-sync pp-workload-identity"; exit 1; }
+              else
+                echo "▶ applying the SPIRE operands (trust domain ${APPS}, issuer ${ISSUER})…"
+                # Applied one at a time in the docs' order, each retried: the operator's admission
+                # webhook can still be starting right after its CRDs appear.
+                apply_operand() {
+                  local _
+                  for _ in $(seq 1 30); do
+                    if oc apply -f - <<<"$1" >/dev/null; then return 0; fi
+                    sleep 10
+                  done
+                  return 1
+                }
+                META="  labels:
+                  workshop.redhat.com/owner: ogsr
+                  portfolio.redhat.com/component: workload-identity"
+                apply_operand "apiVersion: ${G}/v1alpha1
+              kind: ZeroTrustWorkloadIdentityManager
+              metadata:
+                name: cluster
+              ${META}
+              spec:
+                trustDomain: ${APPS}
+                clusterName: ogsr
+                bundleConfigMap: spire-bundle"
+                apply_operand "apiVersion: ${G}/v1alpha1
+              kind: SpireServer
+              metadata:
+                name: cluster
+              ${META}
+              spec:
+                caKeyType: rsa-2048
+                caValidity: 24h
+                caSubject:
+                  commonName: SPIRE Server CA
+                  organization: OpenShift Platform Portfolio
+                  country: US
+                datastore:
+                  databaseType: sqlite3
+                  connectionString: /run/spire/data/datastore.sqlite3
+                  maxIdleConns: 2
+                  maxOpenConns: 100
+                defaultJWTValidity: 5m
+                defaultX509Validity: 1h
+                jwtIssuer: ${ISSUER}
+                logLevel: info
+                logFormat: text
+                persistence:
+                  accessMode: ReadWriteOnce
+                  size: 1Gi
+                  storageClass: \"\""
+                apply_operand "apiVersion: ${G}/v1alpha1
+              kind: SpireAgent
+              metadata:
+                name: cluster
+              ${META}
+              spec:
+                logLevel: info
+                logFormat: text
+                nodeAttestor:
+                  k8sPSATEnabled: \"true\"
+                workloadAttestors:
+                  k8sEnabled: \"true\"
+                  workloadAttestorsVerification:
+                    type: auto"
+                apply_operand "apiVersion: ${G}/v1alpha1
+              kind: SpiffeCSIDriver
+              metadata:
+                name: cluster
+              ${META}
+              spec:
+                agentSocketPath: /run/spire/agent-sockets
+                pluginName: csi.spiffe.io"
+                apply_operand "apiVersion: ${G}/v1alpha1
+              kind: SpireOIDCDiscoveryProvider
+              metadata:
+                name: cluster
+              ${META}
+              spec:
+                csiDriverName: csi.spiffe.io
+                jwtIssuer: ${ISSUER}
+                managedRoute: \"true\"
+                replicaCount: 1
+                logLevel: info
+                logFormat: text"
+                echo "  ✓ operands applied"
+              fi
+
+              echo "▶ waiting for the OIDC discovery endpoint ${ISSUER}…"
+              DOC=""
+              for _ in $(seq 1 90); do
+                DOC="$(curl -ksf --max-time 10 "${ISSUER}/.well-known/openid-configuration" 2>/dev/null || true)"
+                [[ -n "$DOC" ]] && break
+                sleep 10
+              done
+              [[ -n "$DOC" ]] || { echo "❌ ${ISSUER}/.well-known/openid-configuration did not answer in 15m"; echo "   look: oc get pods -n zero-trust-workload-identity-manager; oc get spireoidcdiscoveryprovider cluster -o yaml"; exit 1; }
+              # Fulcio fetches the JWKS from jwks_uri and refuses a key URL on another host. Whitespace
+              # stripped first: the provider may pretty-print its JSON.
+              DOC="$(tr -d ' \t\r\n' <<<"$DOC")"
+              case "$DOC" in
+                *"\"jwks_uri\":\"${ISSUER}/"*) echo "  ✓ discovery answers; jwks_uri is on the issuer's own host" ;;
+                *) echo "❌ discovery answered but jwks_uri is not under ${ISSUER}: ${DOC:0:300}"; exit 1 ;;
+              esac
+
+              SCRIPT="$(oc get configmap fulcio-spiffe-issuer -n trusted-artifact-signer -o jsonpath='{.data.run\.sh}' 2>/dev/null || true)"
+              if [[ -n "$SCRIPT" ]]; then
+                echo "▶ pointing Fulcio at the issuer (rhtas component's script)…"
+                bash -c "$SCRIPT"
+              else
+                echo "➖ RHTAS is not installed here (no fulcio-spiffe-issuer script) — nothing to point at the issuer"
+              fi
+              echo "✅ workload identity ready — issuer ${ISSUER}"

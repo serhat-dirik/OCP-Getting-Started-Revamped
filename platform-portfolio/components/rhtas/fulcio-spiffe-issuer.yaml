@@ -1,0 +1,259 @@
+# Fulcio trusts the cluster's SPIFFE workload identity, when the cluster has one.
+#
+# WHAT. When SpireOIDCDiscoveryProvider/cluster exists and its issuer answers, Fulcio's OIDC issuer
+# list becomes exactly [{type: spiffe, issuer: <that issuer>, spiffeTrustDomain: <ZTWIM trust
+# domain>, clientID: sigstore}], replacing the default below in securesign.yaml. A workload with a
+# SPIFFE JWT-SVID (audience sigstore) then gets a short-lived certificate whose URI SAN is its own
+# SPIFFE ID, and spiffeTrustDomain keeps it to that one trust domain (an adopted SPIRE included).
+# Without workload identity the script changes nothing and Fulcio keeps the default issuer.
+#
+# WHY A SCRIPT RUN BY TWO HOOKS. It needs both halves ready: the Securesign (this component) and the
+# issuer (the workload-identity component). Child Applications carry no health, so their app-waves
+# order creation, not readiness, and either half can finish first. This component's PostSync hook
+# runs it, and so does the workload-identity hook once the issuer answers (it reads the script from
+# this ConfigMap). Whichever runs last finds both halves ready; the earlier run exits 0 with a note.
+#
+# Argo keeps owning the rest of the Securesign: pp-rhtas ignores .spec.fulcio.config.oidcIssuers and
+# .spec.fulcio.trustedCA (RespectIgnoreDifferences), so a re-sync never reverts this patch.
+#
+# trustedCA is set only when the issuer's certificate is NOT publicly trusted (a self-signed default
+# ingress): Fulcio then gets the ingress CA from openshift-config-managed/default-ingress-cert.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  annotations:
+    # Wave 3 = after the Securesign (wave 2): when this script exists, so does the CR it patches.
+    argocd.argoproj.io/sync-wave: "3"
+  name: fulcio-spiffe-issuer
+  namespace: trusted-artifact-signer
+  labels:
+    portfolio.redhat.com/component: rhtas
+data:
+  run.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+    NS=trusted-artifact-signer
+    SS=securesigns.v1.rhtas.redhat.com/securesign
+    CA_CM=oidc-issuer-ca
+    G=operator.openshift.io
+    ISSUER="$(oc get "spireoidcdiscoveryproviders.${G}" cluster -o jsonpath='{.spec.jwtIssuer}' 2>/dev/null || true)"
+    if [[ -z "$ISSUER" ]]; then
+      echo "➖ no SPIFFE issuer here (no SpireOIDCDiscoveryProvider/cluster) — Fulcio keeps its default issuer"
+      exit 0
+    fi
+    if ! curl -ksf -o /dev/null --max-time 10 "${ISSUER}/.well-known/openid-configuration"; then
+      echo "➖ ${ISSUER} does not answer yet — the workload-identity hook runs this again once it does"
+      exit 0
+    fi
+    if ! oc get -n "$NS" "$SS" >/dev/null 2>&1; then
+      echo "➖ no Securesign yet — the rhtas hook runs this again once it exists"
+      exit 0
+    fi
+    TD="$(oc get "zerotrustworkloadidentitymanagers.${G}" cluster -o jsonpath='{.spec.trustDomain}')"
+    [[ -n "$TD" ]] || { echo "❌ ZeroTrustWorkloadIdentityManager/cluster has no spec.trustDomain"; exit 1; }
+
+    CA_PATCH=""
+    if ! curl -sf -o /dev/null --max-time 10 "${ISSUER}/.well-known/openid-configuration"; then
+      echo "▶ ${ISSUER} is not served under a publicly trusted certificate — giving Fulcio the ingress CA"
+      CA="$(oc get configmap default-ingress-cert -n openshift-config-managed -o jsonpath='{.data.ca-bundle\.crt}')"
+      [[ -n "$CA" ]] || { echo "❌ openshift-config-managed/default-ingress-cert has no ca-bundle.crt"; exit 1; }
+      oc create configmap "$CA_CM" -n "$NS" --from-literal=ca-bundle.crt="$CA" --dry-run=client -o yaml \
+        | oc label --local -f - workshop.redhat.com/owner=ogsr -o yaml | oc apply -f - >/dev/null
+      CA_PATCH=",\"trustedCA\":{\"name\":\"${CA_CM}\"}"
+    fi
+
+    CUR="$(oc get -n "$NS" "$SS" -o jsonpath='{range .spec.fulcio.config.oidcIssuers[*]}{.type}|{.issuer}|{.issuerURL}|{.clientID}|{.spiffeTrustDomain};{end}')"
+    HAVE_CA="$(oc get -n "$NS" "$SS" -o jsonpath='{.spec.fulcio.trustedCA.name}')"
+    if [[ "$CUR" == "spiffe|${ISSUER}|${ISSUER}|sigstore|${TD};" && ( -z "$CA_PATCH" || "$HAVE_CA" == "$CA_CM" ) ]]; then
+      echo "  ✓ Fulcio's issuer is already ${ISSUER} (spiffe, trust domain ${TD})"
+    else
+      echo "▶ Fulcio issuer → ${ISSUER} (spiffe, trust domain ${TD}); the previous issuer list is replaced"
+      oc patch -n "$NS" "$SS" --type merge -p "{\"spec\":{\"fulcio\":{\"config\":{\"oidcIssuers\":[{\"issuer\":\"${ISSUER}\",\"issuerURL\":\"${ISSUER}\",\"clientID\":\"sigstore\",\"type\":\"spiffe\",\"spiffeTrustDomain\":\"${TD}\"}]}${CA_PATCH}}}}" >/dev/null
+    fi
+
+    echo "▶ waiting for Fulcio to serve that issuer…"
+    for i in $(seq 1 60); do
+      CFG="$(curl -sf --max-time 10 "http://fulcio-server.${NS}.svc/api/v2/configuration" 2>/dev/null | tr -d ' \t\r\n' || true)"
+      if [[ "$CFG" == *"\"issuerUrl\":\"${ISSUER}\""* && "$CFG" == *"\"issuerType\":\"spiffe\""* ]]; then
+        echo "✅ Fulcio issues certificates to SPIFFE workloads of ${TD} (try ${i})"
+        exit 0
+      fi
+      sleep 10
+    done
+    echo "❌ Fulcio did not serve the spiffe issuer within 10m"
+    echo "   look: oc get securesign securesign -n ${NS} -o jsonpath='{.status.conditions}'; oc logs deploy/fulcio-server -n ${NS}"
+    exit 1
+---
+# Identity of this component's issuer hook.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  annotations:
+    # Wave -1 = prerequisite: in place before the rest of the component, removed after it.
+    argocd.argoproj.io/sync-wave: "-1"
+  name: fulcio-spiffe-issuer
+  namespace: trusted-artifact-signer
+  labels:
+    portfolio.redhat.com/component: rhtas
+---
+# Patch the one Securesign, keep the optional ingress-CA ConfigMap, and read the script itself.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  annotations:
+    # Wave -1 = prerequisite: in place before the rest of the component, removed after it.
+    argocd.argoproj.io/sync-wave: "-1"
+  name: fulcio-spiffe-issuer
+  namespace: trusted-artifact-signer
+  labels:
+    portfolio.redhat.com/component: rhtas
+rules:
+  - apiGroups: ["rhtas.redhat.com"]
+    resources: ["securesigns"]
+    resourceNames: ["securesign"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["fulcio-spiffe-issuer", "oidc-issuer-ca"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+---
+# Both hooks run the script: this component's, and the workload-identity component's.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  annotations:
+    # Wave -1 = prerequisite: in place before the rest of the component, removed after it.
+    argocd.argoproj.io/sync-wave: "-1"
+  name: fulcio-spiffe-issuer
+  namespace: trusted-artifact-signer
+  labels:
+    portfolio.redhat.com/component: rhtas
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fulcio-spiffe-issuer
+subjects:
+  - kind: ServiceAccount
+    name: fulcio-spiffe-issuer
+    namespace: trusted-artifact-signer
+  - kind: ServiceAccount
+    name: workload-identity-operands
+    namespace: ogsr-workload-identity
+---
+# Read the cluster's ingress CA, needed only when the issuer is not publicly trusted.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  annotations:
+    # Wave -1 = prerequisite: in place before the rest of the component, removed after it.
+    argocd.argoproj.io/sync-wave: "-1"
+  name: ogsr-fulcio-spiffe-issuer-ingress-ca
+  namespace: openshift-config-managed
+  labels:
+    portfolio.redhat.com/component: rhtas
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["default-ingress-cert"]
+    verbs: ["get"]
+---
+# Same two hooks as the RoleBinding above.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  annotations:
+    # Wave -1 = prerequisite: in place before the rest of the component, removed after it.
+    argocd.argoproj.io/sync-wave: "-1"
+  name: ogsr-fulcio-spiffe-issuer-ingress-ca
+  namespace: openshift-config-managed
+  labels:
+    portfolio.redhat.com/component: rhtas
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ogsr-fulcio-spiffe-issuer-ingress-ca
+subjects:
+  - kind: ServiceAccount
+    name: fulcio-spiffe-issuer
+    namespace: trusted-artifact-signer
+  - kind: ServiceAccount
+    name: workload-identity-operands
+    namespace: ogsr-workload-identity
+---
+# Read the issuer and trust domain off the two cluster-scoped ZTWIM singletons (read-only).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  annotations:
+    # Wave -1 = prerequisite: in place before the rest of the component, removed after it.
+    argocd.argoproj.io/sync-wave: "-1"
+  name: ogsr-fulcio-spiffe-issuer
+  labels:
+    portfolio.redhat.com/component: rhtas
+rules:
+  - apiGroups: ["operator.openshift.io"]
+    resources: ["zerotrustworkloadidentitymanagers", "spireoidcdiscoveryproviders"]
+    resourceNames: ["cluster"]
+    verbs: ["get"]
+---
+# Binds this component's hook to the read above (the workload-identity hook has its own).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  annotations:
+    # Wave -1 = prerequisite: in place before the rest of the component, removed after it.
+    argocd.argoproj.io/sync-wave: "-1"
+  name: ogsr-fulcio-spiffe-issuer
+  labels:
+    portfolio.redhat.com/component: rhtas
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ogsr-fulcio-spiffe-issuer
+subjects:
+  - kind: ServiceAccount
+    name: fulcio-spiffe-issuer
+    namespace: trusted-artifact-signer
+---
+# This component's run of the script, after every pp-rhtas sync (idempotent: no patch when nothing changed).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fulcio-spiffe-issuer
+  namespace: trusted-artifact-signer
+  labels:
+    portfolio.redhat.com/component: rhtas
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app: fulcio-spiffe-issuer
+    spec:
+      serviceAccountName: fulcio-spiffe-issuer
+      restartPolicy: Never
+      volumes:
+        - name: script
+          configMap:
+            name: fulcio-spiffe-issuer
+      containers:
+        - name: issuer
+          # Digest-pinned; el8 `ose-cli:latest` was frozen on v4.15.0 with unapplied Critical errata.
+          image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: script
+              mountPath: /opt/fulcio-spiffe-issuer
+          command: ["/bin/bash", "/opt/fulcio-spiffe-issuer/run.sh"]

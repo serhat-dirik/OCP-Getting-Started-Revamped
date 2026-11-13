@@ -1,9 +1,9 @@
 # stack: trust
 
-The platform prerequisite for **M09 — Trusted Software Supply Chain [ADS]**. Installs the shared
-supply-chain security infrastructure as an Argo CD app-of-apps: scan images, sign them, and prove
-what is inside. Everything here is a **single shared install** — never per-user; the per-user wiring
-is the M09 entry state's job (below).
+The platform prerequisite for the workshop's **`trusted-supply-chain`** module. Installs the shared
+supply-chain security infrastructure as an Argo CD app-of-apps: scan images, sign them (with a key, and
+keyless with a workload's SPIFFE identity), and prove what is inside. Everything here is a **single
+shared install** — never per-user; the per-user wiring is the module's entry state (below).
 
 ```bash
 ./argocd-bootstrap/install.sh --stacks trust
@@ -15,17 +15,22 @@ is the M09 entry state's job (below).
 
 | Component | Operator (channel) | Config | Stack wave |
 |---|---|---|---|
-| `rhacs-operator` | `rhacs-operator` (`stable` = v4.11.1) | AllNamespaces OperatorGroup | 0 |
+| `rhacs-operator` | `rhacs-operator` (`stable`; v5.0.0 live 2026-11-13) | AllNamespaces OperatorGroup | 0 |
 | `trust-signing` | — (needs only openshift-pipelines) | hook Job → cosign key in `signing-secrets` + exports `chains-cosign-pub` | 0 |
 | `rhacs-central` | — (uses the operator) | `Central` + init-bundle hook (sensor bundle + CI token) + `SecuredCluster` + delegated-scanning + "Block Log4Shell at build" `SecurityPolicy` | 1 |
-| `rhtas` | `rhtas-operator` (`stable` = v1.4.2) | `Securesign` (Fulcio/Rekor/CTlog/Trillian/TUF/TSA) — keyless-signing demo | 2 |
+| `zero-trust-workload-identity-operator` | `openshift-zero-trust-workload-identity-manager` (`stable-v1` = v1.1.3) | AllNamespaces OperatorGroup. Operator only, so an adopting cluster skips it | 1 |
+| `workload-identity` | — (uses the operator) | PostSync hook: creates the SPIRE operands (trust domain = apps domain, issuer `https://oidc-discovery.<apps domain>`) unless the cluster already runs SPIRE, waits for OIDC discovery, then points Fulcio at it | 2 |
+| `rhtas` | `rhtas-operator` (`stable` = v1.5.1) | v1 `Securesign` (Fulcio/Rekor/CTlog/Trillian/TUF/TSA) + the Fulcio SPIFFE-issuer hook | 3 |
 
-Operators are **wave-serialized** (rhacs wave 0 → rhtas wave 2) so only one OLM install churns at a
-time. `rhacs-central` (wave 1) runs after the operator's CRDs exist.
+App-waves order **creation** only: child Applications carry no health, so nothing here assumes a
+lower-wave app is ready. Each hook waits for exactly what it needs (the operands hook for the ZTWIM
+CRDs; the Fulcio issuer script for both the Securesign and the issuer, run by both hooks so whichever
+finishes last completes it). The ZTWIM operator needs a connected cluster (its catalog entry says
+`disconnected: "false"`).
 
-## How the pieces serve M09
+## How the pieces serve `trusted-supply-chain`
 
-- **Scan gate (LAB):** the M09 pipeline's `acs-image-check` task runs `roxctl image check` against the
+- **Scan gate (LAB):** the module pipeline's `acs-image-check` task runs `roxctl image check` against the
   built image; the shipped **"Block Log4Shell (CVE-2021-44228) at build"** `SecurityPolicy` (BUILD +
   `FAIL_BUILD_ENFORCEMENT`) fails the build on the seeded log4j-core. Deterministic (feed-independent
   of severity thresholds): a clean image lacks the CVE and passes.
@@ -35,10 +40,13 @@ time. `rhacs-central` (wave 1) runs after the operator's CRDs exist.
   nor keyless OIDC.**
 - **Block-unsigned (LAB, [OCP]):** the attendee applies a native namespaced `ImagePolicy`
   (`policyType: PublicKey`, the exported cosign public key) — no operator required.
-- **Keyless signing + Rekor transparency (INSTRUCTOR DEMO):** RHTAS (`Securesign`). Fulcio is wired to
-  the cluster ServiceAccount-token issuer (`kubernetes` / `https://kubernetes.default.svc`) so a
-  Tekton SA token is a keyless identity. Per-user keyless wiring is too fragile for a 60-min lab
-  (build-note verdict) — demo only.
+- **Keyless signing + Rekor transparency (LAB):** a workload's SPIFFE identity is the signer. ZTWIM
+  runs SPIRE; Fulcio trusts SPIRE's OIDC issuer (`type: spiffe`, `clientID: sigstore`, scoped by
+  `spiffeTrustDomain`), so a pod holding a JWT-SVID gets a short-lived certificate whose URI SAN is
+  its own ID — `spiffe://<apps domain>/ns/<namespace>/sa/<service account>`. Tekton Chains stays
+  key-based (its signer is exclusive: Fulcio OR a key), so the Chains key, `cosign verify --key` and
+  native admission above are unchanged. On a cluster that already runs SPIRE, Fulcio trusts THAT
+  issuer and trust domain instead; nothing of theirs is changed.
 
 ## The fragile install step (RHACS bootstrap)
 
@@ -58,13 +66,15 @@ first boot — allow it to finish (can take a while on a cold cluster) before th
 - Cluster had ~60 cores / ~180 Gi free before install — ample. RHTPA (the optional `trust-demo`
   component) would add ~12–15 more pods; it is default-off.
 
-## The M09 entry-state seam (NOT installed here)
+## The entry-state seam (NOT installed here)
 
-This stack is workshop-agnostic. The **per-user** wiring is the M09 entry state
+This stack is workshop-agnostic. The **per-user** wiring is the `trusted-supply-chain` entry state
 (`gitops/entry-states/trusted-supply-chain/`, built separately) and layers on top:
 
 - Copies the shared `stackrox/rox-api-token` and `openshift-pipelines/chains-cosign-pub` into
   `{user}-cicd` (least-privilege cross-namespace RBAC).
+- The workshop layer's `ClusterSPIFFEID ogsr-attendee-signers` mints an identity only for a pod
+  labelled `workshop.redhat.com/spiffe-signer: "true"` in an attendee namespace.
 - The attendee's Gitea fork of `parasol-claims` with a `seed-vulnerable` branch (older base tag +
   log4j-core CVE) and the `parasol-claims-supply-chain` pipeline.
 
@@ -77,10 +87,24 @@ oc get central,securedcluster -n stackrox                               # Deploy
 oc get securitypolicy block-log4shell-at-build -n stackrox              # the gate
 oc get secret signing-secrets -n openshift-pipelines -o jsonpath='{.data.cosign\.pub}' | wc -c   # cosign key present
 oc get securesign -n trusted-artifact-signer                            # sigstore stack
+oc get csv -n zero-trust-workload-identity-manager                      # ZTWIM Succeeded
+oc get zerotrustworkloadidentitymanager,spireserver,spireagent,spiffecsidriver,spireoidcdiscoveryprovider cluster
+ISSUER=$(oc get spireoidcdiscoveryprovider cluster -o jsonpath='{.spec.jwtIssuer}')
+curl -s "$ISSUER/.well-known/openid-configuration"                      # issuer + jwks_uri on the same host
+oc get securesign securesign -n trusted-artifact-signer -o jsonpath='{.spec.fulcio.config.oidcIssuers}'   # type spiffe
 ```
 
 ## Uninstall
 
 Delete the stack Applications (`oc delete application pp-rhacs-operator pp-rhacs-central pp-rhtas
-pp-trust-signing -n openshift-gitops`) — prune removes the components. The cosign key in
-`signing-secrets` is left in place (deleting it would unsign Chains); remove manually if desired.
+pp-trust-signing pp-workload-identity pp-zero-trust-workload-identity-operator -n openshift-gitops`) —
+prune removes the components. The cosign key in `signing-secrets` is left in place (deleting it would
+unsign Chains); remove manually if desired.
+
+The SPIRE operands are created by a hook, so no prune removes them. Delete the ones carrying
+`workshop.redhat.com/owner=ogsr` BEFORE the operator Application, in this order (the product docs'):
+`spireoidcdiscoveryprovider`, `spiffecsidriver`, `spireagent`, `spireserver`,
+`zerotrustworkloadidentitymanager` (all named `cluster`), then
+`oc delete pvc -l app.kubernetes.io/name=spire-server -n zero-trust-workload-identity-manager`. The
+workshop's `bootstrap/ogsr-uninstall.sh` does exactly that, and leaves unlabelled (pre-existing) SPIRE
+alone.

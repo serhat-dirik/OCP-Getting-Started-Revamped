@@ -173,6 +173,7 @@ extensions.istio.io               component:service-mesh        servicemeshopera
 workspace.devfile.io              component:devspaces           Dev Spaces / DevWorkspace controller
 controller.devfile.io             component:devspaces           DevWorkspace controller
 k8s.keycloak.org                  component:keycloak-operator   rhbk-operator
+spire.spiffe.io                   component:zero-trust-workload-identity-operator  ZTWIM spire-controller-manager (trust stack)
 # Gateway API CRDs are GA/default-on in OCP, but the ingress operator only installs the istiod that
 # reconciles Gateways/HTTPRoutes once our GatewayClass exists — so removing that component IS what
 # removes the controller. Attributed to the component, which is the conservative reading.

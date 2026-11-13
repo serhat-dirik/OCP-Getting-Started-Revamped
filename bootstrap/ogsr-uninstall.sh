@@ -2607,7 +2607,7 @@ report_stuck_namespaces() {  # names… — bounded wait for termination, then r
 # ── plan ──────────────────────────────────────────────────────────────────────
 print_plan() {
   local apps roots created adopted name ns st pkg gitops_plan mon_plan gw_plan mirror_plan operand_plan
-  local verb wn reason nwipe=0 wipe_stack="" strip_list="" csv_plan="" res
+  local verb wn reason nwipe=0 wipe_stack="" strip_list="" csv_plan="" res zt
   mirror_plan="$(mirror_stack)"
   # `grep -c .` prints 0 AND exits 1 on empty input, so a `|| echo '?'` fallback appended a second line
   # and the plan read "0\n?". Take the count and normalise it instead.
@@ -2693,6 +2693,9 @@ print_plan() {
   else
     echo "      - <the owned-CRD capture did not run; step 2 will delete nothing>"
   fi
+  echo "  • SPIRE operands the workload-identity hook created (step 2, docs order, then the spire-server PVC):"
+  zt="$(ztwim_operands_by_owner ours)"
+  if [[ -n "$zt" ]]; then sed "s|^|      - ${ZTWIM_GROUP}/|; s|$|/cluster|" <<<"$zt"; else echo "      - <none present>"; fi
   echo "  • the argo controller ClusterRoleBinding + ClusterRoles (applied imperatively by argocd-bootstrap)"
   echo "  • attendee sign-in accounts the workshop created in Keycloak realm behind IdP '${CIDP_NAME}' (group ogsr-attendees),"
   echo "    its Developer Hub client ogsr-devhub, and that realm client's direct-access-grants setting if the"
@@ -2715,6 +2718,8 @@ print_plan() {
   echo "  • GitOps operator: ${gitops_plan}"
   echo "  • cluster-monitoring-config: ${mon_plan}"
   echo "  • openshift-default GatewayClass: ${gw_plan}"
+  zt="$(ztwim_operands_by_owner theirs | tr '\n' ' ' | sed 's/ $//')"
+  echo "  • SPIRE operands the org owns (no workshop owner label): ${zt:-<none present>}"
   echo "  • every namespace/operator/CR the org owns and we never labeled"
   echo
   # The cascade's safety rests entirely on this list, so it is shown rather than summarised: each line
@@ -2862,6 +2867,61 @@ cluster_scoped_created_crds() {  # → CRDs owned by an operator WE created that
   return 0
 }
 
+# ── SPIRE operands the workload-identity hook created ─────────────────────────
+# platform-portfolio/components/workload-identity creates the five Zero Trust Workload Identity
+# Manager singletons (all named `cluster`, cluster-scoped) from a hook Job — never as an Argo manifest,
+# so no cascade prunes them. They go here, while the operator still runs, in the product docs' order
+# (OIDC provider → CSI driver → agent → server → the ZTWIM root), followed by the server's PVC.
+#
+# DECIDED PER OBJECT BY OUR OWNER LABEL, not by the operator's op_ record. The hook labels exactly what
+# it creates and creates nothing when the cluster already runs SPIRE, so the label is direct evidence
+# of "we made this" even where the operator itself is the org's (or was installed before the state
+# recorded it). An operand without the label is the org's SPIRE and is never touched.
+ZTWIM_GROUP="operator.openshift.io"
+ZTWIM_OPERANDS="spireoidcdiscoveryproviders spiffecsidrivers spireagents spireservers zerotrustworkloadidentitymanagers"
+ZTWIM_NS="zero-trust-workload-identity-manager"   # the operator hardcodes it (utils.OperatorNamespace)
+
+ztwim_operands_by_owner() {  # <ours|theirs> → the present ZTWIM singletons of that owner, docs order
+  local want="$1" r owner
+  for r in $ZTWIM_OPERANDS; do
+    owner="$(oc get "${r}.${ZTWIM_GROUP}" cluster -o go-template='{{with .metadata.labels}}{{index . "workshop.redhat.com/owner"}}{{end}}|present' 2>/dev/null || true)"
+    if [[ "$owner" != *"|present" ]]; then continue; fi   # absent (or unreadable): nothing to decide
+    if [[ "${owner%|present}" == "ogsr" ]]; then owner="ours"; else owner="theirs"; fi
+    if [[ "$owner" == "$want" ]]; then printf '%s\n' "$r"; fi
+  done
+  return 0
+}
+
+delete_our_ztwim_operands() {  # → 0 clean, 1 when one did not finish deleting
+  local r stuck=0 server_gone="false"
+  while IFS= read -r r; do
+    [[ -n "$r" ]] || continue
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "   • WOULD delete ${r}/cluster (created by the workload-identity hook; docs order)"
+      continue
+    fi
+    if oc delete "${r}.${ZTWIM_GROUP}" cluster --ignore-not-found --wait=true --timeout=120s >/dev/null 2>&1; then
+      ok "deleted ${r}/cluster — its operator was still up to tear it down"
+      [[ "$r" == "spireservers" ]] && server_gone="true"
+    else
+      stuck=$((stuck + 1))
+      err "   ${r}/cluster did not finish deleting within 120s. Clear it by hand NOW, before step 5:"
+      err "      oc patch ${r}.${ZTWIM_GROUP} cluster --type=merge -p '{\"metadata\":{\"finalizers\":null}}'"
+    fi
+  done < <(ztwim_operands_by_owner ours)
+  while IFS= read -r r; do
+    [[ -n "$r" ]] && echo "   • preserve ${r}/cluster — no workshop owner label: the organisation's SPIRE"
+  done < <(ztwim_operands_by_owner theirs)
+  # The docs' next step. The operator creates this PVC for OUR SpireServer; in a namespace we created,
+  # step 10 takes it anyway, but on an adopted operator's namespace nothing else would.
+  if [[ "$server_gone" == "true" ]]; then
+    oc delete pvc -n "$ZTWIM_NS" -l app.kubernetes.io/name=spire-server --ignore-not-found --wait=false >/dev/null 2>&1 \
+      && ok "deleted the spire-server PVC in ${ZTWIM_NS}"
+  fi
+  if [[ "$stuck" -gt 0 ]]; then return 1; fi
+  return 0
+}
+
 step_delete_operator_operands() {  # 2 — operands only their own operator can finalize, deleted first
   local crd inst pass deleted=0 skipped=0 left stuck=0 budget deadline
   if [[ "$CRDS_CAPTURE_PHASE" != "pre-cascade" ]]; then
@@ -2873,6 +2933,9 @@ step_delete_operator_operands() {  # 2 — operands only their own operator can 
   fi
   # A third of the cascade budget, floor 60s: someone who shortens --cascade-timeout means "do not sit
   # here", and a fixed wait would ignore that. Shared across both passes, so the step is bounded.
+  # Ordered, label-decided, and first: see § SPIRE operands above. The generic sweep below then finds
+  # none of them left (or, on an adopted SPIRE, never had them in scope).
+  delete_our_ztwim_operands || stuck=$((stuck + 1))
   budget=$(( CASCADE_TIMEOUT / 3 ))
   if [[ "$budget" -lt 60 ]]; then budget=60; fi
   deadline=$(( $(date +%s) + budget ))

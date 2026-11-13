@@ -1,13 +1,19 @@
 # Securesign — the full sigstore stack (Trillian+DB, Rekor transparency log, Fulcio CA, CTlog, TUF,
-# TSA). One shared instance powering M09's instructor-demo keyless-signing beat (short-lived Fulcio
-# cert + Rekor transparency entry). The operator generates all certs/keys and the TUF root from this
-# CR (Trillian database.create=true; tuf.rootKeySecretRef names the secret the operator creates).
+# TSA). One shared instance. The operator generates all certs/keys and the TUF root from this CR
+# (Trillian database.create=true; tuf.rootKeySecretRef names the secret the operator creates).
 #
-# Fulcio OIDC = the cluster's own ServiceAccount-token issuer (Type kubernetes,
-# https://kubernetes.default.svc) so a Tekton pipeline SA token is a valid keyless identity — the
-# documented keyless-from-CI path. Keyless per-user wiring stays DEMO-ONLY (build-note verdict); the
-# M09 LAB signs key-based via Tekton Chains + the trust-signing cosign key, which needs none of this.
-apiVersion: rhtas.redhat.com/v1alpha1
+# rhtas.redhat.com/v1, the STORAGE version (v1alpha1 is deprecated). Written in v1 so the field paths
+# Argo diffs and ignores (.spec.fulcio.config.oidcIssuers, .spec.fulcio.trustedCA) are the ones
+# stored, with no conversion round trip in between. Field-for-field the same object the v1alpha1
+# manifest produced (live v1 read 2026-11-13, RHTAS 1.5.1): certificate → signer.certificateChain,
+# externalAccess → ingress, monitoring.enabled → monitoring.{metrics,serviceMonitor}.enabled. The TUF
+# key lists are left to the operator's autodiscovery, as in the operator's own v1 sample.
+#
+# Fulcio OIDC issuer: this default (the cluster's ServiceAccount issuer, type kubernetes) only stands
+# until workload identity is available. fulcio-spiffe-issuer.yaml then REPLACES the list with the
+# SPIFFE issuer, and pp-rhtas ignores both fields so a re-sync keeps that. On a cluster without the
+# Zero Trust Workload Identity Manager this default stays, so the component installs either way.
+apiVersion: rhtas.redhat.com/v1
 kind: Securesign
 metadata:
   name: securesign
@@ -22,37 +28,53 @@ metadata:
 spec:
   ctlog:
     monitoring:
-      enabled: true
+      metrics:
+        enabled: true
+      serviceMonitor:
+        enabled: true
   fulcio:
-    certificate:
-      commonName: fulcio.trusted-artifact-signer
-      organizationName: Parasol Workshop
-      organizationEmail: workshop@parasol.local
     config:
-      OIDCIssuers:
-        - ClientID: trusted-artifact-signer
-          Issuer: https://kubernetes.default.svc
-          IssuerURL: https://kubernetes.default.svc
-          Type: kubernetes
-    externalAccess:
+      oidcIssuers:
+        - clientID: trusted-artifact-signer
+          issuer: https://kubernetes.default.svc
+          issuerURL: https://kubernetes.default.svc
+          type: kubernetes
+    ingress:
       enabled: true
     monitoring:
-      enabled: true
+      metrics:
+        enabled: true
+      serviceMonitor:
+        enabled: true
+    signer:
+      certificateChain:
+        commonName: fulcio.trusted-artifact-signer
+        organizationName: Parasol Workshop
+        organizationEmail: workshop@parasol.local
   rekor:
-    externalAccess:
+    ingress:
       enabled: true
     monitoring:
-      enabled: true
+      metrics:
+        enabled: true
+      serviceMonitor:
+        enabled: true
   trillian:
     database:
       create: true
     monitoring:
-      enabled: true
+      metrics:
+        enabled: true
+      serviceMonitor:
+        enabled: true
   tsa:
-    externalAccess:
+    ingress:
       enabled: true
     monitoring:
-      enabled: true
+      metrics:
+        enabled: true
+      serviceMonitor:
+        enabled: true
     ntpMonitoring:
       enabled: true
     signer:
@@ -70,13 +92,8 @@ spec:
           organizationName: Parasol Workshop
           organizationEmail: workshop@parasol.local
   tuf:
-    externalAccess:
+    ingress:
       enabled: true
-    keys:
-      - name: rekor.pub
-      - name: ctfe.pub
-      - name: fulcio_v1.crt.pem
-      - name: tsa.certchain.pem
     pvc:
       accessModes:
         - ReadWriteOnce
@@ -84,7 +101,3 @@ spec:
       size: 100Mi
     rootKeySecretRef:
       name: tuf-root-keys
-    # No signingConfigURLMode: v1alpha1 deprecates it ("autoresolved from Component Custom
-    # Resources") and the v1 storage version has no such field, so the conversion webhook drops it
-    # on every write. Declared here, Argo saw it missing from live forever: pp-rhtas stuck
-    # OutOfSync and self-healing every 5 minutes (rhtas-operator 1.5.1). Its default was `external`.
