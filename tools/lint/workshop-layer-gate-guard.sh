@@ -357,7 +357,7 @@ canary_mutate() {  # <id> → mutated function text on stdout, real function tex
       awk '$0=="  WORKSHOP_LAYER_OK=false"{print "  : # CANARY: dropped -- the timeout records nothing"; next}
            {print}' ;;
     loop-shortened)
-      awk '/for _i in \$\(seq 1 60\); do/{print "  for _i in $(seq 1 5); do  # CANARY: loop silently shortened"; next}
+      awk '/for _i in \$\(seq 1 "\$\{WORKSHOP_LAYER_ATTEMPTS:-60\}"\); do/{print "  for _i in $(seq 1 5); do  # CANARY: loop silently shortened"; next}
            {print}' ;;
     success-returns-nonzero)
       awk '/workshop-config is Synced\/Healthy/{a=1}

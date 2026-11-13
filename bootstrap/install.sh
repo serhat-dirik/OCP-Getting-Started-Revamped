@@ -1651,7 +1651,7 @@ ok "workshop-config Application applied (source: local mirror)"
 wait_for_workshop_layer_healthy() {
   HEALTH=""; SYNC=""
   local _i
-  for _i in $(seq 1 60); do
+  for _i in $(seq 1 "${WORKSHOP_LAYER_ATTEMPTS:-60}"); do
     HEALTH="$(oc get application workshop-config -n openshift-gitops -o jsonpath='{.status.health.status}' 2>/dev/null || true)"
     SYNC="$(oc get application workshop-config -n openshift-gitops -o jsonpath='{.status.sync.status}' 2>/dev/null || true)"
     [[ "$HEALTH" == "Healthy" && "$SYNC" == "Synced" ]] && break
@@ -1674,7 +1674,11 @@ wait_for_workshop_layer_healthy() {
   return 1
 }
 
-info "[6/6] waiting for workshop-config to become Healthy (up to 10m)…"
+# The first sync of a large cohort outlasts a flat 10 minutes: 30 attendees on a fresh cluster took 33
+# minutes to Synced/Healthy (gn67x, 2026-11-13), and a timeout here skips 6b and the credentials summary
+# and reports INCOMPLETE while Argo is still converging. 10 minutes plus 1 per attendee (40 for 30).
+WORKSHOP_LAYER_ATTEMPTS=$(( 60 + USERS * 6 ))
+info "[6/6] waiting for workshop-config to become Healthy (up to $(( WORKSHOP_LAYER_ATTEMPTS / 6 ))m)…"
 wait_for_workshop_layer_healthy || true
 
 # ── 6b. one sign-in option only ───────────────────────────────────────────────
