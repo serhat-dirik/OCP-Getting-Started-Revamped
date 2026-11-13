@@ -1,0 +1,42 @@
+{{- /*
+  attendee-spiffe-ids — ONE ClusterSPIFFEID that lets an attendee's own pod hold a SPIFFE identity
+  (trusted-supply-chain exercise 4: sign the SBOM keylessly with it).
+
+  WHO GETS AN IDENTITY: a pod labelled workshop.redhat.com/spiffe-signer: "true" in an attendee
+  namespace (workshop.redhat.com/user set). Nothing else — the controller mints no entry for any other
+  pod. The ID is spiffe://<trust domain>/ns/<namespace>/sa/<service account>, and SPIRE attests the
+  namespace and service account on the node, so an attendee can only ever obtain an identity naming
+  their OWN namespace: thirty people signing at once each get a distinguishable certificate.
+
+  WHY ONE TEMPLATE, NOT AN ENTRY PER ATTENDEE: the controller turns the template into one entry per
+  matching pod and garbage-collects it when the pod goes (ws reset purges the pod). A per-attendee
+  static entry would need re-rendering on every scale-users and buys nothing.
+
+  className is the ZTWIM operator's spire-controller-manager class; an entry under any other class is
+  never minted. The CRD arrives with the trust stack's ZTWIM operator (SkipDryRunOnMissingResource),
+  so the object sits in the chart's LAST wave: until the CRD exists only this object fails to apply,
+  and Argo's retry lands it — no earlier wave waits on it.
+*/ -}}
+{{- if include "workshop-config.moduleEnabled" (dict "root" $ "slug" "trusted-supply-chain") }}
+# Mints a SPIFFE ID for each opted-in pod in an attendee namespace.
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: ogsr-attendee-signers
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    argocd.argoproj.io/sync-wave: "6"
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+spec:
+  className: zero-trust-workload-identity-manager-spire
+  spiffeIDTemplate: {{ "spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}" | quote }}
+  namespaceSelector:
+    matchExpressions:
+      - key: workshop.redhat.com/user
+        operator: Exists
+  podSelector:
+    matchLabels:
+      workshop.redhat.com/spiffe-signer: "true"
+{{- end }}

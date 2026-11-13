@@ -11,6 +11,8 @@
 #          reads, so it is asserted in BOTH modes (owner's 2026-07-18 pre-scanned-image rebalance).
 #          Also in BOTH modes: the install's ClusterImagePolicy ogsr-signed-parasol-claims names this
 #          attendee's parasol-claims-trusted (exercise 5 reads it; it is install state, never per-user).
+#          Also in BOTH modes: the cluster's SPIFFE OIDC issuer answers (exercise 4's signer identity is
+#          a SPIFFE JWT-SVID that Fulcio validates against it; install state, never per-user).
 #          ONLY in --entry-only mode: the fork's seed-vulnerable branch still carries the seeded log4j-core
 #          CVE (the attendee's optional SBOM-fix beat removes it, so this entry-materialization check is
 #          NOT run in full mode — template rule 14, mode-split).
@@ -226,6 +228,16 @@ attendee_shell() {
   oc_read_optional whoami || return 1
   [[ "$OC_OUT" == "$USER_NAME" ]]
 }
+# Exercise 4's identity provider: the SPIRE OIDC discovery endpoint Fulcio validates every JWT-SVID
+# against. The issuer is READ from the install (platform-observer grants the read), never computed —
+# an adopted SPIRE may serve it on another host. The issuer is held in a local before http_read runs.
+oidc_issuer_answers() {
+  oc_read get spireoidcdiscoveryprovider cluster -o jsonpath='{.spec.jwtIssuer}' || return 1
+  local issuer="$OC_OUT"
+  [[ -n "$issuer" ]] || return 1
+  http_read "${issuer}/.well-known/openid-configuration" || return 1
+  [[ "$HTTP_CODE" == "200" ]] && grep -q '"jwks_uri"' <<<"$HTTP_OUT"
+}
 # The keyless beat's receipt. cosign writes the Rekor log entry into the bundle beside the signature,
 # so the bundle existing AND carrying a log entry is proof the transparency-log upload happened —
 # checked without a network round-trip, and without needing the entry UUID the attendee saw.
@@ -236,6 +248,18 @@ keyless_bundle_recorded() {
   # Both bundle shapes carry the transparency-log receipt under a different key — cosign's legacy
   # bundle nests rekorBundle.Payload.logIndex, the Sigstore protobuf bundle uses tlogEntries.
   grep -qE 'logIndex|rekorBundle|tlogEntries' "${HOME}/sbom.bundle"
+}
+# …and the certificate in it names THIS attendee's workload. Fulcio writes the signer's SPIFFE ID
+# (spiffe://<trust domain>/ns/<namespace>/sa/<service account>) into the certificate's URI SAN, and
+# SPIRE only issues an attendee an ID for a pod in their own namespace — so this is what separates
+# "you signed it" from "a signature exists". The DER certificate carries the URI as plain bytes:
+# base64 + grep, no openssl. Sigstore bundle (cosign v3): verificationMaterial.certificate.rawBytes.
+keyless_bundle_is_mine() {
+  [[ -n "${HOME:-}" && -s "${HOME}/sbom.bundle" ]] || return 1
+  local der
+  der="$(grep -o '"rawBytes"[[:space:]]*:[[:space:]]*"[^"]*"' "${HOME}/sbom.bundle" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')"
+  [[ -n "$der" ]] || return 1
+  base64 -d <<<"$der" 2>/dev/null | grep -aqF "/ns/${NS}/sa/"
 }
 
 # --- entry state that SURVIVES lab completion (checked in BOTH modes) --------
@@ -252,6 +276,7 @@ check "install-time supply-chain run PASSED the scan gate (${TRUSTED_NS})" suppl
 check "Tekton Chains signed that build (signed TaskRun present)"   signed_taskrun_exists "$TRUSTED_NS"       || hint "Chains signs a few seconds after the build TaskRun completes — re-check in a moment"
 check "pre-scanned signed image parasol-claims-trusted:latest (+ .sig/.att)" signed_latest_image_present "$NS"         || hint "the signed image was not copied into ${NS} — re-materialize: ws prep trusted-supply-chain --user ${USER_NAME} --yes (copies it from ${TRUSTED_NS} in seconds)"
 check "cluster signature policy ogsr-signed-parasol-claims guards ${NS}/parasol-claims-trusted" policy_scopes_my_repo "$NS" || hint "the install applies this ClusterImagePolicy (workshop-config trusted-image-policy) with one scope per attendee — tell your instructor; they re-sync workshop-config (adding attendees re-renders the scopes)"
+check "the cluster's SPIFFE OIDC issuer answers (exercise 4's signing identity)" oidc_issuer_answers || hint "the trust stack's workload-identity component publishes it — tell your instructor; they check: oc get spireoidcdiscoveryprovider cluster; oc logs job/workload-identity-operands -n ogsr-workload-identity"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # Entry-only: the seeded flaw is asserted ONLY here. The trusted-supply-chain lab's optional SBOM-fix beat
@@ -328,7 +353,10 @@ else
         || hint "exercise 1: clone your fork's seed-vulnerable branch to ~/parasol-claims and run the cyclonedx makeBom command"
       check "exercise 4: your SBOM is signed keylessly and Rekor holds the receipt (~/sbom.bundle)" keyless_bundle_recorded \
         || { hint "exercise 4, step 1 (trust root): export PATH=\"\$HOME/bin:\$PATH\"; TUF=https://tuf-trusted-artifact-signer.\$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}'); cosign initialize --mirror=\"\$TUF\" --root=\"\$TUF/root.json\""
-             hint "exercise 4, step 2 (sign + log): cd ~/parasol-claims && cosign sign-blob -y --identity-token=\"\$(oc create token pipeline --audience trusted-artifact-signer -n ${NS})\" --bundle ~/sbom.bundle target/parasol-claims-sbom.json"; }
+             hint "exercise 4, step 2 (identity): your signer pod must be Running in ${NS} with the label workshop.redhat.com/spiffe-signer=true and the csi.spiffe.io volume — oc get pod sbom-signer -n ${NS} --show-labels"
+             hint "exercise 4, step 3 (sign + log, ONE block — the token lives 5 minutes): TOKEN=\$(oc exec sbom-signer -n ${NS} -- spire-agent api fetch jwt -audience sigstore -socketPath /spiffe-workload-api/spire-agent.sock -output json | jq -r '.[0].svids[0].svid'); cd ~/parasol-claims && cosign sign-blob -y --identity-token=\"\$TOKEN\" --bundle ~/sbom.bundle target/parasol-claims-sbom.json"; }
+      check "exercise 4: the signing certificate names YOUR workload (SPIFFE ID …/ns/${NS}/sa/…)" keyless_bundle_is_mine \
+        || hint "the bundle was signed by another identity — an older run, or a token fetched from a pod outside ${NS}. Sign again with a token from your own sbom-signer pod (exercise 4, steps 2–3)"
     else
       # ⚠, never ❌: exercises 2–4 mutate nothing, so from anywhere but the attendee's own shell there
       # is no evidence to read — and grading absent evidence would fail a lab that was done perfectly.
