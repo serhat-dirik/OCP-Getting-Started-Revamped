@@ -619,7 +619,8 @@ else
     echo "  ✓ Argo CD instance available"
 
     # The operator-default controller memory (2Gi) OOM-wedges under cohort-scale concurrent entry-state
-    # materializations; raise it to 6Gi. On an instance WE installed that is unconditional. On an
+    # materializations; raise it (operator/argocd-controller-resources.yaml) and exclude Project
+    # (argocd-exclusions.sh). On an instance WE installed that is unconditional. On an
     # ADOPTED one it is a mutation of something the org owns, so it is asked for, recorded, and undone
     # by ogsr-uninstall.sh's restore_argocd_controller_resources() — which is what makes it survivable
     # rather than the "unreversible, manual restore hint only" it used to be.
@@ -639,7 +640,7 @@ else
       # worse than no install: it looks done and leaves an empty workshop.
       TARGET_MEM="$(grep -A2 'limits:' "${SCRIPT_DIR}/operator/argocd-controller-resources.yaml" 2>/dev/null \
                      | grep -m1 'memory:' | sed 's/.*memory:[[:space:]]*//' | tr -d '"' || true)"
-      [[ -n "$TARGET_MEM" ]] || TARGET_MEM="6Gi"
+      [[ -n "$TARGET_MEM" ]] || TARGET_MEM="10Gi"
       CUR_MEM="$(oc get argocd openshift-gitops -n openshift-gitops -o jsonpath='{.spec.controller.resources.limits.memory}' 2>/dev/null || true)"
       DECISION="skip"
       # Tracks whether argocd-controller-resources.yaml was ACTUALLY applied, which is not the same
@@ -647,29 +648,41 @@ else
       # nothing, so keying the closing notice off $DECISION made the Subscription health-check
       # override go missing SILENTLY on exactly the cluster shape it exists for.
       HC_APPLIED="false"
+      # Second half of the same tuning, under the same consent: keep project.openshift.io/Project out
+      # of the controller's cache (it re-lists every project each second otherwise — argocd-exclusions.sh).
+      NEED_EXCL="false"
+      "${SCRIPT_DIR}/argocd-exclusions.sh" --check >/dev/null 2>&1 || NEED_EXCL="true"
 
-      if [[ "$CUR_MEM" == "$TARGET_MEM" ]]; then
-        echo "  ✓ adopted Argo CD controller already at ${CUR_MEM} — nothing to change"
+      if [[ "$CUR_MEM" == "$TARGET_MEM" && "$NEED_EXCL" != "true" ]]; then
+        echo "  ✓ adopted Argo CD controller already at ${CUR_MEM}, Project excluded — nothing to change"
         DECISION="apply"   # no memory change owed; the file is still not applied — see HC_APPLIED
       else
         echo
         echo "  ⚠️  This cluster's OpenShift GitOps is ADOPTED — it belongs to the cluster owner."
-        echo "      Its application-controller memory limit is ${CUR_MEM:-the operator default 2Gi}."
-        echo "      The workshop needs ${TARGET_MEM}: below that the controller is OOMKilled while"
-        echo "      materializing entry states, and NOTHING the workshop installs will ever sync."
+        if [[ "$CUR_MEM" != "$TARGET_MEM" ]]; then
+          echo "      Its application-controller memory limit is ${CUR_MEM:-the operator default 2Gi}."
+          echo "      The workshop needs ${TARGET_MEM}: below that the controller is OOMKilled while"
+          echo "      materializing entry states, and NOTHING the workshop installs will ever sync."
+          echo "      Raising it RESTARTS their controller, which briefly interrupts their own GitOps"
+          echo "      reconciliation. The CR's whole current spec.controller.resources is recorded first."
+        fi
+        if [[ "$NEED_EXCL" == "true" ]]; then
+          echo "      Its controller caches project.openshift.io/Project, whose watch never opens on this"
+          echo "      OpenShift: it re-lists every project each second and burns a core. The workshop adds"
+          echo "      a resourceExclusions rule for it (no restart; ~2-3 min cache resync). Refused if one"
+          echo "      of their Applications manages a Project. The current list is recorded first."
+        fi
         echo
-        echo "      Applying this changes a resource the org owns and RESTARTS their controller, which"
-        echo "      briefly interrupts their own GitOps reconciliation. Before patching, the CR's whole"
-        echo "      current spec.controller.resources is recorded so ogsr-uninstall.sh can put it back."
-        echo "      If that recording fails you are told so on the spot, with the value to keep — this"
-        echo "      prompt never promises a restore it has not yet been able to arrange."
+        echo "      Both changes are to a resource the org owns; ogsr-uninstall.sh puts back what it"
+        echo "      recorded. If a recording fails you are told so on the spot, with the value to keep —"
+        echo "      this prompt never promises a restore it has not yet been able to arrange."
         echo
         # Explicit env var wins (CI / the RHDP catalog item have no TTY); otherwise ask. With no TTY
         # and no env var we REFUSE — never mutate someone else's cluster on an assumption.
         DECISION="${OGSR_ADOPTED_ARGOCD_MEMORY:-}"
         if [[ -z "$DECISION" ]]; then
           if [[ -t 0 ]]; then
-            printf '      Raise the adopted controller to %s and continue? [y/N] ' "$TARGET_MEM"
+            printf '      Tune the adopted controller as above and continue? [y/N] '
             read -r _reply </dev/tty || _reply=""
             case "$_reply" in [yY]|[yY][eE][sS]) DECISION="apply" ;; *) DECISION="refuse" ;; esac
           else
@@ -679,92 +692,96 @@ else
         fi
 
         if [[ "$DECISION" == "apply" ]]; then
-          # Record BEFORE mutating: a half-applied patch must still leave us knowing what to restore.
-          #
-          # ONE FACT, ONE KEY. The prior value goes into gitops_argocd_controller_resources_b64 — the
-          # key bootstrap/install.sh and helm/bootstrap's job-state-capture already write and
-          # ogsr-uninstall.sh already reads — so every install entry point feeds ONE restore path.
-          # A memory-only key cannot be that path: the override below sets limits.cpu, limits.memory,
-          # requests.cpu AND requests.memory, so undoing it needs the whole resources block, and a
-          # second key describing the same fact is exactly how the write-only-key drift started.
-          # Written first-write-wins (only when unset): on a re-install the earliest snapshot is the
-          # true prior, and this branch is only reached when the live value is NOT yet the target.
-          #
-          # argocd_controller_resources_changed_by_us is a genuinely DIFFERENT fact and earns its own
-          # key: the b64 snapshot is also taken by passes that never mutate anything, so "a prior was
-          # recorded" has never meant "we changed it", and teardown must only restore what we changed.
-          #
-          # An EMPTY prior is meaningful and is recorded by the ABSENCE of the b64 key: the CR carried
-          # no explicit .spec.controller.resources at all. Teardown restores that by REMOVING the field
-          # (a JSON-merge-patch null), not by writing a number back. Every writer of this key already
-          # skips it when the value is empty, so absence is unambiguous — no sentinel needed.
-          CUR_RES="$(oc get argocd openshift-gitops -n openshift-gitops \
-                       -o jsonpath='{.spec.controller.resources}' 2>/dev/null || true)"
-          # Same producer shape as bootstrap/install.sh:  <jsonpath output> | base64 | tr -d '\n'.
-          # jsonpath emits no trailing newline and printf '%s' adds none, so the two writers produce
-          # byte-identical values — which is what makes them interchangeable for one reader.
-          CUR_RES_B64="$(printf '%s' "$CUR_RES" | base64 | tr -d '\n' || true)"
-          [[ -n "$CUR_RES" ]] || CUR_RES_B64=""
-          RECORDED="false"
-          oc create namespace "$STATE_NS" >/dev/null 2>&1 || true
-          oc create configmap "$STATE_CM" -n "$STATE_NS" >/dev/null 2>&1 || true
-          if oc get configmap "$STATE_CM" -n "$STATE_NS" >/dev/null 2>&1; then
-            PRIOR_RECORDED="$(oc get configmap "$STATE_CM" -n "$STATE_NS" \
-                                -o jsonpath='{.data.gitops_argocd_controller_resources_b64}' 2>/dev/null || true)"
-            # CARRIED RESIDUE. ogsr-uninstall keeps ${STATE_NS} when it could not put a value back,
-            # pruned to the unrestored priors and stamped with residue_keys. For a key listed there
-            # the org's original is ALREADY known — as the recorded value, or, when the key is
-            # absent, as the fact that the CR carried no explicit .spec.controller.resources at all.
-            # The live CR meanwhile still carries OUR sizing. So a carried key counts as recorded and
-            # must not be re-derived: writing CUR_RES_B64 here would file the workshop's own leftover
-            # as "the org's original", which is the 2026-07-31 state-lifetime defect. Absence stays
-            # absence — the empty-prior encoding this whole restore path rests on.
-            # bootstrap/install.sh's record_once and the FSC state-capture Job hold the same rule.
-            RESIDUE_CARRIED=" $(oc get configmap "$STATE_CM" -n "$STATE_NS" \
-                                  -o jsonpath='{.data.residue_keys}' 2>/dev/null | tr ',' ' ' | xargs || true) "
-            case "$RESIDUE_CARRIED" in
-              *" gitops_argocd_controller_resources_b64 "*)
-                echo "  • prior controller sizing carried forward by a previous ogsr-uninstall — kept verbatim"
-                PRIOR_RECORDED="carried" ;;
-            esac
-            RES_OK="true"
-            if [[ -z "$PRIOR_RECORDED" && -n "$CUR_RES_B64" ]]; then
-              oc patch configmap "$STATE_CM" -n "$STATE_NS" --type merge \
-                -p "{\"data\":{\"gitops_argocd_controller_resources_b64\":\"${CUR_RES_B64}\"}}" >/dev/null 2>&1 \
-                || RES_OK="false"
+          if [[ "$CUR_MEM" != "$TARGET_MEM" ]]; then
+            # Record BEFORE mutating: a half-applied patch must still leave us knowing what to restore.
+            #
+            # ONE FACT, ONE KEY. The prior value goes into gitops_argocd_controller_resources_b64 — the
+            # key bootstrap/install.sh and helm/bootstrap's job-state-capture already write and
+            # ogsr-uninstall.sh already reads — so every install entry point feeds ONE restore path.
+            # A memory-only key cannot be that path: the override below sets limits.cpu, limits.memory,
+            # requests.cpu AND requests.memory, so undoing it needs the whole resources block, and a
+            # second key describing the same fact is exactly how the write-only-key drift started.
+            # Written first-write-wins (only when unset): on a re-install the earliest snapshot is the
+            # true prior, and this branch is only reached when the live value is NOT yet the target.
+            #
+            # argocd_controller_resources_changed_by_us is a genuinely DIFFERENT fact and earns its own
+            # key: the b64 snapshot is also taken by passes that never mutate anything, so "a prior was
+            # recorded" has never meant "we changed it", and teardown must only restore what we changed.
+            #
+            # An EMPTY prior is meaningful and is recorded by the ABSENCE of the b64 key: the CR carried
+            # no explicit .spec.controller.resources at all. Teardown restores that by REMOVING the field
+            # (a JSON-merge-patch null), not by writing a number back. Every writer of this key already
+            # skips it when the value is empty, so absence is unambiguous — no sentinel needed.
+            CUR_RES="$(oc get argocd openshift-gitops -n openshift-gitops \
+                         -o jsonpath='{.spec.controller.resources}' 2>/dev/null || true)"
+            # Same producer shape as bootstrap/install.sh:  <jsonpath output> | base64 | tr -d '\n'.
+            # jsonpath emits no trailing newline and printf '%s' adds none, so the two writers produce
+            # byte-identical values — which is what makes them interchangeable for one reader.
+            CUR_RES_B64="$(printf '%s' "$CUR_RES" | base64 | tr -d '\n' || true)"
+            [[ -n "$CUR_RES" ]] || CUR_RES_B64=""
+            RECORDED="false"
+            oc create namespace "$STATE_NS" >/dev/null 2>&1 || true
+            oc create configmap "$STATE_CM" -n "$STATE_NS" >/dev/null 2>&1 || true
+            if oc get configmap "$STATE_CM" -n "$STATE_NS" >/dev/null 2>&1; then
+              PRIOR_RECORDED="$(oc get configmap "$STATE_CM" -n "$STATE_NS" \
+                                  -o jsonpath='{.data.gitops_argocd_controller_resources_b64}' 2>/dev/null || true)"
+              # CARRIED RESIDUE. ogsr-uninstall keeps ${STATE_NS} when it could not put a value back,
+              # pruned to the unrestored priors and stamped with residue_keys. For a key listed there
+              # the org's original is ALREADY known — as the recorded value, or, when the key is
+              # absent, as the fact that the CR carried no explicit .spec.controller.resources at all.
+              # The live CR meanwhile still carries OUR sizing. So a carried key counts as recorded and
+              # must not be re-derived: writing CUR_RES_B64 here would file the workshop's own leftover
+              # as "the org's original", which is the 2026-07-31 state-lifetime defect. Absence stays
+              # absence — the empty-prior encoding this whole restore path rests on.
+              # bootstrap/install.sh's record_once and the FSC state-capture Job hold the same rule.
+              RESIDUE_CARRIED=" $(oc get configmap "$STATE_CM" -n "$STATE_NS" \
+                                    -o jsonpath='{.data.residue_keys}' 2>/dev/null | tr ',' ' ' | xargs || true) "
+              case "$RESIDUE_CARRIED" in
+                *" gitops_argocd_controller_resources_b64 "*)
+                  echo "  • prior controller sizing carried forward by a previous ogsr-uninstall — kept verbatim"
+                  PRIOR_RECORDED="carried" ;;
+              esac
+              RES_OK="true"
+              if [[ -z "$PRIOR_RECORDED" && -n "$CUR_RES_B64" ]]; then
+                oc patch configmap "$STATE_CM" -n "$STATE_NS" --type merge \
+                  -p "{\"data\":{\"gitops_argocd_controller_resources_b64\":\"${CUR_RES_B64}\"}}" >/dev/null 2>&1 \
+                  || RES_OK="false"
+              fi
+              if [[ "$RES_OK" == "true" ]] \
+                 && oc patch configmap "$STATE_CM" -n "$STATE_NS" --type merge \
+                      -p '{"data":{"argocd_controller_resources_changed_by_us":"true"}}' >/dev/null 2>&1; then
+                RECORDED="true"
+              fi
             fi
-            if [[ "$RES_OK" == "true" ]] \
-               && oc patch configmap "$STATE_CM" -n "$STATE_NS" --type merge \
-                    -p '{"data":{"argocd_controller_resources_changed_by_us":"true"}}' >/dev/null 2>&1; then
-              RECORDED="true"
+            # If we could not record the prior value, REFUSE — do not patch (owner decision 2026-07-31).
+            # We are about to mutate a CR the org owns. The consent we were given was consent to a
+            # REVERSIBLE change; without the recording it is not reversible, so it is not the thing
+            # they agreed to. Crucially, nothing has been touched at this point, so refusing is free:
+            # the operator loses nothing and can re-run or raise it themselves. The previous behaviour
+            # patched anyway behind a loud warning, but a warning in a 700-line install log is not a
+            # decision anyone actually made — and this is the promise the whole workshop rests on.
+            if [[ "$RECORDED" != "true" ]]; then
+              echo
+              echo "  ❌ could NOT record the prior value in ${STATE_NS}/${STATE_CM} — NOT installing."
+              echo "     Nothing on this cluster has been changed."
+              echo "     You consented to a reversible change. Without that record teardown cannot put"
+              echo "     the controller back, so the change would not be reversible and we will not"
+              echo "     make it on your behalf."
+              echo "     Current value, for your records:"
+              echo "       spec.controller.resources: ${CUR_RES:-<none — the CR carries no explicit resources>}"
+              echo "     Fix the state ConfigMap (check RBAC on ${STATE_NS}) and re-run, or raise it"
+              echo "     yourself and keep that value:"
+              echo "       oc -n openshift-gitops patch argocd openshift-gitops --type merge \\"
+              echo "         -p '{\"spec\":{\"controller\":{\"resources\":{\"limits\":{\"memory\":\"${TARGET_MEM}\"},\"requests\":{\"memory\":\"2Gi\"}}}}}'"
+              exit 1
             fi
+            oc apply -f "${SCRIPT_DIR}/operator/argocd-controller-resources.yaml"
+            HC_APPLIED="true"
+            echo "  ✓ adopted controller raised to ${TARGET_MEM} with consent"
+            echo "    prior spec.controller.resources recorded — ogsr-uninstall.sh restores it"
           fi
-          # If we could not record the prior value, REFUSE — do not patch (owner decision 2026-07-31).
-          # We are about to mutate a CR the org owns. The consent we were given was consent to a
-          # REVERSIBLE change; without the recording it is not reversible, so it is not the thing
-          # they agreed to. Crucially, nothing has been touched at this point, so refusing is free:
-          # the operator loses nothing and can re-run or raise it themselves. The previous behaviour
-          # patched anyway behind a loud warning, but a warning in a 700-line install log is not a
-          # decision anyone actually made — and this is the promise the whole workshop rests on.
-          if [[ "$RECORDED" != "true" ]]; then
-            echo
-            echo "  ❌ could NOT record the prior value in ${STATE_NS}/${STATE_CM} — NOT installing."
-            echo "     Nothing on this cluster has been changed."
-            echo "     You consented to a reversible change. Without that record teardown cannot put"
-            echo "     the controller back, so the change would not be reversible and we will not"
-            echo "     make it on your behalf."
-            echo "     Current value, for your records:"
-            echo "       spec.controller.resources: ${CUR_RES:-<none — the CR carries no explicit resources>}"
-            echo "     Fix the state ConfigMap (check RBAC on ${STATE_NS}) and re-run, or raise it"
-            echo "     yourself and keep that value:"
-            echo "       oc -n openshift-gitops patch argocd openshift-gitops --type merge \\"
-            echo "         -p '{\"spec\":{\"controller\":{\"resources\":{\"limits\":{\"memory\":\"${TARGET_MEM}\"},\"requests\":{\"memory\":\"2Gi\"}}}}}'"
-            exit 1
-          fi
-          oc apply -f "${SCRIPT_DIR}/operator/argocd-controller-resources.yaml"
-          HC_APPLIED="true"
-          echo "  ✓ adopted controller raised to ${TARGET_MEM} with consent"
-          echo "    prior spec.controller.resources recorded — ogsr-uninstall.sh restores it"
+          # The Project exclusion rides the same consent; the helper records the prior list itself.
+          if [[ "$NEED_EXCL" == "true" ]]; then "${SCRIPT_DIR}/argocd-exclusions.sh" || exit 1; fi
         else
           echo
           echo "  ❌ declined — NOT installing. Nothing on this cluster has been changed."
@@ -791,7 +808,8 @@ else
       fi
     else
       oc apply -f "${SCRIPT_DIR}/operator/argocd-controller-resources.yaml"
-      echo "  ✓ controller resources raised (6Gi limit / 2Gi request)"
+      echo "  ✓ controller resources raised (4 CPU / 10Gi limit, 250m / 2Gi request)"
+      "${SCRIPT_DIR}/argocd-exclusions.sh"
     fi
 
     # The portfolio manages cluster-scoped resources (namespaces, operators, RBAC), so the default

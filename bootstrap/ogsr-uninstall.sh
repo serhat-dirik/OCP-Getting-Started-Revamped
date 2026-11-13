@@ -3106,7 +3106,7 @@ restore_argocd_controller_resources() {
     # canonical override so it never drifts.
     if [[ -z "$b64" ]]; then return 0; fi
     target_mem="$(yq '.spec.controller.resources.limits.memory' "${SCRIPT_DIR}/../platform-portfolio/argocd-bootstrap/operator/argocd-controller-resources.yaml" 2>/dev/null || true)"
-    if [[ -z "$target_mem" || "$target_mem" == "null" ]]; then target_mem="6Gi"; fi
+    if [[ -z "$target_mem" || "$target_mem" == "null" ]]; then target_mem="10Gi"; fi
     prior_mem="$(printf '%s' "$prior" | yq -p=json '.limits.memory' 2>/dev/null || true)"
     live_mem="$(oc get argocd openshift-gitops -n "$ARGO_NS" -o jsonpath='{.spec.controller.resources.limits.memory}' 2>/dev/null || true)"
     if [[ "$prior_mem" == "$target_mem" ]]; then
@@ -3200,6 +3200,55 @@ restore_argocd_controller_resources() {
   return 0
 }
 
+# ── adopted Argo CD resourceExclusions ────────────────────────────────────────
+# platform-portfolio/argocd-bootstrap/argocd-exclusions.sh appends a project.openshift.io/Project rule
+# to the shared instance's .spec.resourceExclusions (a single YAML string). Same contract as the sizing
+# above: it records the prior list first-write-wins in gitops_argocd_resource_exclusions_b64 (absent =
+# the CR carried no list) and argocd_resource_exclusions_changed_by_us before patching. Only that
+# recorded change authorizes a write here; the prior goes back verbatim, or the field is removed.
+restore_argocd_resource_exclusions() {
+  local changed b64 prior rc=0 out pf
+  changed="$(state argocd_resource_exclusions_changed_by_us)"
+  b64="$(state gitops_argocd_resource_exclusions_b64)"
+  if [[ "$changed" != "true" ]]; then return 0; fi
+  if ! oc get argocd openshift-gitops -n "$ARGO_NS" >/dev/null 2>&1; then
+    echo "   • skip resourceExclusions restore (argocd/openshift-gitops -n ${ARGO_NS} absent)"
+    return 0
+  fi
+  prior=""
+  if [[ -n "$b64" ]]; then prior="$(printf '%s' "$b64" | base64 --decode 2>/dev/null || true)"; fi
+  if [[ "$DRY_RUN" == "true" ]]; then
+    if [[ -n "$prior" ]]; then
+      echo "   • WOULD restore argocd/openshift-gitops spec.resourceExclusions to its recorded prior list"
+    else
+      echo "   • WOULD remove spec.resourceExclusions from argocd/openshift-gitops (it carried none before install)"
+    fi
+    return 0
+  fi
+  # A merge patch on a scalar string replaces it whole; null removes it. Written as a YAML block
+  # scalar (|2: content indented 2 past its key, whatever the list's own first-line indent) — no yq/jq.
+  pf="$(mktemp)"
+  {
+    echo "spec:"
+    if [[ -n "$prior" ]]; then
+      echo "  resourceExclusions: |2"
+      printf '%s\n' "$prior" | sed 's/^/    /'
+    else
+      echo "  resourceExclusions: null"
+    fi
+  } > "$pf"
+  out="$(oc patch argocd openshift-gitops -n "$ARGO_NS" --type merge --patch-file="$pf" 2>&1)" || rc=$?
+  rm -f "$pf"
+  if [[ "$rc" -ne 0 ]]; then
+    err "could not restore argocd/openshift-gitops spec.resourceExclusions: ${out}"
+    residue_record gitops_argocd_resource_exclusions_b64 \
+      "argocd/openshift-gitops -n ${ARGO_NS} still excludes project.openshift.io/Project; the restore patch failed. Restore by hand: oc -n ${ARGO_NS} edit argocd openshift-gitops (remove the project.openshift.io rule from spec.resourceExclusions)"
+    return 1
+  fi
+  ok "restored argocd/openshift-gitops spec.resourceExclusions (the controller re-syncs its cache; no restart)"
+  return 0
+}
+
 step_reverse_cluster_mutations() {  # 5 — the imperative, cluster-global changes install.sh made
   sub remove_oauth_idp
   sub remove_keycloak_attendees
@@ -3210,6 +3259,7 @@ step_reverse_cluster_mutations() {  # 5 — the imperative, cluster-global chang
   sub restore_monitoring
   sub reverse_node_shaping
   sub restore_argocd_controller_resources
+  sub restore_argocd_resource_exclusions
   return 0
 }
 

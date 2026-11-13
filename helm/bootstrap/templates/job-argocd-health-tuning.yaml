@@ -1,6 +1,7 @@
 # =============================================================================
-# Argo CD instance tuning (Sync hook, wave -9). TWO changes to the one ArgoCD CR this whole
+# Argo CD instance tuning (Sync hook, wave -9). THREE changes to the one ArgoCD CR this whole
 # install reconciles through, applied by a single Job so the controller restarts once, not twice.
+# (The third, a project.openshift.io/Project resourceExclusions rule, is inline below the sizing.)
 #
 # (1) application-controller SIZING — raise the operator-default 2Gi. Details in the inline block
 #     below: 2Gi is OOMKilled before the workshop layer materializes, the script path has raised
@@ -112,7 +113,7 @@ spec:
               # answers with OGSR_ADOPTED_ARGOCD_MEMORY=apply.
               if [[ "$MANAGE_CONTROLLER_RESOURCES" != "true" ]]; then
                 warn "argocd.manageControllerResources=false — NOT resizing the application-controller."
-                warn "  The operator default is 2Gi. Below ~6Gi the controller is OOMKilled while"
+                warn "  The operator default is 2Gi, and the controller is OOMKilled well below ${TARGET_MEM} while"
                 warn "  materializing entry states and NOTHING the workshop installs will ever sync."
                 warn "  Raise it yourself before handing this cluster to attendees:"
                 warn "    oc -n ${ARGOCD_NS} patch argocd ${ARGOCD_NAME} --type merge \\"
@@ -183,6 +184,46 @@ spec:
                     -p "{\"spec\":{\"controller\":{\"resources\":${CONTROLLER_RESOURCES_JSON}}}}" >/dev/null
                   ok "application-controller raised from ${CUR_MEM:-the operator default 2Gi} to ${TARGET_MEM} (prior sizing recorded — ogsr-uninstall.sh restores it)"
                 fi
+              fi
+
+              # ── resourceExclusions: project.openshift.io/Project ──────────────────────────────
+              # FSC twin of platform-portfolio/argocd-bootstrap/argocd-exclusions.sh, under the same
+              # values-level consent. A projects LIST carries no resourceVersion, so the controller's
+              # Project watch never opens and it re-lists every project each second (~1 core at idle on
+              # a 30-attendee cluster, 2026-11-13). No yq/jq in this image, so the rule is appended as
+              # text, and only to an empty or block-style list — anything else is left alone, loudly.
+              EXCL="$(oc get argocd "$ARGOCD_NAME" -n "$ARGOCD_NS" -o jsonpath='{.spec.resourceExclusions}')"
+              # Read whole, not piped into grep -q: under pipefail an early grep exit fails the pipe.
+              MANAGED_KINDS="$(oc get applications.argoproj.io -A \
+                                -o jsonpath='{range .items[*].status.resources[*]}{.group}/{.kind}{"\n"}{end}')"
+              if [[ "$MANAGE_CONTROLLER_RESOURCES" != "true" ]]; then
+                warn "argocd.manageControllerResources=false — NOT excluding project.openshift.io/Project; run"
+                warn "  platform-portfolio/argocd-bootstrap/argocd-exclusions.sh yourself to stop the per-second relist."
+              elif [[ "$EXCL" == *project.openshift.io* ]]; then
+                ok "resourceExclusions already name project.openshift.io — nothing to change"
+              elif [[ -n "$EXCL" && "$EXCL" != "- "* ]]; then
+                warn "resourceExclusions is not a block-style YAML list — NOT appending the Project rule to it."
+                warn "  Add it by hand: platform-portfolio/argocd-bootstrap/argocd-exclusions.sh"
+              elif [[ $'\n'"$MANAGED_KINDS"$'\n' == *$'\n'project.openshift.io/Project$'\n'* ]]; then
+                warn "an Application manages a project.openshift.io/Project — NOT excluding the kind (it would stop syncing)."
+              else
+                oc create configmap "$CM" -n "$STATE_NS" >/dev/null 2>&1 || true
+                PRIOR="$(oc get configmap "$CM" -n "$STATE_NS" -o jsonpath='{.data.gitops_argocd_resource_exclusions_b64}')"
+                RESIDUE=" $(oc get configmap "$CM" -n "$STATE_NS" -o jsonpath='{.data.residue_keys}' | tr ',' ' ') "
+                if [[ -z "$PRIOR" && "$RESIDUE" != *" gitops_argocd_resource_exclusions_b64 "* && -n "$EXCL" ]]; then
+                  oc patch configmap "$CM" -n "$STATE_NS" --type merge \
+                    -p "{\"data\":{\"gitops_argocd_resource_exclusions_b64\":\"$(printf '%s' "$EXCL" | base64 | tr -d '\n')\"}}" >/dev/null
+                fi
+                oc patch configmap "$CM" -n "$STATE_NS" --type merge \
+                  -p '{"data":{"argocd_resource_exclusions_changed_by_us":"true"}}' >/dev/null
+                EXCL_FILE="$(mktemp)"
+                { echo "spec:"; echo "  resourceExclusions: |"
+                  if [[ -n "$EXCL" ]]; then printf '%s\n' "$EXCL" | sed 's/^/    /'; fi
+                  printf '    %s\n' '- apiGroups:' '  - project.openshift.io' '  clusters:' "  - '*'" '  kinds:' '  - Project'
+                } > "$EXCL_FILE"
+                oc patch argocd "$ARGOCD_NAME" -n "$ARGOCD_NS" --type=merge --patch-file="$EXCL_FILE" >/dev/null
+                rm -f "$EXCL_FILE"
+                ok "resourceExclusions now name project.openshift.io/Project (prior list recorded — ogsr-uninstall.sh restores it)"
               fi
 
               info "tuning ${ARGOCD_NS}/${ARGOCD_NAME}: operators.coreos.com/Subscription health check"

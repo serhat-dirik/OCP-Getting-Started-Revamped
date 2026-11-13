@@ -126,7 +126,8 @@ Both floors exist for one module, `deployment-targets-scheduling`:
    |---|---|
    | `ADOPT` | They already have it. The workshop reuses theirs; uninstall leaves it. |
    | `CREATE` | The workshop adds it; uninstall removes it. |
-   | `⚠ Argo CD controller memory` | The cluster's Argo CD runs at 2Gi; the workshop needs 6Gi. The install raises it (restarts the controller). |
+   | `⚠ Argo CD controller memory` | The cluster's Argo CD controller is below the workshop's 10Gi limit. The install raises it (restarts the controller). |
+   | `⚠ Argo CD Project exclusion` | The controller caches `Project`s and re-lists them every second. The install adds a `resourceExclusions` rule (no restart). |
    | `⚠ prior install detected` | The installer ran here before. Re-running is safe. For a new cohort, use `ogsr-reset.sh` ([§4](#4-after-a-delivery)). |
 
    The preflight does not cover each operator. To preview those too (also read-only):
@@ -176,7 +177,7 @@ Both floors exist for one module, `deployment-targets-scheduling`:
    ./bootstrap/install.sh
    ```
 
-   - Unattended run (no terminal to answer the Argo CD memory question):
+   - Unattended run (no terminal to answer the Argo CD tuning question):
      `OGSR_ADOPTED_ARGOCD_MEMORY=apply ./bootstrap/install.sh`
    - `⚠ <component>: …` means ours was installed alongside theirs. Note the namespace; you will
      check it before uninstalling.
@@ -377,6 +378,19 @@ oc get applications -n openshift-gitops
 - Upgrading from the one-terminal cockpit (before chart 0.3.37), the sync stalls deleting PVC
   `showroom-shared-homes`: scale `showroom-shared` and `showroom-shared-demos` in `ogsr-showroom` to 0.
 
+### Argo CD controller pinned at its CPU limit or OOMKilled
+
+Clusters installed before 2026-11-13 run the controller at 2 CPU / 6Gi and cache `Project`s. A
+classroom running `ws prep` together then takes ~10 min per prep, and the controller can be OOMKilled.
+Fix it in place; no reinstall:
+
+1. `platform-portfolio/argocd-bootstrap/argocd-exclusions.sh` — adds the `Project` exclusion, prior
+   list recorded. The controller re-syncs its cache for ~2-3 min.
+2. `oc apply -f platform-portfolio/argocd-bootstrap/operator/argocd-controller-resources.yaml` — 4 CPU /
+   10Gi. Restarts the controller. Only on a cluster this workshop already raised (its prior sizing is
+   recorded); otherwise re-run the install, which asks first.
+3. Check: `argocd-exclusions.sh --check` prints ✅.
+
 ### A namespace is stuck Terminating
 
 ```bash
@@ -481,7 +495,9 @@ operators and the workshop's own namespaces, it changes these cluster-wide setti
 - **Nodes:** labels every node with a synthetic zone (`workshop.redhat.com/zone`) and labels and taints
   one worker as the batch pool (`workshop.redhat.com/pool=batch:NoSchedule`).
 - **Console:** enables the operators' console plugins.
-- **Argo CD:** raises the `openshift-gitops` controller memory limit to 6Gi.
+- **Argo CD:** raises the `openshift-gitops` controller limits to 4 CPU / 10Gi (requests stay 250m / 2Gi)
+  and adds a `project.openshift.io/Project` rule to its `resourceExclusions`. Prior values are recorded;
+  uninstall restores them.
 - **Cluster RBAC and policy:** attendee ClusterRoles and bindings (read-only cluster views, Gateway
   rights in their own namespaces), and an admission policy that limits attendee Argo CD Applications.
 - **Shared objects:** a `java-21` builder ImageStream in `openshift`, and Kueue cluster queues.

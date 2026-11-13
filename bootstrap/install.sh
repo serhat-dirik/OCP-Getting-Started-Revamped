@@ -834,22 +834,34 @@ assert_no_batch_taint_pending() {
 # one, else the live Subscription. Read-only.
 ARGO_TARGET_MEM="$(grep -A2 'limits:' "$(dirname "$PORTFOLIO_INSTALL")/operator/argocd-controller-resources.yaml" 2>/dev/null \
                     | grep -m1 'memory:' | sed 's/.*memory:[[:space:]]*//' | tr -d '"' || true)"
-ARGO_TARGET_MEM="${ARGO_TARGET_MEM:-6Gi}"
+ARGO_TARGET_MEM="${ARGO_TARGET_MEM:-10Gi}"
 _gitops_adopted="$(oc get configmap "$STATE_CM" -n "$STATE_NS" -o jsonpath='{.data.gitops_preexisted}' 2>/dev/null || true)"
 if [[ -z "$_gitops_adopted" ]] \
    && oc get subscriptions.operators.coreos.com openshift-gitops-operator -n openshift-gitops-operator >/dev/null 2>&1; then
   _gitops_adopted="true"
 fi
 _argo_cur_mem="$(oc get argocd openshift-gitops -n openshift-gitops -o jsonpath='{.spec.controller.resources.limits.memory}' 2>/dev/null || true)"
-if [[ "$_gitops_adopted" == "true" && "$_argo_cur_mem" != "$ARGO_TARGET_MEM" ]]; then
-  warn "this cluster's OpenShift GitOps is ADOPTED and its controller memory limit is ${_argo_cur_mem:-the operator default 2Gi}."
-  warn "   The workshop needs ${ARGO_TARGET_MEM} (below that the controller is OOMKilled and nothing syncs)."
-  warn "   Raising it changes a resource the cluster owner owns and restarts their controller; the prior"
-  warn "   value is recorded first and ogsr-uninstall.sh puts it back."
+# The same consent covers the Project exclusion (argocd-exclusions.sh: its watch never opens, so the
+# controller re-lists every project each second). Only asked about when the CR exists to check.
+_argo_need_excl="false"
+if [[ "$_gitops_adopted" == "true" ]] && oc get argocd openshift-gitops -n openshift-gitops >/dev/null 2>&1 \
+   && ! "$(dirname "$PORTFOLIO_INSTALL")/argocd-exclusions.sh" --check >/dev/null 2>&1; then
+  _argo_need_excl="true"
+fi
+if [[ "$_gitops_adopted" == "true" && ( "$_argo_cur_mem" != "$ARGO_TARGET_MEM" || "$_argo_need_excl" == "true" ) ]]; then
+  warn "this cluster's OpenShift GitOps is ADOPTED; the workshop tunes its application-controller:"
+  if [[ "$_argo_cur_mem" != "$ARGO_TARGET_MEM" ]]; then
+    warn "   • memory limit ${_argo_cur_mem:-the operator default 2Gi} → ${ARGO_TARGET_MEM} (below that it is OOMKilled and nothing syncs; restarts their controller)"
+  fi
+  if [[ "$_argo_need_excl" == "true" ]]; then
+    warn "   • exclude project.openshift.io/Project from its cache (it re-lists every project each second otherwise)"
+  fi
+  warn "   Both change a resource the cluster owner owns; the prior values are recorded first and"
+  warn "   ogsr-uninstall.sh puts them back."
   _argo_decision="${OGSR_ADOPTED_ARGOCD_MEMORY:-}"
   if [[ -z "$_argo_decision" ]]; then
     if [[ -t 0 ]]; then
-      printf '   Raise it to %s and continue? [y/N] ' "$ARGO_TARGET_MEM"
+      printf '   Tune it as above and continue? [y/N] '
       read -r _reply </dev/tty || _reply=""
       case "$_reply" in [yY]|[yY][eE][sS]) _argo_decision="apply" ;; *) _argo_decision="refuse" ;; esac
     else
@@ -859,12 +871,13 @@ if [[ "$_gitops_adopted" == "true" && "$_argo_cur_mem" != "$ARGO_TARGET_MEM" ]];
   fi
   if [[ "$_argo_decision" != "apply" ]]; then
     err "not installing. Nothing on this cluster has been changed."
-    err "   To proceed: OGSR_ADOPTED_ARGOCD_MEMORY=apply ./bootstrap/install.sh — or raise it yourself first:"
+    err "   To proceed: OGSR_ADOPTED_ARGOCD_MEMORY=apply ./bootstrap/install.sh — or tune it yourself first:"
     err "     oc -n openshift-gitops patch argocd openshift-gitops --type merge \\"
-    die "       -p '{\"spec\":{\"controller\":{\"resources\":{\"limits\":{\"memory\":\"${ARGO_TARGET_MEM}\"},\"requests\":{\"memory\":\"2Gi\"}}}}}'"
+    err "       -p '{\"spec\":{\"controller\":{\"resources\":{\"limits\":{\"memory\":\"${ARGO_TARGET_MEM}\"},\"requests\":{\"memory\":\"2Gi\"}}}}}'"
+    die "     $(dirname "$PORTFOLIO_INSTALL")/argocd-exclusions.sh"
   fi
   export OGSR_ADOPTED_ARGOCD_MEMORY="apply"
-  ok "adopted Argo CD controller: consent given — it is raised to ${ARGO_TARGET_MEM} at step [1/6]"
+  ok "adopted Argo CD controller: consent given — it is tuned at step [1/6]"
 fi
 
 info "[0/6] capturing uninstall-state (prior cluster state for a non-destructive uninstall)"
@@ -944,6 +957,12 @@ if oc get subscriptions.operators.coreos.com openshift-gitops-operator -n opensh
   # function by a later refactor.
   if [[ -n "$ARGO_RES_PRIOR" ]]; then
     record_once gitops_argocd_controller_resources_b64 "$ARGO_RES_PRIOR"
+  fi
+  # Same contract for .spec.resourceExclusions (argocd-exclusions.sh appends the Project rule; absence =
+  # the CR carried no list; ogsr-uninstall.sh's restore_argocd_resource_exclusions() reads it back).
+  ARGO_EXCL_PRIOR="$(oc get argocd openshift-gitops -n openshift-gitops -o jsonpath='{.spec.resourceExclusions}' 2>/dev/null | base64 | tr -d '\n' || true)"
+  if [[ -n "$ARGO_EXCL_PRIOR" ]]; then
+    record_once gitops_argocd_resource_exclusions_b64 "$ARGO_EXCL_PRIOR"
   fi
 else
   record_once gitops_preexisted false

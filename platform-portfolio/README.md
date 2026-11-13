@@ -84,7 +84,9 @@ cluster, which is how you make a lean install.
 
 ```
 argocd-bootstrap/   the only imperative step: install the GitOps operator, then create one
-                    Argo CD Application per stack
+                    Argo CD Application per stack. Also tunes the controller: 4 CPU / 10Gi
+                    limits, and argocd-exclusions.sh keeps project.openshift.io/Project out of its
+                    cache (re-run it alone on an installed cluster; --check only reports)
 stacks/<stack>/     one Application per component, ordered by sync wave
 components/<name>/  the actual manifests: Subscription, OperatorGroup, config CRs
 values/             per-cluster inputs that cannot be auto-detected (see values/README.md)

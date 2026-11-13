@@ -33,6 +33,9 @@
 #         c. NO consent recorded                  → NO patch at all (we never write to an adopted
 #            CR we cannot prove we changed);
 #         d. consent recorded, CR absent          → NO patch, no error (the org may have removed it).
+#   [3] RESTORE BEHAVIOUR for restore_argocd_resource_exclusions() (the Project rule from
+#       platform-portfolio/argocd-bootstrap/argocd-exclusions.sh, 2026-11-13): recorded list back
+#       verbatim, empty prior → field removed, no recorded change / absent CR / dry-run → no write.
 #
 # Runnable standalone (CI lint gate) and by hand; needs nothing but bash + grep + awk + base64.
 #
@@ -72,10 +75,12 @@ note() { echo "   $*"; }
 
 UNINSTALL="bootstrap/ogsr-uninstall.sh"
 FUNC="restore_argocd_controller_resources"
+FUNC_EXCL="restore_argocd_resource_exclusions"
 # Every file that writes into the ogsr-uninstall-state ConfigMap.
 WRITERS=(
   "bootstrap/install.sh"
   "platform-portfolio/argocd-bootstrap/install.sh"
+  "platform-portfolio/argocd-bootstrap/argocd-exclusions.sh"
   "helm/bootstrap/templates/job-state-capture.yaml"
 )
 
@@ -286,6 +291,96 @@ check_restore_behaviour() {  # func_file → 0 correct, 1 wrong, 2 harness broke
   return "$rc"
 }
 
+# ── [3] resourceExclusions restore ────────────────────────────────────────────
+# Same contract as [2] for the Project rule argocd-exclusions.sh appends: a recorded change writes the
+# recorded list back verbatim, or removes the field when none was recorded; no recorded change, an
+# absent CR or --dry-run writes nothing. Patches are recorded with their --patch-file body.
+run_excl_case() {  # func_file changed b64 cr_present dry → patch log on stdout
+  local func_file="$1" harness log rc=0
+  harness="$(mktemp)"; log="$(mktemp)"
+  {
+    echo '#!/usr/bin/env bash'
+    echo 'set -uo pipefail'
+    echo "DRY_RUN='${5}'"
+    echo "ARGO_NS='openshift-gitops'"
+    echo "T_CHANGED='${2}'"
+    echo "T_B64='${3}'"
+    echo "T_CR_PRESENT='${4}'"
+    echo "PATCH_LOG='${log}'"
+    cat <<'STUBS'
+ok()  { :; }
+err() { :; }
+residue_record() { :; }
+state() {
+  case "$1" in
+    argocd_resource_exclusions_changed_by_us) printf '%s' "$T_CHANGED" ;;
+    gitops_argocd_resource_exclusions_b64)    printf '%s' "$T_B64" ;;
+    *) : ;;
+  esac
+  return 0
+}
+oc() {
+  local a
+  case "$1" in
+    get) [[ "$T_CR_PRESENT" == "true" ]]; return ;;
+    patch)
+      printf '%s\n' "$*" >> "$PATCH_LOG"
+      for a in "$@"; do
+        if [[ "$a" == --patch-file=* ]]; then cat "${a#--patch-file=}" >> "$PATCH_LOG"; fi
+      done
+      return 0 ;;
+  esac
+  return 0
+}
+STUBS
+    cat "$func_file"
+    echo "${FUNC_EXCL}"
+  } > "$harness"
+  bash "$harness" >/dev/null 2>&1 || rc=$?
+  cat "$log"
+  rm -f "$harness" "$log"
+  return "$rc"
+}
+
+check_exclusions_restore() {  # func_file → 0 correct, 1 wrong, 2 harness broken
+  ran_check
+  local func_file="$1" out body rc=0 prior prior_b64
+  prior=$'- apiGroups:\n  - tekton.dev\n  kinds:\n  - TaskRun'
+  prior_b64="$(printf '%s' "$prior" | base64 | tr -d '\n')"
+  if [[ ! -s "$func_file" ]]; then
+    bad "[3] could not extract ${FUNC_EXCL}() — the guard cannot inspect what it claims to."
+    return 2
+  fi
+  # (a) recorded change + recorded list → ONE merge patch whose block scalar IS that list.
+  out="$(run_excl_case "$func_file" true "$prior_b64" true false)"
+  body="$(printf '%s\n' "$out" | sed -n '/resourceExclusions: |2$/,$p' | tail -n +2 | sed 's/^    //')"
+  if [[ "$(printf '%s\n' "$out" | grep -c -- '--type merge')" -ne 1 ]]; then
+    bad "[3a] recorded list: expected exactly ONE merge patch, got: ${out:-<none>}"; rc=1
+  elif [[ "$body" != "$prior" ]]; then
+    bad "[3a] recorded list: the recorded list was not patched back verbatim."
+    note "    got: ${out}"
+    rc=1
+  fi
+  # (b) recorded change, NO recorded list → remove the field.
+  out="$(run_excl_case "$func_file" true "" true false)"
+  if [[ "$(printf '%s\n' "$out" | grep -c -- '--type merge')" -ne 1 ]] \
+     || ! printf '%s\n' "$out" | grep -qx '  resourceExclusions: null'; then
+    bad "[3b] empty prior: expected ONE merge patch setting resourceExclusions to null, got: ${out:-<none>}"; rc=1
+  fi
+  # (c) no recorded change, (d) CR absent, (e) dry-run in both shapes → no write at all.
+  out="$(run_excl_case "$func_file" "" "$prior_b64" true false)"
+  if [[ -n "$out" ]]; then bad "[3c] no change recorded, yet the CR was patched: ${out}"; rc=1; fi
+  out="$(run_excl_case "$func_file" true "$prior_b64" false false)"
+  if [[ -n "$out" ]]; then bad "[3d] CR absent, yet a patch was issued: ${out}"; rc=1; fi
+  out="$(run_excl_case "$func_file" true "$prior_b64" true true)$(run_excl_case "$func_file" true "" true true)"
+  if [[ -n "$out" ]]; then bad "[3e] --dry-run issued a patch: ${out}"; rc=1; fi
+  if [[ "$rc" -eq 0 ]]; then
+    ok "[3] resourceExclusions restore: recorded list written back verbatim, empty prior removed,"
+    note "    no recorded change → no write, absent CR → no write, dry-run → no write"
+  fi
+  return "$rc"
+}
+
 run_check() {  # root → 0 clean, 1 broken, 2 uninspectable
   coverage_reset
   local root="$1" func_file rc=0 sub=0
@@ -301,6 +396,14 @@ run_check() {  # root → 0 clean, 1 broken, 2 uninspectable
   extract_func "${root}/${UNINSTALL}" "$FUNC" > "$func_file"
   sub=0
   check_restore_behaviour "$func_file" || sub=$?
+  rm -f "$func_file"
+  if [[ "$sub" -eq 2 ]]; then return 2; fi
+  if [[ "$sub" -ne 0 ]]; then rc=1; fi
+
+  func_file="$(mktemp)"
+  extract_func "${root}/${UNINSTALL}" "$FUNC_EXCL" > "$func_file"
+  sub=0
+  check_exclusions_restore "$func_file" || sub=$?
   rm -f "$func_file"
   if [[ "$sub" -eq 2 ]]; then return 2; fi
   if [[ "$sub" -ne 0 ]]; then rc=1; fi
@@ -524,9 +627,27 @@ CANARY
     '[2e] --dry-run issued a patch' \
     "$(printf '%s\n' '[2a] ' '[2b] ' '[2c] ' '[2d] ')" || return 2
 
+  # ── [3c] the trace-leaving defect for the exclusions restore: write without a recorded change.
+  f="$tmp/c-excl-without-consent.sh"
+  # `$changed` is ogsr-uninstall.sh's local variable, matched as text.
+  # shellcheck disable=SC2016
+  FUNC="$FUNC_EXCL" build_canary_func "$f" 's/^  if \[\[ "\$changed" != "true" \]\]; then return 0; fi$/  if false; then return 0; fi # CANARY/' || return 2
+  expect_canary "exclusions restored with no change recorded" check_exclusions_restore "$f" \
+    '[3c] no change recorded' \
+    "$(printf '%s\n' '[3a] ' '[3b] ' '[3d] ' '[3e] ')" || return 2
+
+  # ── [3a] the restore patches SOMETHING but drops the recorded list (writes an empty block).
+  f="$tmp/c-excl-drops-prior.sh"
+  # `$prior` is text in ogsr-uninstall.sh; single quotes keep it literal.
+  # shellcheck disable=SC2016
+  FUNC="$FUNC_EXCL" build_canary_func "$f" 's/^      printf .%s\\n. "\$prior" | sed .s\/\^\/    \/.$/      : # CANARY: prior dropped/' || return 2
+  expect_canary "exclusions restore drops the recorded list" check_exclusions_restore "$f" \
+    '[3a] recorded list: the recorded list was not patched back verbatim.' \
+    "$(printf '%s\n' '[3a] recorded list: expected exactly ONE' '[3b] ' '[3c] ' '[3d] ' '[3e] ')" || return 2
+
   ok "self-test ok — real tree clean (rc=0); write-only and read-only key canaries caught, and every"
   note "   assertion of [2] proven by its own canary: no patch, wrong patch type, wrong op, wrong value,"
-  note "   value written back instead of removed, no consent, absent CR, dry-run."
+  note "   value written back instead of removed, no consent, absent CR, dry-run; [3] no consent, list dropped."
   return 1
 }
 
