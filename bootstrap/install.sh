@@ -1675,8 +1675,8 @@ wait_for_workshop_layer_healthy() {
 }
 
 # The first sync of a large cohort outlasts a flat 10 minutes: 30 attendees on a fresh cluster took 33
-# minutes to Synced/Healthy (measured 2026-11-13), and a timeout here skips 6b and the credentials summary
-# and reports INCOMPLETE while Argo is still converging. 10 minutes plus 1 per attendee (40 for 30).
+# minutes to Synced/Healthy (measured 2026-11-13), and a timeout here skips 6b (the sign-in cleanup) and
+# reports INCOMPLETE while Argo is still converging. 10 minutes plus 1 per attendee (40 for 30).
 WORKSHOP_LAYER_ATTEMPTS=$(( 60 + USERS * 6 ))
 info "[6/6] waiting for workshop-config to become Healthy (up to $(( WORKSHOP_LAYER_ATTEMPTS / 6 ))m)…"
 wait_for_workshop_layer_healthy || true
