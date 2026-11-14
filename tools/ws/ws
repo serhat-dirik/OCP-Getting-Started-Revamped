@@ -21,6 +21,8 @@
 #   adm preflight                    SA/admin: pre-install readiness + adoption forecast (run before install)
 #   adm status [--user U]            SA/admin: one-glance cohort health (platform + per-user dashboard)
 #   adm ready [--timeout 60m]        SA/admin: wait until the workshop is ready for attendees (warm-ups done)
+#   adm hide [<module>…]             SA/admin: take modules out of this delivery (no module: list hidden)
+#   adm show <module>…               SA/admin: put hidden modules back (both restart the shared cockpits)
 #   adm diag [--user U] [<module>]   SA/admin: read-only troubleshooting bundle for a stuck attendee
 #   adm by-design                    SA/admin: every resource this workshop breaks/drifts ON PURPOSE
 #                                    — answers "is this Degraded/OutOfSync app expected?" in one step
@@ -3900,6 +3902,138 @@ disabled_csv() {  # → ",slug1,slug2," (delimited both ends for an exact-token 
   echo ",${csv// /},"
 }
 
+# ── adm hide|show ── take modules out of (or back into) THIS delivery after install, with no reinstall.
+# The lever is the one module_disabled/disabled_csv read: workshop-config's modulesDisabledCSV. Argo
+# re-renders the cockpit userdata (module-<slug>-hidden → nav + library), `ws prep` refuses and
+# `ws list` marks the module, and prune drops its per-user extras. The shared cockpits build pages
+# only at pod start (their Deployments carry no checksum over the userdata), hence the restart.
+# Re-running bootstrap/install.sh re-applies the Application, resetting the set to vars.yaml.
+csv_sorted() { tr ',' '\n' <<< "${1// /}" | sed '/^$/d' | sort | paste -sd, - || true; }  # csv → sorted csv
+
+cockpit_hidden_csv() {  # userdata ConfigMap → sorted csv of the slugs it marks module-<slug>-hidden
+  oc get cm "$1" -n "$SHOWROOM_NS" -o jsonpath='{.data.user_data\.yml}' 2>/dev/null \
+    | sed -nE 's/^[[:space:]]*module-([a-z0-9-]+)-hidden:.*/\1/p' | sort | paste -sd, - || true
+}
+
+cmd_hide_show() {  # hide|show [--dry-run] [<module>…] — WRITES; with no module, READ-ONLY list
+  local verb="$1"; shift
+  local tok slug title want=" " dry=false
+  for tok in "$@"; do
+    case "$tok" in
+      --dry-run) dry=true;;
+      -*) die "${verb}: unknown option '${tok}' — usage: ${WS_CMD} ${verb} [--dry-run] [<module>…]";;
+      *) slug="$(module_arg "$tok")" || exit $?; want="${want}${slug} ";;
+    esac
+  done
+  need_oc
+  local app="workshop-config" idx raw
+  idx="$(maas_param_index "$app" "$ARGO_NS" modulesDisabledCSV)"
+  [[ -n "$idx" ]] || die "no modulesDisabledCSV helm parameter on Application ${app} (${ARGO_NS}) — this install cannot hide modules after the fact; set modules_disabled in bootstrap/vars.yaml and re-run bootstrap/install.sh"
+  raw="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath="{.spec.source.helm.parameters[${idx}].value}")" \
+    || die "cannot read ${app}'s modulesDisabledCSV — inspect: oc get application ${app} -n ${ARGO_NS} -o yaml"
+
+  # One pass over the catalog: the listing, the per-module no-ops, and the new set in CATALOG order
+  # (the order `adm list` numbers them in), de-duplicated by construction.
+  local i=0 was now new="" n_new=0 n_listed=0
+  [[ "$want" != " " ]] || echo "Hidden from this delivery (${app} modulesDisabledCSV):"
+  while IFS=$'\t' read -r slug title; do
+    [[ -n "$slug" ]] || continue
+    i=$((i + 1))
+    was=false; if [[ ",${raw// /}," == *",${slug},"* ]]; then was=true; fi
+    now="$was"
+    if [[ "$want" == *" ${slug} "* ]]; then
+      if [[ "$verb" == hide ]]; then now=true; else now=false; fi
+      if [[ "$now" == "$was" && "$verb" == hide ]]; then info "m$(printf %02d "$i") ${slug} is already hidden — nothing to do for it"; fi
+      if [[ "$now" == "$was" && "$verb" == show ]]; then info "m$(printf %02d "$i") ${slug} is not hidden — nothing to do for it"; fi
+    fi
+    if [[ "$want" == " " && "$was" == true ]]; then
+      printf "  m%02d  %-34s %s\n" "$i" "$slug" "${title:-—}"; n_listed=$((n_listed + 1))
+    fi
+    if [[ "$now" == true ]]; then new="${new:+${new},}${slug}"; n_new=$((n_new + 1)); fi
+  done < <(_module_rows)
+  while IFS= read -r tok; do
+    [[ -z "$tok" || -n "$(position_of_slug "$tok")" ]] || warn "modulesDisabledCSV names '${tok}', which is not in modules.yaml — it hides nothing; the next hide/show drops it"
+  done < <(tr ',' '\n' <<< "${raw// /}")
+  if [[ "$want" == " " ]]; then
+    [[ "$n_listed" -gt 0 ]] || echo "  (none — every module is in this delivery)"
+    echo "  Change it:  ${WS_CMD} hide <module>…  ·  ${WS_CMD} show <module>…"
+    return 0
+  fi
+
+  # install.sh's rule, same reason: a delivery with nothing left installs green and teaches nothing.
+  [[ "$n_new" -lt "$i" ]] || die "hide: that would hide all ${i} modules — a workshop with nothing left is a silent empty workshop. Keep at least one in."
+  if [[ "$(csv_sorted "$new")" == "$(csv_sorted "$raw")" ]]; then
+    ok "nothing to change — modulesDisabledCSV stays '${raw}'"; return 0
+  fi
+  # A module the INSTALL left out may also lack its platform stack (pp-<stack>, both install paths):
+  # showing it would list a module whose `ws prep` can only time out. Hiding needs no such check.
+  if [[ "$verb" == show ]]; then
+    local st missing=""
+    command -v yq >/dev/null 2>&1 || warn "no yq on PATH — cannot check that the shown modules' platform stacks are installed"
+    for slug in $want; do
+      while IFS= read -r st; do
+        [[ -z "$st" ]] || oc get application "pp-${st}" -n "$ARGO_NS" >/dev/null 2>&1 || missing="${missing} ${slug}→pp-${st}"
+      done < <(yq -r ".modules[] | select(.slug == \"${slug}\") | .stacks[]?" "$MODULES_YAML" 2>/dev/null || true)
+    done
+    [[ -z "$missing" ]] || die "show: this install left out the platform stack(s) these modules need:${missing} — enable the module(s) in bootstrap/vars.yaml and re-run bootstrap/install.sh, which installs the stack and un-hides them"
+  fi
+  # An Application another Argo app tracks (the helm/bootstrap FSC path) would be self-healed back.
+  local owner
+  owner="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.metadata.annotations.argocd\.argoproj\.io/tracking-id}{.metadata.labels.app\.kubernetes\.io/instance}' 2>/dev/null || true)"
+  [[ -z "$owner" ]] || die "${app} is managed by another Argo CD app (${owner}) — a patch here would be reverted; change modulesDisabledCSV in that app's values instead"
+
+  # test-then-write: a reordered parameter list or a concurrent edit fails the patch, never mis-writes.
+  # An EMPTY value is stored with no `value` key at all (omitempty; measured live 2026-11-15), so a
+  # `replace` there is rejected: `add` creates-or-replaces, and the value is tested only when present.
+  local p="/spec/source/helm/parameters/${idx}" vtest="" patch
+  [[ -z "$raw" ]] || vtest=",{\"op\":\"test\",\"path\":\"${p}/value\",\"value\":\"$(_json_escape "$raw")\"}"
+  patch="[{\"op\":\"test\",\"path\":\"${p}/name\",\"value\":\"modulesDisabledCSV\"}${vtest},{\"op\":\"add\",\"path\":\"${p}/value\",\"value\":\"${new}\"}]"
+  info "modulesDisabledCSV: '${raw}' → '${new}'"
+  if [[ "$dry" == true ]]; then
+    echo "$patch"
+    oc patch application "$app" -n "$ARGO_NS" --type=json -p "$patch" --dry-run=server >/dev/null \
+      || die "the API server rejected the patch (dry run) — inspect: oc get application ${app} -n ${ARGO_NS} -o yaml"
+    ok "dry run: the API server accepts the patch — nothing written, nothing restarted"; return 0
+  fi
+  if [[ "$verb" == hide ]]; then
+    info "workshop-config also drops the module's per-user extras (e.g. Tempo viewer access, SonarQube seed, per-user Perses data source); its operators stay installed. ${WS_CMD} show restores them."
+  fi
+  oc patch application "$app" -n "$ARGO_NS" --type=json -p "$patch" >/dev/null \
+    || die "could not patch ${app} (parameter moved or value changed underneath?) — re-run; inspect: oc get application ${app} -n ${ARGO_NS} -o yaml"
+  ok "${app} modulesDisabledCSV = '${new}'"
+  # Auto-sync (both installers set it) picks the spec change up at once; an explicit operation on top
+  # would only wait out that ~6-min sync first. Sync ourselves only when auto-sync is off.
+  if [[ -z "$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.spec.syncPolicy.automated}' 2>/dev/null || true)" ]]; then
+    sync_app_operation "$app"
+  fi
+
+  local dep deps=() cm t0=$SECONDS want_set
+  want_set="$(csv_sorted "$new")"
+  for dep in "$SHARED_COCKPIT_DEP" showroom-shared-demos; do
+    if oc get deploy "$dep" -n "$SHOWROOM_NS" >/dev/null 2>&1; then deps+=("$dep"); fi
+  done
+  if [[ ${#deps[@]} -eq 0 ]]; then
+    ok "no shared cockpit here — per-user cockpits roll themselves on the value change (checksum/user-data)"; return 0
+  fi
+  info "waiting (≤600s) for Argo to render the new set into ${deps[*]/%/-userdata}…"
+  for dep in "${deps[@]}"; do
+    cm="${dep}-userdata"
+    until [[ "$(cockpit_hidden_csv "$cm")" == "$want_set" ]]; do
+      (( SECONDS - t0 < 600 )) || die "${cm} still hides '$(cockpit_hidden_csv "$cm")' after 600s (want '${want_set}') — inspect: oc get application ${app} -n ${ARGO_NS}; cockpits NOT restarted"
+      sleep 5
+    done
+  done
+  ok "cockpit userdata updated in $(( SECONDS - t0 ))s"
+  oc rollout restart "${deps[@]/#/deploy/}" -n "$SHOWROOM_NS" >/dev/null || die "could not restart ${deps[*]} in ${SHOWROOM_NS}"
+  # rollout status completes only when the NEW ReplicaSet is available and no old pod is left.
+  for dep in "${deps[@]}"; do
+    oc rollout status "deploy/${dep}" -n "$SHOWROOM_NS" --timeout=300s >/dev/null \
+      || die "${dep}: new pod not Ready in 300s — check: oc rollout status deploy/${dep} -n ${SHOWROOM_NS}"
+    ok "${dep} rebuilt and Ready"
+  done
+  ok "${verb}: done — attendees see the change on a page reload; ${WS_CMD} list shows the new set"
+}
+
 cmd_passwd() {  # SA/admin: rotate the shared workshop login password for the whole cohort. The password
   # lives in ONE place, the workshop-user-creds secret (Gitea ns, key 'password'); every account that uses
   # it is re-seeded from there by workshop-config's Sync hooks: cluster-idp-users (the cluster sign-in, in
@@ -6075,6 +6209,8 @@ main() {
   # generic parser below would otherwise bin as the module argument.
   [[ "$cmd" == "rebuild-images" ]] && { cmd_rebuild_images "$@"; return; }
   [[ "$cmd" == "ready" ]] && { cmd_ready "$@"; return; }
+  # hide/show take SEVERAL modules (the generic parser binds one) and no attendee — self-parse.
+  [[ "$cmd" == "hide" || "$cmd" == "show" ]] && { cmd_hide_show "$cmd" "$@"; return; }
   local user="" module="" extra=()
   # Which verbs bind a bare token as <module>, and which take an attendee at all. Both drive the
   # `*)` branch below: a bare token that is neither the module nor a userN is a typo on any verb
@@ -6174,11 +6310,12 @@ main() {
     # position number OR a slug" note. Cutting it short leaves a sentence hanging mid-clause. (36, up
     # from 27: the F-03 banner correction added nine header lines — two wrapped command rows, the
     # blank, and the six-line --user/presenter paragraph. Then 38: the two-line "both spellings must
-    # AGREE" note that user_conflict_guard enforces. Then 40: `ws by-design`'s two-line entry. Then 41: `adm ready`.)
+    # AGREE" note that user_conflict_guard enforces. Then 40: `ws by-design`'s two-line entry. Then 41: `adm ready`.
+    # Then 43: `adm hide` / `adm show`.)
     ""|help|-h|--help)
       # The header comment is the OPERATOR help and stays the full 21-verb list; the
       # attendee gets a written-for-them four. Same file, two audiences.
-      if ws_is_admin; then grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,41p'
+      if ws_is_admin; then grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,43p'
       else ws_attendee_help; fi ;;
     *) if ws_is_admin; then die "unknown command '$cmd' — try: adm help"
        else die "unknown command '$cmd' — try: ${WS_CMD} help"; fi ;;

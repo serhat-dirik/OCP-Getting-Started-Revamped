@@ -36,6 +36,9 @@ export PATH="$PWD/tools/ws:$PATH"
 1. **Install and verify:** [INSTALL.md › Install](INSTALL.md#2-install), steps 1–7.
 2. **Run the pre-flight checklist** on the instructor page of every module in your agenda.
 3. **Changed the AI model?** Run `tools/ws/adm maas show`: every attendee must read `working`.
+4. **Agenda changed since installing?** `tools/ws/adm hide <module>…` takes modules out of the
+   cockpit and `ws prep`; `tools/ws/adm show <module>…` puts them back. No reinstall. See
+   [INSTALL.md › During a delivery](INSTALL.md#3-during-a-delivery).
 
 ---
 

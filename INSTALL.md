@@ -229,6 +229,7 @@ Attendees self-serve with `ws prep`, `ws verify` and `ws reset`. Your commands:
 | Put someone back to the start | `tools/ws/ws reset <module> --user userN` |
 | Change the shared password | `tools/ws/adm passwd [NEWPASS]` |
 | Grow or shrink the cohort | `tools/ws/adm scale-users N` |
+| Hide a module after install, or bring it back | `tools/ws/adm hide <module>…` · `tools/ws/adm show <module>…` |
 | Push content changes to the cockpits | `tools/ws/adm git-refresh --restart-terminals --all` |
 | See what the AI steps run on | `tools/ws/adm maas show` |
 | Change the AI model or key | `tools/ws/adm maas set` |
@@ -241,6 +242,23 @@ Attendees self-serve with `ws prep`, `ws verify` and `ws reset`. Your commands:
   restarts the cockpits. Cockpits read content only at pod start, so this order matters.
 - A scope is required: `--all` or `--user U`. Without one it restarts nothing.
 - Run it between modules, never mid-exercise.
+
+**Hide a module after install** — no reinstall.
+
+```bash
+tools/ws/adm hide                                          # list what is hidden; changes nothing
+tools/ws/adm hide m07 packaging-distributing --dry-run     # print the patch; changes nothing
+tools/ws/adm hide m07 packaging-distributing               # out of the nav, library and ws prep
+tools/ws/adm show m07 packaging-distributing               # back in
+```
+
+- Both restart the shared cockpits to rebuild the nav. Attendees reload the page to see it.
+- Hiding also drops the module's per-user extras, such as Tempo viewer access, the SonarQube seed
+  and Perses data sources. Its operators stay installed. `adm show` restores the extras.
+- `adm show` refuses a module whose platform stack the install left out. Enable it in `vars.yaml`
+  and re-run `install.sh` instead.
+- Re-running `bootstrap/install.sh` resets the hidden set to what `vars.yaml` says
+  (`modules_disabled` or `modules_enabled`). Update `vars.yaml` to keep the change.
 
 **Change the AI model or rotate the key** — no reinstall.
 

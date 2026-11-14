@@ -132,12 +132,16 @@ _run() {
         rebuild_begin() { echo "PARSE-OK user=${scope:-}"; exit 0; } ;;
       maas)
         need_oc() { echo "PARSE-OK user=${scope_user:-}"; exit 0; } ;;
+      hide|show)   # cmd_hide_show resolves every <module> BEFORE need_oc; no attendee, so user= is empty
+        need_oc() { echo "PARSE-OK user= modules=${want:-}"; exit 0; } ;;
     esac
 
     # ── the canary switch ──
     case "$neuter" in
       conflict)   user_conflict_guard()  { return 0; } ;;
       positional) unexpected_positional() { return 0; } ;;
+      audience)   ws_verb_allowed()       { return 0; } ;;
+      module)     module_arg()            { echo "$1"; } ;;
       "")         : ;;
       *)          echo "SELFTEST-HARNESS: unknown neuter '${neuter}'" >&2; exit 98 ;;
     esac
@@ -155,6 +159,8 @@ _run() {
 # Each assertion belongs to a CLASS, and a class is what a canary neuters:
 #   conflict    — protected by user_conflict_guard
 #   positional  — protected by unexpected_positional
+#   audience    — protected by ws_verb_allowed (an operator verb typed into `ws` exits 2)
+#   module      — protected by module_arg (an unknown <module> is refused, never passed through)
 #   control     — must hold in EVERY mode, neutered or not. These are what stop a canary from
 #                 "passing" because the override simply broke the parser: a neuter that also
 #                 flipped a control would be caught here rather than certified.
@@ -174,7 +180,7 @@ _record() {  # <class> <label> <ok|detail>
 }
 
 # expect_refusal <class> <label> <needle…> -- <argv…>
-#   ws must exit 1 AND the message must contain every needle. rc alone is not enough: `ws prep m07
+#   ws must exit 1 (WANT_RC=2 for the audience gate) AND the message must contain every needle. rc alone is not enough: `ws prep m07
 #   user3 --user user4` exited 1 for a dozen unrelated reasons during development, and a canary
 #   judged on rc would have certified a detector that never ran (tools/lint/cohort-ops-guard.sh
 #   records the same lesson — six of its fourteen assertions were deletable without changing rc).
@@ -190,8 +196,8 @@ expect_refusal() {
   if grep -q 'SELFTEST-VIOLATION' <<<"$out"; then
     _record "$class" "$label" "HARNESS: reached oc — a stub is missing: ${out}"; return
   fi
-  if [[ "$rc" -ne 1 ]]; then
-    _record "$class" "$label" "got ${rc}, expected 1 (a refusal); output: $(tr '\n' ' ' <<<"$out")"; return
+  if [[ "$rc" -ne "${WANT_RC:-1}" ]]; then
+    _record "$class" "$label" "got ${rc}, expected ${WANT_RC:-1} (a refusal); output: $(tr '\n' ' ' <<<"$out")"; return
   fi
   for n in "${needles[@]}"; do
     if ! grep -qF -- "$n" <<<"$out"; then
@@ -350,6 +356,20 @@ run_suite() {
     "you meant 'user1'" -- prep m07 --user 1
   expect_refusal control "shape: 'user3 --user 1' names the TYPO, not a conflict" \
     "you meant 'user1'" -- prep m07 user3 --user 1
+
+  # 9. adm hide|show: operator-only, and every <module> goes through the ONE resolver. WS_AUDIENCE as a
+  #    call prefix reaches the sourced ws inside _run's subshell, so these run on the ATTENDEE surface.
+  for v in hide show; do
+    WANT_RC=2 WS_AUDIENCE=attendee expect_refusal audience "ws ${v}: operator verb exits 2 on the attendee surface" \
+      "'${v}' is an instructor/operator command" "adm ${v}" -- "$v" m07
+  done
+  WS_AUDIENCE=attendee expect_accepted control "ws list: the audience gate still lets attendee verbs through" "" -- list
+  expect_refusal module "adm hide: an unknown slug is refused before any cluster call" \
+    "unknown module 'nosuch-module'" -- hide m07 nosuch-module
+  expect_refusal module "adm show: an out-of-range number is refused" \
+    "module number out of range: 'm99'" -- show m99
+  expect_accepted control "adm hide: mNN and slug resolve, several at once" "" -- hide m07 packaging-distributing
+  expect_accepted control "adm hide: no module = the read-only list" "" -- hide
 }
 
 # ── modes ────────────────────────────────────────────────────────────────────────────────────────
@@ -382,7 +402,8 @@ run_real() {  # → 0 contract holds, 1 broken, 2 nothing inspected
   echo "   both orders of positional-vs---user across prep/start/verify/smoke/reset/solve/doctor/status/diag,"
   echo "   rebuild-images and maas show|set; repeated --user on git-refresh/session-refresh; --all-users"
   echo "   mixed with a named attendee; a mistyped attendee token is named instead of dropped; and agreeing"
-  echo "   spellings, --yes, --entry-only and the existing shape checks all still behave exactly as before."
+  echo "   spellings, --yes, --entry-only and the existing shape checks all still behave exactly as before;"
+  echo "   ws hide|show exit 2 on the attendee surface and adm hide|show refuse an unknown module."
   return 0
 }
 
@@ -453,7 +474,7 @@ self_test() {
   # leave the real detector in place, every canary assertion would keep passing, and the failure
   # would read as "the detector is fine" — the exact inversion this file exists to prevent.
   local fn
-  for fn in user_conflict_guard unexpected_positional; do
+  for fn in user_conflict_guard unexpected_positional ws_verb_allowed module_arg; do
     if ! grep -qE "^${fn}\(\)" "$WS"; then
       fail "SELF-TEST could not run: tools/ws/ws defines no ${fn}() — the canary override would shadow nothing."
       return 2
@@ -462,11 +483,14 @@ self_test() {
 
   run_canary conflict   conflict   || return 1
   run_canary positional positional || return 1
+  run_canary audience   audience   || return 1
+  run_canary module     module     || return 1
 
   pass "self-test ok — with user_conflict_guard neutered every conflict assertion resolves an identity"
   echo "   instead of refusing, and with unexpected_positional neutered every mistyped token is silently"
   echo "   dropped again; in both runs the controls (agreeing spellings, --yes, --entry-only, the shape"
-  echo "   checks) stayed green, so each canary implicates exactly one detector."
+  echo "   checks) stayed green, so each canary implicates exactly one detector. Same for ws_verb_allowed"
+  echo "   (ws hide|show then runs) and module_arg (adm hide|show then passes an unknown module through)."
   # House convention (tools/lint/_parse-guard-args.sh): --self-test exits EXACTLY 1 on success.
   return 1
 }
