@@ -49,19 +49,17 @@ NS={user}-dev
 echo "app namespace: $NS"
 ----
 
-You are the platform engineer for Parasol's *claims* application.
-Its container image already lives in the cluster's internal registry, tracked by a `parasol-claims` *ImageStream* in `{user}-dev`, seeded with a single `1.0` tag.
-In this lab you take that image through its lifecycle — *promote* it by immutable digest, *re-import* a base image on a schedule, *deploy* it with a private-registry pull secret, and *publish* your own catalog entry — then you *read* the cluster-wide controls a platform team uses to govern where images come from and what the catalog offers.
+As Parasol's platform engineer, you take the claims image (the `parasol-claims` *ImageStream* in `{user}-dev`, one `1.0` tag) through its lifecycle, then *read* the cluster-wide controls over where images come from and what the catalog offers.
 
-[TIP]
-.Two ways for most steps; a few are terminal-only
+TIP: Pick the *Console* or *CLI* tab; the tabs stay in sync. Terminal reconnected? *Re-run the exercise's first block.* Digests, ages and counts in the expected output will differ: read the *shape*.
+
+.Tabs, terminal-only steps and the sample values
+[%collapsible]
 ====
-Most steps are offered two ways: the *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`), the *CLI* tab uses `oc` in the *Terminal* tab beside these instructions.
-Pick a path once — the tabs stay in sync across the page.
+The *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`), the *CLI* tab uses `oc` in the *Terminal* tab beside these instructions.
 A few steps are *terminal-only* because the console adds nothing: reading digests, the scheduled-import break-and-fix, and the read-only governance sweep are quickest in the terminal.
-Each exercise that needs it opens with a block that sets the `$NS` shortcut in the terminal.
-*If your terminal reconnects, run the exercise's first block again* (in exercise 1, the shortcut block above) — a fresh shell has no shortcuts.
-The expected-output blocks name *your* namespace, `{user}-dev`. The `sha256` digests, ages and counts in them are from the capture run and *will* differ on your cluster — read the *shape*, not the exact values.
+Each exercise that needs it opens with a block that sets the `$NS` shortcut in the terminal (in exercise 1, the shortcut block above); a fresh shell after a reconnect has no shortcuts.
+The expected-output blocks name *your* namespace, `{user}-dev`. The `sha256` digests, ages and counts in them are from the capture run and *will* differ on your cluster.
 ====
 endif::demo[]
 
@@ -276,8 +274,16 @@ ifndef::demo[]
 == 1. Tour the internal registry and your ImageStream
 ⏱ *~5 min* · read the registry topology, the seeded stream, digests, and pull-through
 
-Start by seeing *where* your images live.
-The cluster's internal registry is an in-cluster Service — read its address and check whether it has an external route:
+Before promoting anything, learn where Parasol's images live and what an ImageStream records about them.
+
+*You'll end with:* the registry's address, and `parasol-claims` read down to its source, digest and pull-through policy.
+
+[mermaid]
+....
+include::example$diagrams/registry-images-catalog-governance/06-registry-pull-through.mmd[]
+....
+
+Read the registry's address and look for a route:
 
 [source,sh,role=execute]
 ----
@@ -292,10 +298,16 @@ internal registry: image-registry.openshift-image-registry.svc:5000
 No resources found in openshift-image-registry namespace.
 ----
 
+*What just happened:* the registry is an in-cluster Service on `:5000`, with no route.
+
+.No route? Then how do images get in?
+[%collapsible]
+====
 `image-registry.openshift-image-registry.svc:5000` is the internal Service address on every OpenShift cluster.
 This lab runs everything through the API (`oc tag`, `oc import-image`), never a `docker push` from your laptop — that path works whether or not your cluster happens to expose a route.
+====
 
-Now look at *your* image — the `parasol-claims` ImageStream, seeded with one tag:
+Now open *your* image:
 
 // Grounded 2026-07-30 (as user1, unified console OCP 4.21): the *Builds* nav group expands to
 // BuildConfigs · Builds · ImageStreams, so Builds → ImageStreams is the correct path. The
@@ -310,8 +322,7 @@ Now look at *your* image — the `parasol-claims` ImageStream, seeded with one t
 Console::
 +
 --
-In the {ocp_console_url}[web console^] (project `{user}-dev`), open *Builds* → *ImageStreams* → `parasol-claims`.
-The detail page lists the *tag* (`1.0`), the *image repository* inside the cluster, and the resolved *`sha256`* digest.
+In the {ocp_console_url}[web console^] (project `{user}-dev`), open *Builds* → *ImageStreams* → `parasol-claims`: the tag, the image repository and the resolved `sha256`.
 
 image::registry-images-catalog-governance/registry-images-catalog-governance-01-imagestream-detail.png["The parasol-claims ImageStream detail page in this project: Image count 1, an Image repository of image-registry.openshift-image-registry.svc:5000 followed by the project and stream name, and a Tags table with a single row. That row is the whole idea — the tag parasol-claims:1.0 in the Name column, the mutable reference it was imported From, and the immutable sha256 digest it currently resolves to in the Identifier column."]
 --
@@ -339,12 +350,23 @@ parasol-claims   image-registry.openshift-image-registry.svc:5000/{user}-dev/par
       4 minutes ago
 ----
 
-Two lines matter.
-*"tagged from …parasol-claims:1.0"* is the *source* — the shared build this stream tracks.
-*"prefer registry pullthrough when referencing this tag"* is `referencePolicy: Local` at work: workloads pull the bits *from the internal registry*, which caches them, instead of reaching the source every time.
-And the `* …@sha256:…` line is the *immutable digest* the tag currently resolves to.
+*What just happened:* three lines carry the idea.
 
-Confirm the two properties directly — the source reference and the pull-through policy:
+[cols="2,3",options="header"]
+|===
+|Line |What it tells you
+
+|`tagged from …parasol-claims:1.0`
+|The *source*: the shared build it tracks
+
+|`prefer registry pullthrough …`
+|`referencePolicy: Local`: pods pull *from the internal registry*, which caches the bits, not from the source
+
+|`* …@sha256:…`
+|The *immutable digest* the tag resolves to now
+|===
+
+Confirm the source and pull-through policy:
 
 [source,sh,role=execute]
 ----
@@ -357,8 +379,7 @@ oc get is parasol-claims -n $NS -o jsonpath='{range .spec.tags[*]}{.name}{" -> "
 1.0 -> image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims:1.0  referencePolicy=Local
 ----
 
-Finally, peek at a *curated* stream the platform team shipped for everyone — the shared `java-21` builder image in the `openshift` namespace.
-It's the same mechanics you just read, applied as *governance* (you'll return to this in exercise 7):
+Finally, a stream the platform team curates for everyone, the shared `java-21` builder:
 
 [source,sh,role=execute]
 ----
@@ -371,15 +392,17 @@ oc get is java-21 -n openshift -o jsonpath='{range .spec.tags[*]}{.name}{" sched
 latest scheduled=true referencePolicy=Local
 ----
 
+*What just happened:* the same mechanics as *governance*: the builder stays current (`scheduled`) and cached (`Local`). Exercise 7 returns to it.
+
 [.checkpoint]
 ****
-✔ *Verify:* You found the internal registry is an in-cluster Service on `:5000` with *no route*, read the seeded `parasol-claims` stream resolving its `1.0` tag to an *immutable `sha256`*, confirmed `referencePolicy: Local` (registry pull-through), and saw the platform's curated `java-21` builder stream using the very same *scheduled* + *Local* mechanics.
+✔ *Verify:* the registry on `:5000` has *no route*; `parasol-claims:1.0` resolves to an immutable `sha256` with `referencePolicy=Local`; `java-21` shows `scheduled=true referencePolicy=Local`.
 ****
 
 == 2. Tag and promote an image
 ⏱ *~5 min* · a promotion is a pointer to immutable content, not a rebuild
 
-Set this exercise's shortcut first (re-run this block after a reconnect):
+Set the shortcut first (re-run it after a reconnect):
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -387,17 +410,16 @@ NS={user}-dev
 echo "app namespace: $NS"
 ----
 
-Parasol tested `1.0` and now wants it in production.
-You *won't* rebuild and you *won't* re-push a tag — you'll *promote* by adding a `prod` tag that points at the *exact digest* `1.0` resolves to.
-That's the whole value of an ImageStream: `prod` becomes a provable pointer to the image you tested.
+Parasol tested `1.0` and wants it in production: no rebuild, no re-pushed tag.
+
+*You'll end with:* a `prod` tag pinned to the *exact digest* behind `1.0`, the image you tested.
 
 [mermaid]
 ....
 include::example$diagrams/registry-images-catalog-governance/02-immutable-promote.mmd[]
 ....
 
-Both the `1.0` and `prod` tags resolve to the *same* `sha256` — production runs the exact bits you tested.
-The *red* path is the anti-pattern you're avoiding: re-pushing a mutable tag yields different bits nobody can prove match.
+The *red* path is the anti-pattern: a re-pushed mutable tag, different bits, no proof.
 
 // Grounded 2026-07-29 on OCP 4.22.5: `oc explain imagestream.spec.tags` confirms
 // `tags` is a real `[]TagReference` field on ImageStream.spec, so a YAML edit adding an entry there is
@@ -412,8 +434,8 @@ Console::
 +
 --
 Open *Builds* → *ImageStreams* → `parasol-claims` → *Actions* → *Edit ImageStream* (YAML).
-Add a second entry under `spec.tags` named `prod` whose `from.kind` is `ImageStreamImage` and `from.name` is `parasol-claims@<the sha256 you saw in exercise 1>`, then *Save*.
-The CLI tab does exactly this in one command — reach for it here.
+Add a `spec.tags` entry named `prod` whose `from.kind` is `ImageStreamImage` and `from.name` is `parasol-claims@<the sha256 you saw in exercise 1>`, then *Save*.
+The CLI tab does this in one command; reach for it here.
 
 image::registry-images-catalog-governance/registry-images-catalog-governance-02-imagestream-two-tags.png["The parasol-claims ImageStream detail page after the promote: Image count has gone from 1 to 2, and the Tags table now carries two rows — parasol-claims:1.0 and parasol-claims:prod. Read across to the Identifier column: both resolve to the same sha256:ca759845... digest. The promote created a second NAME for one image, not a second copy of it."]
 --
@@ -433,7 +455,7 @@ oc tag $NS/parasol-claims:1.0 $NS/parasol-claims:prod
 Tag parasol-claims:prod set to {user}-dev/parasol-claims@sha256:49d01c7054e3d08cf8de689ceb740d2e580c91ae1470618e43b0d8575abe7322.
 ----
 
-Now *prove* the promotion is honest — `prod` and `1.0` must resolve to the *same* digest:
+TIP: *Predict, then run:* will `1.0` and `prod` print the same `sha256`, or two different ones?
 
 [source,sh,role=execute]
 ----
@@ -447,27 +469,25 @@ oc get is parasol-claims -n $NS -o jsonpath='{range .status.tags[*]}{.tag}{" -> 
 prod -> image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims@sha256:49d01c7054e3d08cf8de689ceb740d2e580c91ae1470618e43b0d8575abe7322
 ----
 
-Same `sha256` on both lines.
-`prod` is now a name for the *exact image* you tested as `1.0` — if someone re-pushes `1.0` upstream later, your `prod` still points at the digest you promoted, because a digest is content-addressed and can never move.
-That is a promotion you can put in an audit.
+*What just happened:* same `sha256`, two names. Re-push `1.0` upstream later and `prod` still holds the digest you promoted: a promotion you can audit.
 
-[NOTE]
 .Why not just re-tag at the registry?
+[%collapsible]
 ====
 Re-pushing a `prod` tag at a plain registry means "whatever `prod` points to *now*" — it can silently change.
-Promoting through an ImageStream records the *digest*, so `prod` is pinned to immutable content.
+Promoting through an ImageStream records the *digest*, so `prod` is pinned to immutable content, because a digest is content-addressed and can never move.
 The tag is a convenient *name*; the digest is the *identity*.
 ====
 
 [.checkpoint]
 ****
-✔ *Verify:* `oc tag` added a `prod` tag to `parasol-claims`, and `prod` resolves to the *same `sha256`* as `1.0` — a promotion by immutable digest, not a rebuild or a mutable re-push.
+✔ *Verify:* `prod` and `1.0` resolve to the *same `sha256`*: promoted by digest, not rebuilt or re-pushed.
 ****
 
 == 3. Re-import an external base image on a schedule
 ⏱ *~5 min* · keep a base image current automatically — and read an import failure
 
-Set this exercise's shortcut first (re-run this block after a reconnect):
+Set the shortcut first (re-run it after a reconnect):
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -475,9 +495,14 @@ NS={user}-dev
 echo "app namespace: $NS"
 ----
 
-Base images move — a CVE gets patched and the upstream tag is re-pushed.
-An ImageStream can *re-import* on a schedule so your reference stays current without anyone watching.
-Create one that tracks Red Hat's UBI base image and re-checks it periodically:
+Base images move when upstream patches a CVE; Parasol wants its UBI base current with nobody watching.
+
+*You'll end with:* `ext-ubi` re-importing `ubi9/ubi:latest` on a schedule, and an import failure you can read.
+
+[mermaid]
+....
+include::example$diagrams/registry-images-catalog-governance/07-scheduled-import.mmd[]
+....
 
 // Grounded 2026-07-29 on OCP 4.22.5: `oc explain
 // imagestream.spec.tags.importPolicy.scheduled` confirms `scheduled` is a real boolean field, so a
@@ -490,8 +515,8 @@ Create one that tracks Red Hat's UBI base image and re-checks it periodically:
 Console::
 +
 --
-Open *Builds* → *ImageStreams* → *Create ImageStream* → *YAML view*, and create a stream named `ext-ubi` with a tag whose `from` is `registry.access.redhat.com/ubi9/ubi:latest` and whose `importPolicy.scheduled` is `true`, then *Create*.
-The *CLI* tab does the import *and* sets the schedule in one command — use it.
+Open *Builds* → *ImageStreams* → *Create ImageStream* → *YAML view*: a stream named `ext-ubi` with a tag whose `from` is `registry.access.redhat.com/ubi9/ubi:latest` and whose `importPolicy.scheduled` is `true`, then *Create*.
+The *CLI* tab imports *and* sets the schedule in one command; use it.
 --
 CLI::
 +
@@ -512,14 +537,9 @@ Name:			ext-ubi
 Namespace:		{user}-dev
 ----
 
-[IMPORTANT]
-.`oc import-image` uses your *current project*, not a `namespace/` prefix
-====
-Unlike `oc tag`, `oc import-image` does *not* read a `namespace/name` positional prefix — `oc import-image {user}-dev/ext-ubi` would create the stream in whatever project you're *currently* in, not `{user}-dev`.
-Always pass `-n $NS` with a *bare* stream name (as above) so it lands where you mean.
-====
+IMPORTANT: Unlike `oc tag`, `oc import-image` does *not* read a `namespace/` prefix; it uses your *current project*. Always pass `-n $NS` with a *bare* stream name.
 
-Confirm the schedule is set — this is what makes the re-import automatic:
+Confirm the schedule:
 
 [source,sh,role=execute]
 ----
@@ -534,10 +554,9 @@ latest scheduled=true
 resolved: registry.access.redhat.com/ubi9/ubi@sha256:3c3fa194551e503333f03a017bf418fc1f658545db1e2df1e58ccc67e203c324
 ----
 
-`scheduled=true` means OpenShift periodically re-checks `ubi9/ubi:latest` and pulls the new digest when it moves.
+*What just happened:* `scheduled=true`: OpenShift periodically re-checks `ubi9/ubi:latest` and pulls the new digest when it moves.
 
-*Now the break-and-fix.* Imports fail for real reasons — a typo in the registry path, a tag that doesn't exist — and the *import status* tells you exactly why.
-Try an import with a deliberately wrong repository name and *read the error*:
+*Break it:* import a repository that doesn't exist, and *read the error*:
 
 [source,sh,role=execute]
 ----
@@ -559,9 +578,9 @@ latest
 error: imported completed with errors
 ----
 
-*"name unknown: Repo not found"* — the registry has no such repository.
-That one line is the answer to almost every failed import: read the import status, and it names the cause (bad repo, missing tag, or — as you'll see in exercise 6 — a registry the *policy* doesn't allow).
-Fix it by importing the *correct* reference, and clean up the broken stream:
+*What just happened:* *"name unknown: Repo not found"*. The import status names the cause of almost every failed import: a bad repo, a missing tag, or (exercise 6) a registry the *policy* refuses.
+
+*Fix it:* delete the broken stream and import the *correct* reference:
 
 [source,sh,role=execute]
 ----
@@ -578,13 +597,13 @@ imagestream.image.openshift.io/ext-ubi imported
 
 [.checkpoint]
 ****
-✔ *Verify:* You created the `ext-ubi` stream that re-imports `ubi9/ubi:latest` on a *schedule* (`scheduled=true`), learned that `oc import-image` targets your *current project* (use `-n $NS`), and read a real import failure — *"name unknown: Repo not found"* — then re-imported the correct reference.
+✔ *Verify:* `ext-ubi` in `$NS` shows `scheduled=true`, and you read *"name unknown: Repo not found"* before re-importing the correct reference.
 ****
 
 == 4. Pull from a private registry with a pull secret
 ⏱ *~5 min* · the mechanics of authenticating a workload to a registry it doesn't own
 
-Set this exercise's shortcut first (re-run this block after a reconnect):
+Set the shortcut first (re-run it after a reconnect):
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -592,9 +611,16 @@ NS={user}-dev
 echo "app namespace: $NS"
 ----
 
-Public images (like the UBI base above) need no credentials.
-A *private* registry does — and the credential is a *pull secret* the workload presents when it pulls.
-Your namespace already has a sample one; inspect it (it's safe to decode — it's a non-secret teaching sample):
+Public images need no credentials; for a *private* registry, the workload presents a *pull secret* when it pulls.
+
+*You'll end with:* the sample `parasol-registry-creds` linked to the `default` ServiceAccount, and named on a Running workload.
+
+[mermaid]
+....
+include::example$diagrams/registry-images-catalog-governance/08-pull-secret-mechanics.mmd[]
+....
+
+Inspect the sample in your namespace (safe to decode: a non-secret teaching sample):
 
 [source,sh,role=execute]
 ----
@@ -609,18 +635,15 @@ type=kubernetes.io/dockerconfigjson
 {"auths":{"registry.parasol.example.com":{"username":"parasol-puller","password":"parasol","auth":"cGFyYXNvbC1wdWxsZXI6cGFyYXNvbA==","email":"puller@parasol.example.com"}}}
 ----
 
-[NOTE]
 .This is an *inert* sample — the host doesn't resolve
+[%collapsible]
 ====
 `registry.parasol.example.com` is a placeholder that doesn't exist, and the credential is a teaching sample, not a real secret.
 So you can't perform a real *pull* from it — but you *can* learn the two mechanics that wire a pull secret to a workload, which is the transferable skill.
 On a real private registry (or Red Hat Quay) you'd create this secret with `oc create secret docker-registry` using genuine credentials, and the *same* two mechanics apply unchanged.
 ====
 
-There are *two* ways to attach a pull secret; you'll use both.
-
-*Mechanic A — link it to a ServiceAccount.*
-Every pod runs as a ServiceAccount; linking the secret to a SA `--for=pull` means *every* pod that SA runs can authenticate to that registry, no per-pod config:
+*Mechanic A: link it to a ServiceAccount*, so every pod it runs can authenticate:
 
 [source,sh,role=execute]
 ----
@@ -634,23 +657,27 @@ oc get sa default -n $NS -o jsonpath='default SA pull secrets: {.imagePullSecret
 default SA pull secrets: default-dockercfg-... parasol-registry-creds
 ----
 
-*Mechanic B — name it on the pod.*
-The GitOps-clean form is to name the pull secret directly in a workload's `spec.template.spec.imagePullSecrets`.
-Deploy a small workload that references the secret this way.
-It runs a *public* Red Hat base image, so the pod is genuinely `Ready` — the pull-secret reference is the artifact you're wiring, not a real external pull.
+*Mechanic B: name it on the pod template* (`spec.template.spec.imagePullSecrets`), the GitOps-clean form.
+The workload runs a *public* Red Hat image, so it is genuinely `Ready`.
 
 [IMPORTANT]
 .Naming a pull secret *replaces* the ServiceAccount's — it does not add to it
 ====
+Name one secret on the pod template and *nothing* from the ServiceAccount is injected, not even the `default-dockercfg-…` secret for the **internal** registry.
+Pulling from both? Name *both* secrets on the pod template, or use mechanic A and name none.
+====
+
+.Why naming one secret drops the others
+[%collapsible]
+====
 This is the trap that makes mechanic B different from mechanic A, and it is worth more than the mechanic itself.
 
 The ServiceAccount admission plugin injects the SA's `imagePullSecrets` into a pod *only when the pod's own list is empty*.
-The moment you name one secret on the pod template, that list is no longer empty and *nothing* is injected — including the `default-dockercfg-…` secret that authenticates every pod to OpenShift's **internal** registry.
+The moment you name one secret on the pod template, that list is no longer empty and nothing is injected.
 
 So a pod template that names `parasol-registry-creds` and pulls from `image-registry.openshift-image-registry.svc:5000` fails with `authentication required`, even though the pull worked a moment earlier without the line and the SA is correctly linked.
 That is why the workload below deliberately pulls a *public* image: the only credential it needs is none.
-
-On a real private registry the same rule applies — if a pod must pull from *both* your private registry and the internal one, name *both* secrets on the pod template, or use mechanic A and name none.
+On a real private registry the same rule applies.
 ====
 
 // Grounded 2026-07-29 on OCP 4.22.5: `oc explain
@@ -664,8 +691,7 @@ On a real private registry the same rule applies — if a pod must pull from *bo
 Console::
 +
 --
-Open *Workloads* → *Deployments* → *Create Deployment* → *YAML view*, paste the manifest from the *CLI* tab, and *Create*.
-Note the `imagePullSecrets` entry naming `parasol-registry-creds` in the pod template.
+Open *Workloads* → *Deployments* → *Create Deployment* → *YAML view*, paste the manifest from the *CLI* tab (note its `imagePullSecrets`), and *Create*.
 --
 CLI::
 +
@@ -719,7 +745,7 @@ deployment.apps/parasol-registry-demo created
 deployment "parasol-registry-demo" successfully rolled out
 ----
 
-Confirm the pull-secret reference is on the pod template — the artifact that authenticates it to a private registry:
+Confirm the pull-secret reference is on the pod template:
 
 [source,sh,role=execute]
 ----
@@ -735,15 +761,30 @@ NAME                                     READY   STATUS    RESTARTS   AGE
 parasol-registry-demo-...                1/1     Running   0          5s
 ----
 
+*What just happened:* one secret, attached two ways:
+
+[cols="1,2,2",options="header"]
+|===
+| |A: ServiceAccount |B: pod template
+
+|Reaches
+|Every pod it runs
+|This workload only
+
+|The SA's secrets
+|Kept, beside `default-dockercfg-…`
+|*Replaced*
+|===
+
 [.checkpoint]
 ****
-✔ *Verify:* You decoded the sample dockerconfigjson pull secret, *linked* it to the `default` ServiceAccount for pull (mechanic A), and deployed a workload that *names* it in `imagePullSecrets` (mechanic B) — the pod is `Running` with the pull-secret reference wired. Both are how a workload authenticates to a private registry; the sample host is inert, so no real external pull occurs. And you know the rule that decides between them: naming a secret on the pod template *replaces* the ServiceAccount's injected credentials rather than adding to them, which is why the mechanic-B workload pulls a public image.
+✔ *Verify:* the `default` SA lists `parasol-registry-creds`, and `parasol-registry-demo` is `1/1 Running` with `imagePullSecrets: parasol-registry-creds`. No real pull occurs: the sample host is inert.
 ****
 
 == 5. Publish your own Software Catalog entry
 ⏱ *~5 min* · a namespaced Template appears in *your* catalog and nobody else's
 
-Set this exercise's shortcut first (re-run this block after a reconnect):
+Set the shortcut first (re-run it after a reconnect):
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -751,9 +792,16 @@ NS={user}-dev
 echo "app namespace: $NS"
 ----
 
-The Software Catalog isn't fixed — you can *add* to it.
-A `Template` you create in your *own* project becomes a one-click catalog entry in *your* Software Catalog only (contrast the cluster-wide samples operator, which you'll read in exercise 7).
-Create a Parasol claims quickstart Template — save this manifest and apply it:
+Parasol's claims team wants a one-click starter without a ticket: a `Template` in your *own* project, listed in *your* Software Catalog only.
+
+*You'll end with:* *Parasol Claims Quickstart* in your catalog, and a `claims-quickstart` pod from it, `1/1 Running`, `0` restarts.
+
+[mermaid]
+....
+include::example$diagrams/registry-images-catalog-governance/09-namespaced-template.mmd[]
+....
+
+Save the Template manifest and apply it:
 
 [source,sh,role=execute]
 ----
@@ -832,13 +880,25 @@ oc apply -f ~/parasol-claims-quickstart.yaml -n $NS
 template.template.openshift.io/parasol-claims-quickstart created
 ----
 
-Three settings in the Deployment make this a starter you can trust, not just one that starts:
+.Three settings that make it a starter you can trust, not just one that starts
+[%collapsible]
+====
+[cols="2,4",options="header"]
+|===
+|Setting |Why it is there
 
-* The two `QUARKUS_*_ACTIVE=false` variables run the claims service *without a database*. Its landing page answers and its claims API stays off. Without them the image looks for a database Service named `parasol-db`, which this project does not have, and crashes.
-* The `readinessProbe` counts the pod as ready only once the service answers on `/q/health/ready`, not the moment the container starts.
-* `minReadySeconds: 30` counts a pod as available only after it has stayed ready for 30 seconds, so a pod that crashes right after starting never counts as a successful rollout.
+|`QUARKUS_DATASOURCE_ACTIVE` and `QUARKUS_HIBERNATE_ORM_ACTIVE` set to `false`
+|Runs the claims service *without a database*: its landing page answers and its claims API stays off. Without them the image looks for a database Service named `parasol-db`, which this project does not have, and crashes.
 
-Confirm it's registered as a catalog entry in your namespace:
+|`readinessProbe` on `/q/health/ready`
+|Counts the pod as ready only once the service answers, not the moment the container starts.
+
+|`minReadySeconds: 30`
+|Counts a pod as available only after it has stayed ready for 30 seconds, so a pod that crashes right after starting never counts as a successful rollout.
+|===
+====
+
+Confirm the catalog entry:
 
 [source,sh,role=execute]
 ----
@@ -852,8 +912,7 @@ NAME                        DESCRIPTION                                         
 parasol-claims-quickstart   A one-click Parasol claims service (Deployment + Service) for this project's...   1 (all set)   2
 ----
 
-Now *deploy from it* — the whole point of a catalog entry.
-Use the console (where it appears in the Software Catalog) or `oc process` in the terminal:
+Now *deploy from it*:
 
 // Grounded 2026-07-29 on OCP 4.22.5, signed in as an attendee (user1), viewport 1600x1000:
 //   * The nav path is real: Ecosystem → Software Catalog · Installed Operators · Helm. Software
@@ -875,9 +934,8 @@ Use the console (where it appears in the Software Catalog) or `oc process` in th
 Console::
 +
 --
-Open *Ecosystem* → *Software Catalog*, filter to *Template*, and find *Parasol Claims Quickstart* — it appears because you added it to *this* project.
+Open *Ecosystem* → *Software Catalog*, filter to *Template*, and find *Parasol Claims Quickstart*.
 Click it → *Instantiate Template*, accept the `APP_NAME` default, and *Create*.
-No other project's catalog lists it — it's yours alone.
 
 image::registry-images-catalog-governance/registry-images-catalog-governance-03-developer-catalog-template.png["The Software Catalog narrowed to Templates — the breadcrumb reads Software Catalog then Templates — with the keyword box filtered to Parasol and 2 items returned: a Parasol Claims Quickstart tile (Provided by Parasol Insurance, described as a one-click Parasol claims service) and a Parasol PostgreSQL (ephemeral) tile. Both are badged Templates, but they come from different places: the Quickstart Template lives in this project, so only this project's catalog shows it, while the PostgreSQL Template lives in the cluster-wide openshift namespace, which every project's catalog shows."]
 --
@@ -901,7 +959,7 @@ Waiting for deployment "claims-quickstart" rollout to finish: 0 of 1 updated rep
 deployment "claims-quickstart" successfully rolled out
 ----
 
-Confirm the Deployment and Service the template produced, and that the pod is running with no restarts:
+Confirm what the template produced:
 
 [source,sh,role=execute]
 ----
@@ -921,15 +979,18 @@ NAME                                     READY   STATUS    RESTARTS   AGE
 pod/claims-quickstart-574fdfc99d-qw2xr   1/1     Running   0          67s
 ----
 
+*What just happened:* a self-service catalog entry: no cluster-admin, no ticket, and no other project's catalog lists it.
+
 [.checkpoint]
 ****
-✔ *Verify:* You published a namespaced `Template` (`parasol-claims-quickstart`) that appears in *your* Software Catalog only, then *instantiated* it to create a `claims-quickstart` Deployment + Service whose pod is `1/1 Running` with `0` restarts — a self-service catalog entry with no cluster-admin required. If the pod shows restarts instead, see *The quickstart pod crash-loops* on xref:registry-images-catalog-governance/troubleshooting.adoc[the troubleshooting page].
+✔ *Verify:* `claims-quickstart` (Deployment + Service) runs a pod `1/1 Running` with `0` restarts, deployed from `parasol-claims-quickstart` in *your* catalog only.
+Restarts instead? See *The quickstart pod crash-loops* on xref:registry-images-catalog-governance/troubleshooting.adoc[the troubleshooting page].
 ****
 
 == 6. Hit the import allowlist
 ⏱ *~5 min* · read where images may come from, get refused, fix it with an approved registry
 
-Set this exercise's shortcut first (re-run this block after a reconnect):
+Set the shortcut first (re-run it after a reconnect):
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -937,11 +998,17 @@ NS={user}-dev
 echo "app namespace: $NS"
 ----
 
-Everything so far was *yours* to change, in your own namespace.
-Which registries images may be imported from is decided *cluster-wide*, on the `Image` config object — and the platform team set it before the workshop started.
-You can't change it (one edit affects every tenant), but you can read it and run into it.
+Parasol's platform team set, *cluster-wide* on the `Image` config object, which registries images may come from.
+You can read it and run into it, but not change it: one edit affects every tenant.
 
-Read the policy (the read-only `platform-observer` role lets you read cluster configuration):
+*You'll end with:* a `docker.io` import refused at admission, and the same need met from a Red Hat registry.
+
+[mermaid]
+....
+include::example$diagrams/registry-images-catalog-governance/05-import-allowlist.mmd[]
+....
+
+Read the policy (your read-only `platform-observer` role can read cluster configuration):
 
 [source,sh,role=execute]
 ----
@@ -963,13 +1030,12 @@ status:
   internalRegistryHostname: image-registry.openshift-image-registry.svc:5000
 ----
 
-`allowedRegistriesForImport` is the whole policy: Red Hat's two registries, `quay.io` (where OpenShift's own release images live) and the internal registry.
-`docker.io` is not on it.
+*What just happened:* `allowedRegistriesForImport` is the whole policy: Red Hat's two registries, `quay.io` (OpenShift's own release images) and the internal registry. No `docker.io`.
 
 .The same object on its console *YAML* tab: the allowlist under `spec`, with no `docker.io` entry
 image::registry-images-catalog-governance/registry-images-catalog-governance-04-cluster-image-config.png["The cluster-scoped Image configuration object (config.openshift.io/v1, kind Image, name cluster) on its YAML tab, shown whole. Lines 10 to 45 are managedFields, the last entry the client-side patch that set allowedRegistriesForImport. Below them, spec lists allowedRegistriesForImport with four domainName entries: registry.redhat.io, registry.access.redhat.com, quay.io and image-registry.openshift-image-registry.svc:5000. docker.io is not among them. Status reports imageStreamImportMode Legacy and internalRegistryHostname image-registry.openshift-image-registry.svc:5000."]
 
-Now do what a developer in a hurry does — import `nginx` straight from Docker Hub:
+*Break it:* import `nginx` straight from Docker Hub, as a hurried developer would:
 
 [source,sh,role=execute]
 ----
@@ -982,8 +1048,9 @@ oc import-image nginx -n $NS --from=docker.io/library/nginx:latest --confirm
 The ImageStreamImport "nginx" is invalid: spec.images[0].from.name: Forbidden: importing images from registry "registry-1.docker.io:443" is forbidden: registry "registry-1.docker.io:443" not allowed by whitelist: "registry.redhat.io:443", "registry.access.redhat.com:443", "quay.io:443", "image-registry.openshift-image-registry.svc:5000"
 ----
 
-Read it like any failed import: it names the registry that was turned away — Docker Hub under its real host name, `registry-1.docker.io:443` — and then the registries that *are* allowed.
-It is *Invalid* — the request was refused at admission, instantly, with no node involved — so nothing was created:
+*What just happened:* *Invalid*: refused at admission, instantly, with no node involved. The error names Docker Hub by its real host, `registry-1.docker.io:443`, then the allowed registries.
+
+TIP: *Predict, then run:* exercise 3's bad import still left `ext-broken` behind. Did this refusal leave an `nginx` stream?
 
 [source,sh,role=execute]
 ----
@@ -996,8 +1063,9 @@ oc get is nginx -n $NS
 Error from server (NotFound): imagestreams.image.openshift.io "nginx" not found
 ----
 
-*The fix* is not a way around the policy — it is the same need met from a registry on the list.
-Red Hat builds nginx too:
+No: admission refused the request before any object existed.
+
+*Fix it:* meet the same need from a registry on the list; Red Hat builds nginx too:
 
 [source,sh,role=execute]
 ----
@@ -1012,12 +1080,12 @@ imagestream.image.openshift.io/nginx imported
 latest -> registry.access.redhat.com/ubi9/nginx-124@sha256:c6ac8980fa5de4b92db6b7ed814ca8316697f97bfbe056f6f244a12c19cc728f
 ----
 
-Same stream name, same kind of image — refused from `docker.io`, accepted from `registry.access.redhat.com`.
+*What just happened:* same stream name, same kind of image: refused from `docker.io`, accepted from `registry.access.redhat.com`.
 
 IMPORTANT: If the `docker.io` import was *accepted* (`imagestream.image.openshift.io/nginx imported`), this cluster has no import allowlist — tell your instructor. Run `oc delete is nginx -n $NS` and then the Red Hat import above.
 
-[NOTE]
 .Why there is no mirroring exercise
+[%collapsible]
 ====
 Two heavier controls answer the same question at the container runtime: `registrySources` (which registries *any* pod or build may pull from) and *ImageDigestMirrorSet* / *ImageTagMirrorSet* (redirect pulls to a mirror — how a disconnected cluster runs).
 Changing either re-renders `/etc/containers/registries.conf` on *every* node and rolls the whole pool, rescheduling every tenant's pods.
@@ -1026,14 +1094,22 @@ That is planned maintenance, not a workshop step, so they stay on the concept pa
 
 [.checkpoint]
 ****
-✔ *Verify:* You read the cluster's `allowedRegistriesForImport` list, watched an import from `docker.io` refused at admission with no ImageStream created, and imported `nginx` from `registry.access.redhat.com` instead — the policy decides *where* images may come from, for everyone, cluster-admin included.
+✔ *Verify:* the `docker.io` import was refused with no ImageStream created, and `nginx` imported from `registry.access.redhat.com`. The policy binds everyone, cluster-admin included.
 ****
 
 == 7. Read retention and the catalog supply
 ⏱ *~3 min* · view-only — what the registry keeps, and what the catalog offers
 
-Two more cluster-wide controls, both read-only for you.
-First, *retention* — the nightly pruner that reclaims registry storage:
+Two more cluster-wide controls, read-only for you.
+
+*You'll end with:* what Parasol's registry keeps (the pruner), and what feeds its Software Catalog.
+
+[mermaid]
+....
+include::example$diagrams/registry-images-catalog-governance/10-image-pruner.mmd[]
+....
+
+First, *retention*: the nightly pruner that reclaims registry storage:
 
 [source,sh,role=execute]
 ----
@@ -1049,11 +1125,10 @@ NAME           SCHEDULE    TIMEZONE   SUSPEND   ACTIVE   LAST SCHEDULE   AGE
 image-pruner   0 0 * * *   <none>     False     0        17h             45h
 ----
 
-`0 0 * * *` is midnight daily; it keeps the last 3 tag revisions and spares anything younger than an hour.
-On a multi-day event, an *unreferenced* image can be pruned overnight — which is why the images you use stay *referenced* by a running workload.
+*What just happened:* `0 0 * * *` is midnight daily, keeping the last 3 tag revisions and anything younger than an hour.
+On a multi-day event an *unreferenced* image can be pruned overnight, so keep what you use *referenced* by a running workload.
 
-Next, the *catalog supply* — what developers can pick from.
-Read how the samples operator is curated, how many samples it ships, any cluster-wide samples, and the operator catalog sources:
+Next, the *catalog supply*: samples, cluster-wide samples and operator catalog sources:
 
 [source,sh,role=execute]
 ----
@@ -1078,27 +1153,42 @@ openshift-marketplace   community-operators   Community Operators             gr
 openshift-marketplace   redhat-operators      Red Hat Operators               grpc   Red Hat                 45h
 ----
 
-That's the catalog you browsed in the Build & Deliver module, *governed*.
-The samples operator is `Managed` with both skip lists empty, so every stock sample — about 60 image streams and 50-odd templates, counts that drift with the OpenShift release — is offered.
-A platform team removes *one* sample by naming it in `skippedImagestreams` or `skippedTemplates` — never `managementState: Removed`, which deletes them all — and adds a cluster-wide entry with a `ConsoleSample`; this cluster has none.
-The catalog sources feed OperatorHub: the defaults plus one *curated internal* catalog (`redhat-rhpds-gitea`). Clusters provisioned with the Red Hat Marketplace catalog show one more row.
+*What just happened:* the Software Catalog is *governed*, through four levers:
 
-Your own lever on the catalog is the Template you published in exercise 5: the same curation, scoped to one project, with no cluster-admin and no ticket.
+[cols="2,3,3",options="header"]
+|===
+|Lever |How a platform team pulls it |On this cluster
+
+|Samples operator
+|Skip *one* sample in `skippedImagestreams` / `skippedTemplates`; never `managementState: Removed`, which deletes them all
+|`Managed`, nothing skipped: about 60 image streams and 50-odd templates (counts drift by release)
+
+|`ConsoleSample`
+|Adds a cluster-wide entry
+|None
+
+|Catalog sources
+|Feed OperatorHub
+|The defaults plus a *curated internal* `redhat-rhpds-gitea` (Red Hat Marketplace clusters: one more row)
+
+|Namespaced `Template`
+|*Yours*: one project, no cluster-admin, no ticket
+|Exercise 5's
+|===
 
 [.checkpoint]
 ****
-✔ *Verify (observed):* You read the *retention* pruner (daily, keep 3 revisions) and the *catalog supply* — a `Managed` samples operator with nothing skipped, no cluster `ConsoleSample`, and the OperatorHub catalog sources including a curated internal one — and you know which lever is yours: a namespaced Template.
+✔ *Verify (observed):* pruner daily, keeping 3 revisions; samples `Managed`, nothing skipped; no cluster `ConsoleSample`; a curated internal catalog source. Your lever: a namespaced Template.
 ****
 
 == Challenge (optional)
 ⏱ *no hand-holding*
 
-You have the mechanics.
 Try these on your own:
 
-* *Promote under another name.* Run `oc tag $NS/parasol-claims:1.0 $NS/parasol-claims:stable`, then reason about why `stable`, `prod`, and `1.0` can all point at the *same* digest — and what would actually change if a new `1.1` were imported later and promoted to `prod`.
-* *Trace the pruner's effect.* From `keepTagRevisions=3`, predict what happens to a tag's *4th* revision overnight, and explain why keeping an image *referenced* by a running Deployment protects it. What would you change on `ImagePruner/cluster` to suspend pruning for a multi-day event?
-* *Reason about blast radius.* You read that `allowedRegistriesForImport` is instant but `registrySources` reboots every node. Explain *why* — what does each one actually change on a node? — and which you'd reach for to (a) stop developers importing from `docker.io` today, versus (b) run a fully disconnected cluster.
+* *Promote under another name.* Run `oc tag $NS/parasol-claims:1.0 $NS/parasol-claims:stable`. Why can `stable`, `prod` and `1.0` share one digest, and what changes if a new `1.1` is imported later and promoted to `prod`?
+* *Trace the pruner.* With `keepTagRevisions=3`, what happens to a tag's *4th* revision overnight, and why does a running Deployment's reference protect an image? What would you change on `ImagePruner/cluster` to suspend pruning for a multi-day event?
+* *Reason about blast radius.* Why is `allowedRegistriesForImport` instant while `registrySources` reboots every node (what does each change on a node)? Which would you use to (a) stop `docker.io` imports today, or (b) run a fully disconnected cluster?
 
 When you are done, run `ws verify {module-id}` in the Terminal — or run `ws prep {module-id} --yes` to return your world to the entry state (only the seeded `parasol-claims:1.0` stream and the sample pull secret).
 
