@@ -4,14 +4,14 @@
 Writes content/modules/ROOT/assets/images/solution-map/:
   solution-map.svg           the full map, nothing highlighted
   <slug>.svg                 one per module in /modules.yaml, that module's ids lit
-  <slug>-ex<N>.svg           one per exercise listed under `exercises:` in the spec
+                             (module level only: per-exercise maps were tried and dropped,
+                             2026-11-14 — noise on every step, and a chore to keep in sync)
 
 Run from the repo root:  python3 tools/diagrams/solution-map.py
 Output is deterministic, so re-running is a no-op unless the spec or this file changed.
 Fails (exit 1) on a spec that drifted from /modules.yaml, an unknown id, a tile no module
 uses, or a label too wide for its box.
 """
-import re
 import sys
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -21,7 +21,6 @@ import yaml  # PyYAML; the only non-stdlib import
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = ROOT / "tools/diagrams/solution-map.yaml"
 OUT = ROOT / "content/modules/ROOT/assets/images/solution-map"
-PAGES = ROOT / "content/modules/ROOT/pages"
 
 # ── palette (Red Hat) ─────────────────────────────────────────────────────────────────────
 RED, INK = "#EE0000", "#151515"
@@ -115,24 +114,14 @@ def load():
     errors = []
     if set(spec["modules"]) != set(titles):
         errors.append(f"modules: spec vs modules.yaml differ: {sorted(set(spec['modules']) ^ set(titles))}")
-    for slug, exs in spec.get("exercises", {}).items():
-        if not spec["modules"].get(slug):  # module lights the union of its exercises
-            spec["modules"][slug] = sorted({i for lit in exs.values() for i in lit})
-        lab = PAGES / slug / "lab.adoc"
-        headed = {int(n) for n in re.findall(r"^== (\d+)\. ", lab.read_text(), re.M)} if lab.exists() else set()
-        if headed != {int(n) for n in exs}:
-            print(f"WARNING: {slug} exercises in spec {sorted(map(int, exs))} != lab.adoc headings {sorted(headed)}",
-                  file=sys.stderr)
-    lists = list(spec["modules"].items()) + [
-        (f"{s}-ex{n}", lit) for s, exs in spec.get("exercises", {}).items() for n, lit in exs.items()]
-    for name, lit in lists:
+    for name, lit in spec["modules"].items():
         if not lit:
             errors.append(f"{name}: lights nothing")
         errors += [f"{name}: unknown id {i!r}" for i in lit if i not in ids]
     for slug, lit in spec["modules"].items():
         if not set(lit) & set(tiles):
             errors.append(f"{slug}: maps to no capability tile")
-    used = {i for _, lit in lists for i in lit}
+    used = {i for lit in spec["modules"].values() for i in lit}
     errors += [f"tile {t!r} is used by no module" for t in tiles if t not in used]
     for a, b in spec["edges"]:
         ca, cb = comps[a], comps[b]
@@ -271,9 +260,6 @@ def main():
     files = {"solution-map.svg": render(spec, comps, None)}
     for slug, lit in spec["modules"].items():
         files[f"{slug}.svg"] = render(spec, comps, set(lit), titles[slug])
-    for slug, exs in spec.get("exercises", {}).items():
-        for n, lit in exs.items():
-            files[f"{slug}-ex{n}.svg"] = render(spec, comps, set(lit), f"{titles[slug]} · Exercise {n}")
     changed = 0
     for name, svg in files.items():
         p = OUT / name
