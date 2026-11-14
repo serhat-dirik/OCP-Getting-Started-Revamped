@@ -831,7 +831,7 @@ def self_test() -> int:
              "// GROUNDING 2026-07-31: driven with the exact command AS IT THEN STOOD —\n"
              f"// `oc -n user3-dev run claims-burst --image={floating_ref} --restart=Never`.\n", 0,
              "a dated // provenance comment was flagged. That is "
-             "observability-metrics-traces/lab.adoc:666, deliberately left as-run; 'fixing' it makes "
+             "the GROUNDING 2026-07-31 comment in observability-metrics-traces/lab.adoc, deliberately left as-run; 'fixing' it makes "
              "it claim a measurement that never took place"),
             ("kind3-prose.adoc",
              anchor_block +

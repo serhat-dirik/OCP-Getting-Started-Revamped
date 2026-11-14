@@ -162,7 +162,7 @@ Both floors exist for one module, `deployment-targets-scheduling`:
    | `dedicated_cluster` | Must be `true`: the install refuses otherwise ([§6](#6-dedicated-cluster)) |
    | `maas.endpoint` / `.model` / `.api_key` | The AI endpoint, model and key |
    | `lightspeed` | `true` installs OpenShift Lightspeed on your model. Skipped automatically without a MaaS key, or when the cluster already has Lightspeed. |
-   | `modules_disabled` | Modules to leave out, e.g. `[m13, m22]`. Hidden from the cockpit, and their components are not installed. |
+   | `modules_disabled` | Modules to leave out, e.g. `[m13, m22]`. Hidden from the cockpit, and their components are not installed. Prefer slugs over mNN: numbers are catalog positions and shift when the catalog changes (they did on 2026-11-14). |
    | `modules_enabled` | The opposite, e.g. `[m1, m2, m3, m4, m5]`. Empty means the whole catalog. Use one key or the other, not both. |
    | `repo_url` / `repo_revision` | Where the content is mirrored from |
 
