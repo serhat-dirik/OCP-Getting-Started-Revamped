@@ -19,6 +19,8 @@ include::partial$prereq-ws-start.adoc[]
 .Highlighted: what you build in this module
 image::solution-map/pipelines-fundamentals.svg["The Parasol solution map with this module's pieces highlighted: Pipelines and parasol-claims.",width=900]
 
+In this lab you take Parasol's `parasol-claims` service through a *build-test-deploy pipeline*: run it, trace where its Tasks come from, break it with a failing test, and make a Git push run it on its own.
+
 Set a shortcut you will reuse in every command below:
 
 [source,sh,role=execute,subs="attributes+"]
@@ -27,22 +29,17 @@ NS={user}-cicd
 echo "working in project: $NS"
 ----
 
-In this lab you take Parasol's `parasol-claims` service through a real *build-test-deploy pipeline*: you run the seeded Pipeline and read how it is wired, explore the *company task library* it reuses, break the build with a failing test and watch the pipeline refuse it, then wire *Pipelines-as-Code* so a Git push builds and deploys on its own.
-
 [TIP]
 ====
-Most steps below are offered two ways.
-The *Console* tab drives the graphical *Pipelines* views in the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`, project `{user}-cicd`); the *CLI* tab uses `oc` and `tkn` in the *Terminal* tab beside these instructions.
-The two paths drive the same PipelineRuns; if a console label reads differently on your cluster, the CLI command beside it is the source of truth.
+Most steps come in two tabs that drive the same PipelineRuns: *Console* for the *Pipelines* views in the {ocp_console_url}[OpenShift web console^] (signed in as `{user}`, project `{user}-cicd`), *CLI* for `oc` and `tkn` in the *Terminal* tab.
+If a console label reads differently on your cluster, the CLI command is the source of truth.
 ====
 
 [NOTE]
-.Your terminal, the console, and the Gitea web UI
+.Terminal reconnected? Open Gitea now
 ====
-The *CLI* path for every command runs in the *Terminal* tab beside these instructions, logged in as `{user}`, using `oc` and `tkn` (the Tekton CLI); the *Console* path uses the *OpenShift web console* tab.
-The `$NS` shortcut points at your `{user}-cicd` project, and every exercise that uses it sets it again in its first block.
-*If your terminal reconnects, run the first block of the exercise you are in again* — in exercise 1 that is the block above; a fresh shell has no `$NS`.
-Two exercises also use the *Gitea web UI*: open your fork at {gitea_url}/{user}/parasol-claims[{user}/parasol-claims^] in a second browser tab now.
+A fresh shell has no `$NS`: *run the first block of the exercise you are in again* (in exercise 1, the block above).
+Exercises 3 and 4 also use the Gitea web UI: open your fork, {gitea_url}/{user}/parasol-claims[{user}/parasol-claims^], in a second browser tab now.
 ====
 endif::demo[]
 
@@ -291,14 +288,21 @@ endif::demo[]
 
 // ============================================================================
 // WORKSHOP FLAVOR — hands-on exercise groups
+// Each exercise opens the same way (the solution map appears once, at the top of the lab): a
+// one-line story beat, and "You'll end with" plus a picture of the result. Steps come next; the
+// why follows as a short *What just happened* and, where it runs long, a collapsible block.
 // ============================================================================
 ifndef::demo[]
 
 == 1. Run the build-test-deploy pipeline from the console
 ⏱ *~10 min* · read how the pipeline is wired, run it (about 4 minutes), then call the app it deployed
 
-Your project already has a Pipeline — `parasol-claims-build-test-deploy` — that the platform team seeded.
-Before you run it, read what it is: the same five-Task anatomy from the concept, made concrete.
+Parasol's platform team seeded a Pipeline into your project, `parasol-claims-build-test-deploy`.
+Read how it is wired, run it, and call the app it deploys.
+
+*You'll end with:* a `Succeeded` PipelineRun, the results it published, and `parasol-claims` serving claims on a Route the pipeline created.
+
+image::pipelines-fundamentals/pipelines-fundamentals-01-pipelinerun-graph.png["A finished PipelineRun's Details page: the five-Task graph drawn left to right — fetch-source, unit-test, build-image, image-report, deploy — each node green-ticked and reading 1/1, above the tab row Details / YAML / Parameters / Logs / Events / Output / TaskRuns. The run is badged Succeeded and the right-hand column reports Status Succeeded, the Pipeline it came from (parasol-claims-build-test-deploy) and a duration of 10 minutes 22 seconds"]
 
 // Grounded live on OCP 4.22.5 (2026-07-26): the Pipeline detail page's tab row is
 // Details · YAML · Parameters · Metrics · PipelineRuns. The Details tab renders the topology
@@ -313,12 +317,10 @@ Before you run it, read what it is: the same five-Task anatomy from the concept,
 Console::
 +
 --
-. In the {ocp_console_url}[OpenShift web console^] navigation, choose *Pipelines* → *Pipelines* (project `{user}-cicd`).
-. Click the `parasol-claims-build-test-deploy` Pipeline.
-Its *Details* page draws the Pipeline as a graph — five Tasks in order: `fetch-source` → `unit-test` → `build-image` → `image-report` → `deploy`.
-. Below the graph, read the *Tasks* list: each entry names the pipeline task and, in parentheses, the *Task it resolves to* — `unit-test (maven-jdk21)`, `image-report (image-size-report)`, and so on.
-That parenthesised name is the shared Task being pulled in; the name to its left is only this Pipeline's label for that step.
-. Switch to the *YAML* tab and find `spec.tasks`: each Task is a `taskRef` with `resolver: cluster` and a `name`/`namespace`, not a definition pasted into this Pipeline — that is the cluster resolver pulling each Task from a shared library.
+. *Pipelines* → *Pipelines* (project `{user}-cicd`) → `parasol-claims-build-test-deploy`.
+The *Details* graph shows five Tasks in order: `fetch-source` → `unit-test` → `build-image` → `image-report` → `deploy`.
+. Below the graph, the *Tasks* list names each step and, in parentheses, the shared *Task it resolves to*: `unit-test (maven-jdk21)`, `image-report (image-size-report)`, and so on.
+. On the *YAML* tab, each entry in `spec.tasks` is a `taskRef` with `resolver: cluster` and a `name`/`namespace`: a pointer to a shared library, not a definition pasted in.
 --
 CLI::
 +
@@ -363,9 +365,31 @@ Tasks
 --
 ====
 
-There is the whole anatomy from the concept, made concrete: four *parameters*, two *results*, one *workspace*, and five *Tasks* in order (`fetch-source` → `unit-test` → `build-image` → `image-report` → `deploy`).
-That single workspace is how the checkout reaches the Tasks after it: `fetch-source` writes the source into it, `unit-test` runs Maven against it, `build-image` builds the Containerfile out of it.
-Now look at *where the Tasks come from* — none is defined inside the Pipeline:
+*What you just read:* the whole anatomy from the concept, in one Pipeline.
+
+[cols="1,3",options="header"]
+|===
+| Piece | In `parasol-claims-build-test-deploy`
+
+| 4 parameters
+| `git-url`, `git-revision`, `image`, `max-size-mb`
+
+| 2 results
+| `image-size-mb`, `image-within-budget`
+
+| 1 workspace
+| `shared-workspace`: `fetch-source` writes the checkout into it; `unit-test` and `build-image` read it
+
+| 5 Tasks
+| `fetch-source` → `unit-test` → `build-image` → `image-report` → `deploy`
+|===
+
+[mermaid]
+....
+include::example$diagrams/pipelines-fundamentals/05-workspace-handoff.mmd[]
+....
+
+*Predict, then run:* how many of those five Tasks are defined inside this Pipeline?
 
 [source,sh,role=execute]
 ----
@@ -383,13 +407,12 @@ image-report -> resolver=cluster image-size-report/ogsr-parasol-tasks
 deploy -> resolver=cluster openshift-client/openshift-pipelines
 ----
 
-Every Task is a `resolver: cluster` reference: three from the shipped catalog (`openshift-pipelines`) and two from Parasol's curated library (`ogsr-parasol-tasks`).
-That is the three reuse layers from the concept, in one output — and you explore both libraries in the next exercise.
+*What just happened:* none. Every step is a `resolver: cluster` reference: three to the shipped catalog (`openshift-pipelines`), two to Parasol's curated library (`ogsr-parasol-tasks`).
+Those are the concept's three reuse layers; exercise 2 opens both libraries.
 
 image::pipelines-fundamentals/pipelines-fundamentals-05-pipeline-details-graph.png["Pipeline details page for parasol-claims-build-test-deploy: the topology graph showing fetch-source, unit-test, build-image, image-report and deploy left to right, and below it the Tasks list naming each resolved Task in parentheses — unit-test (maven-jdk21), image-report (image-size-report) — plus a Workspaces entry reading shared-workspace"]
 
-Now *run* it — straight from the console, no hand-built YAML.
-A PipelineRun is one execution: the *Start* form pre-fills the Pipeline's four parameters and asks for its one *workspace*, the shared volume that carries the checkout from Task to Task.
+Now *run* it from the console; no YAML to write.
 
 // Grounded 2026-07-30 on OCP 4.22.5, signed in as an attendee (user1), viewport 1600x1000.
 // Opened via Actions -> Start on the live parasol-claims-build-test-deploy Pipeline in
@@ -411,25 +434,22 @@ A PipelineRun is one execution: the *Start* form pre-fills the Pipeline's four p
 Console::
 +
 --
-. With the `parasol-claims-build-test-deploy` Pipeline open, click *Actions* → *Start*.
-. The *Start Pipeline* form opens with every parameter *already filled in* — leave them as they are:
-+
-* *git-url* — the shared Parasol repo,
-* *git-revision* — `main`,
-* *image* — your namespace's registry path,
-* *max-size-mb* — `500`.
-. Under *Workspaces*, set *shared-workspace* to *VolumeClaimTemplate* — a fresh PVC for this run, pruned when the run is deleted.
-+
-That is the only workspace this Pipeline has, and one is the limit here: Tekton's Affinity Assistant keeps the Tasks that share a volume on the same node, and in its default mode it allows each Task *one* PVC-backed workspace.
+. On the Pipeline, click *Actions* → *Start*.
+. Leave the four pre-filled parameters as they are (the shared Parasol repo, `main`, your namespace's registry path, `500`).
+. Set *shared-workspace* to *VolumeClaimTemplate*: a fresh PVC for this run, pruned with the run.
+. Click *Start*. The new PipelineRun opens as a graph that fills in left to right.
+
+.Why only one workspace?
+[%collapsible]
+=====
+One is the limit here: Tekton's Affinity Assistant keeps the Tasks that share a volume on the same node, and in its default mode it allows each Task *one* PVC-backed workspace.
 A run that asks for two is rejected before any step starts.
-. Click *Start*.
-+
-The console opens the new PipelineRun and draws it as a *graph*; the five Tasks fill in left to right as they run.
+=====
 --
 CLI::
 +
 --
-`tkn pipeline start` is the CLI twin of *Actions → Start* — `--use-param-defaults` takes the same pre-filled parameters:
+`tkn pipeline start` is the CLI twin of *Actions → Start*; `--use-param-defaults` takes the same pre-filled parameters:
 
 [source,sh,role=execute]
 ----
@@ -447,8 +467,8 @@ tkn pipeline start parasol-claims-build-test-deploy -n $NS \
   --showlog
 ----
 
-`volumeClaimTemplateFile` makes a *new* volume for this run; `claimName=<existing-pvc>` would attach one that already exists.
-This Pipeline wants the first kind — the checkout is this run's, not something to keep.
+`volumeClaimTemplateFile` makes a *new* volume for this run; `claimName=<existing-pvc>` would attach an existing one.
+This Pipeline wants a new one: the checkout belongs to this run.
 --
 ====
 
@@ -458,10 +478,17 @@ This Pipeline wants the first kind — the checkout is this run's, not something
 // mirror (MAVEN_MIRROR_URL), which took egress out of the run length: ex1 3m53s (fetch-source 15s,
 // unit-test 1m36s, build-image 1m28s, image-report 8s, deploy 22s), ex3 red 2m13s, ex3 green 3m21s,
 // ex4 PaC push 3m32s. Before the mirror the same pipeline took 10m22s-20m49s across clusters.
+The run takes about *4 minutes*.
+If it fails within seconds instead of building, see xref:pipelines-fundamentals/troubleshooting.adoc[the troubleshooting page] before you retry.
+
+.Where the four minutes go
+[%collapsible]
+====
 This run resolves Maven's dependency tree *twice*: once in `unit-test`, and once more inside the image build, which runs its own `mvn` in the `Containerfile` and shares nothing with the Task before it.
-Both pull from the platform team's in-cluster Maven mirror, so the run takes about *4 minutes*, most of it compiling the application and running its tests.
-If your run fails within seconds instead of building, see xref:pipelines-fundamentals/troubleshooting.adoc[the troubleshooting page] before you retry.
-Watch it fill in on the console graph, or stream the step logs from the terminal — clicking a Task node shows exactly what that Task is doing:
+Both pull from the platform team's in-cluster Maven mirror, so most of the run is compiling the application and running its tests.
+====
+
+Watch it run:
 
 // Grounded live on OCP 4.22.5 (2026-07-26): the PipelineRun detail tab row is
 // Details · YAML · Parameters · Logs · Events · Output · TaskRuns. Each graph node carries a
@@ -475,10 +502,15 @@ Console::
 +
 --
 Open *Pipelines* → *PipelineRuns* and click your run.
-The graph shows the five Tasks, each with a *step counter* that fills in as it runs — `1/1` once a Task's single step is done, `0/1` while it is still queued.
-Click any Task node to stream that Task's *step logs* on the *Logs* tab.
+Each Task node carries a *step counter*: `0/1` while queued, `1/1` once its single step is done.
+Click a node to stream that Task's *step logs* on the *Logs* tab.
+
+.Log view details
+[%collapsible]
+=====
 Only Tasks that have *started* appear in the log view's task list, so early on you will see fewer than five.
 `Download all task logs` grabs the whole run in one file — useful when you want to read it after the run is pruned.
+=====
 --
 CLI::
 +
@@ -490,20 +522,15 @@ tkn pipelinerun logs --last -f -n $NS
 --
 ====
 
-image::pipelines-fundamentals/pipelines-fundamentals-01-pipelinerun-graph.png["A finished PipelineRun's Details page: the five-Task graph drawn left to right — fetch-source, unit-test, build-image, image-report, deploy — each node green-ticked and reading 1/1, above the tab row Details / YAML / Parameters / Logs / Events / Output / TaskRuns. The run is badged Succeeded and the right-hand column reports Status Succeeded, the Pipeline it came from (parasol-claims-build-test-deploy) and a duration of 10 minutes 22 seconds. Your own run is still filling in while it works: a Task that has not started yet reads 0/1"]
-
 [TIP]
 .Stream it, or read ahead
 ====
-The log stream ends on its own when `deploy` prints `parasol-claims is live at https://…`.
-Pressing *Ctrl-C* stops only the stream, not the run: you can read ahead into exercise 2, which explores the Tasks this run is using, and re-attach any time with `tkn pipelinerun logs --last -f -n $NS`.
-
-`tkn` mixes a few lines of its own into the stream: they start with `E` and a timestamp and read `reflector.go:200] "Failed to watch" err="… context canceled"`.
-They are the client closing its watch on a finished step, not a pipeline error, so ignore them.
+The stream ends on its own when `deploy` prints `parasol-claims is live at https://…`.
+*Ctrl-C* stops only the stream, not the run: read ahead into exercise 2, and re-attach with `tkn pipelinerun logs --last -f -n $NS`.
+Lines starting `E` … `reflector.go:200] "Failed to watch" err="… context canceled"` are `tkn` closing its watch on a finished step: ignore them.
 ====
 
-When the run finishes, read what it produced — you never leave the run's page.
-First the *results* — the data the pipeline published, not just the image:
+When the run finishes, read its *results*: data the pipeline published, not just an image.
 
 // Grounded live on OCP 4.22.5 (2026-07-26) — CORRECTS an earlier claim. Results are NOT on the
 // Details page; there is no "Results" section there. They live on the run's own OUTPUT tab
@@ -520,8 +547,8 @@ First the *results* — the data the pipeline published, not just the image:
 Console::
 +
 --
-On your finished run, open the *Output* tab (*Pipelines* → *PipelineRuns* → your run → *Output*).
-Under *PipelineRun results* a *Name* / *Value* table lists what the Pipeline published: `image-size-mb` (a number in the high 300s for this image) and `image-within-budget` = `true`.
+On the finished run, open the *Output* tab.
+Under *PipelineRun results*, `image-size-mb` reads a number in the high 300s and `image-within-budget` reads `true`.
 --
 CLI::
 +
@@ -545,12 +572,10 @@ Results
 
 image::pipelines-fundamentals/pipelines-fundamentals-04-pipelinerun-results.png["The run's Output tab — not its Details tab — showing a \"PipelineRun results\" heading over a two-column Name/Value table: image-size-mb 391 and image-within-budget true, with the run badged Succeeded"]
 
-The `image-report` Task measured your freshly built image and confirmed it fits the 500&nbsp;MB budget — a *fact the pipeline computed*, surfaced at the run level.
+*What just happened:* the `image-report` Task measured your freshly built image against the 500&nbsp;MB budget and published the verdict on the run itself: a *fact the pipeline computed*.
 
-Now reach the app — and notice you do *nothing* to publish it.
-The `deploy` step already created the Deployment, wired it to the `claims-db` in your project, *and published it for the browser*: a Service and an edge-terminated Route.
-There is no `oc expose` to run — the pipeline owns the Route.
-Read the Route the pipeline created and call the app:
+Now call the app.
+The `deploy` step already created the Deployment, wired it to `claims-db`, and published it with a Service and an edge Route: no `oc expose` for you.
 
 // Grounded live on OCP 4.22.5 (2026-07-26): the Routes list columns are
 // Name · Status · Location · Service · Actions. `parasol-claims` reads Status `Accepted` and
@@ -561,9 +586,8 @@ Read the Route the pipeline created and call the app:
 Console::
 +
 --
-Open *Networking* → *Routes* (project `{user}-cicd`).
-The `parasol-claims` row reads *Status* `Accepted`, and its *Location* is the app's HTTPS URL — click the URL, or the copy-to-clipboard icon beside it.
-Open it and append `/api/claims` to see the seeded claims.
+*Networking* → *Routes* (project `{user}-cicd`): the `parasol-claims` row reads *Status* `Accepted`.
+Open its *Location* URL and append `/api/claims` to see the seeded claims.
 --
 CLI::
 +
@@ -583,35 +607,39 @@ curl -sk --retry 20 --retry-connrefused --retry-all-errors --retry-delay 3 --ret
 --
 ====
 
-A service that you built, tested, and deployed with *one pipeline* — and that the pipeline itself published — is now serving Parasol's seeded claims, with no `oc expose` from you.
+*What just happened:* one pipeline built, tested, deployed and published the service.
 
 [.checkpoint]
 ****
-✔ *Verify:* Your run shows `Succeeded` (*PipelineRuns*, or `tkn pipelinerun list -n $NS`); its *Results* show `image-within-budget: true`; and the *pipeline-created* Route serves the seeded claims (`curl .../api/claims`, or open the Route under *Networking → Routes*) — you never ran `oc expose`.
+✔ *Verify:* your run is `Succeeded` (*PipelineRuns*, or `tkn pipelinerun list -n $NS`), its results show `image-within-budget: true`, and the pipeline-created Route serves the seeded claims; you never ran `oc expose`.
 ****
 
 == 2. Explore the company task library
 ⏱ *~5 min* · the three reuse layers, and why Parasol curates its own Tasks
 
-You just saw the Pipeline reference five Tasks by cluster resolver.
-This exercise looks at the two *curated* ones — and the concrete reason they exist.
+Two of your pipeline's five Tasks come from Parasol's own library, not from OpenShift.
+Find out why the platform team went to the trouble.
 
-[NOTE]
+*You'll end with:* every Task in the pipeline traced to its layer, and the one concrete gap that made Parasol curate its own.
+
+[mermaid]
+....
+include::example$diagrams/pipelines-fundamentals/01-anatomy-and-layers.mmd[]
+....
+
 .Why this exercise stays in the terminal
+[%collapsible]
 ====
-The curated Tasks live in shared namespaces (`ogsr-parasol-tasks` and `openshift-pipelines`) that you can *read* but not *select* as a project in the console — so the console's *Pipelines → Tasks* view cannot scope to them for you.
-Reading a Task's inner fields (its image, its parameters) is also exactly what `oc get … -o jsonpath` does best, so this one is CLI-only.
+The curated Tasks live in shared namespaces (`ogsr-parasol-tasks` and `openshift-pipelines`) that you can *read* but not *select* as a project in the console, so the console's *Pipelines → Tasks* view cannot scope to them.
+Reading a Task's inner fields (its image, its parameters) is also exactly what `oc get … -o jsonpath` does best.
 ====
 
-Start by browsing Parasol's shared library.
-You have read access to it (the platform team granted it), so you can list and read the Tasks any pipeline reuses:
+List Parasol's shared library; the platform team granted you read access:
 
 [source,sh,role=execute]
 ----
 oc get tasks.tekton.dev -n ogsr-parasol-tasks
 ----
-
-(Fully qualified as `tasks.tekton.dev`: on a full-catalog cluster another operator also serves a bare `tasks`, so the short name can resolve to the *wrong* API — the same collision the packaging module flags for `subscriptions`.)
 
 .Expected output (the list grows as other teams curate their own Tasks)
 [source,texinfo]
@@ -627,10 +655,16 @@ trivy-scan                ...
 zap-baseline              ...
 ----
 
-The shared library holds several curated Tasks, and two of them fill gaps in *this* pipeline: `maven-jdk21` and `image-size-report`.
-Now the *why*.
-The Pipeline's `unit-test` step runs Maven — and OpenShift Pipelines *ships* a `maven` Task, so the obvious choice is to use that shipped one.
-Look at what it actually runs:
+.Why `tasks.tekton.dev`, not `tasks`?
+[%collapsible]
+====
+On a full-catalog cluster another operator also serves a bare `tasks`, so the short name can resolve to the *wrong* API — the same collision the packaging module flags for `subscriptions`.
+====
+
+Several curated Tasks; two fill gaps in *this* pipeline: `maven-jdk21` and `image-size-report`.
+
+*Predict, then run:* OpenShift Pipelines ships its own `maven` Task, with a `JAVA_VERSION` parameter whose description lists `8, 11, 17, 21`.
+Can it build `parasol-claims`, a Java 21 application?
 
 [source,sh,role=execute]
 ----
@@ -649,11 +683,10 @@ shipped maven task, parameters:
   GOALS  MAVEN_MIRROR_URL  JAVA_VERSION  SUBDIRECTORY  ENV_VARS
 ----
 
-The shipped `maven` Task *advertises* a `JAVA_VERSION` parameter (its description even lists `8, 11, 17, 21`) — so it looks like you could just ask for 21.
-But read the *build-step image*: it is pinned to *Java 17* (`ubi9/openjdk-17`), and `JAVA_VERSION` does not repoint it — the parameter is a promise the pinned image can't keep.
-`parasol-claims` is a *Java 21* application, so the shipped Task still cannot build it: Maven runs on JDK 17 and fails with `release version 21 not supported`, whatever you set `JAVA_VERSION` to.
-That is the gap the curated library fills — not a missing *knob*, but a guaranteed *runtime*.
-Read Parasol's answer:
+*What just happened:* no.
+The build-step image is pinned to *Java 17* (`ubi9/openjdk-17`), and `JAVA_VERSION` does not repoint it: Maven on JDK 17 fails with `release version 21 not supported`, whatever the parameter says.
+The gap is not a missing *knob* but a guaranteed *runtime*.
+Now read Parasol's answer:
 
 [source,sh,role=execute]
 ----
@@ -668,11 +701,35 @@ curated maven-jdk21, build step image:
   registry.access.redhat.com/ubi9/openjdk-21@sha256:...
 ----
 
-A *Java 21* runner image — the guaranteed runtime the shipped Task's `JAVA_VERSION` knob could not actually deliver.
-Rather than paste a patched Maven Task into every Java 21 pipeline, the platform team curated `maven-jdk21` *once*, and every pipeline references it by cluster resolver.
-That is the entire argument for an organization library, in one concrete gap.
+[cols="1,2,2",options="header"]
+|===
+| | Shipped `maven` | Curated `maven-jdk21`
 
-Now read the other curated Task — the one that produced the `image-size-mb` result you saw in exercise 1:
+| Lives in
+| `openshift-pipelines`, the shipped catalog
+| `ogsr-parasol-tasks`, Parasol's library
+
+| Build-step image
+| `ubi9/openjdk-17`
+| `ubi9/openjdk-21`
+
+| Builds `parasol-claims` (Java 21)
+| No: `release version 21 not supported`
+| Yes
+
+| Who fixes it
+| Every team, in its own patched copy
+| The platform team, once, for every pipeline
+|===
+
+*What just happened:* rather than paste a patched Maven Task into every Java 21 pipeline, the platform team curated `maven-jdk21` *once*, and every pipeline references it by cluster resolver, fetched fresh when each run starts:
+
+[mermaid]
+....
+include::example$diagrams/pipelines-fundamentals/06-cluster-resolver.mmd[]
+....
+
+Now the other curated Task, the one behind exercise 1's `image-size-mb` result:
 
 [source,sh,role=execute]
 ----
@@ -687,12 +744,11 @@ params: IMAGE MAX_SIZE_MB TLS_VERIFY
 results: image-size-bytes image-size-mb within-budget
 ----
 
-This is a Task you could have written: it takes an image reference and a budget as *parameters*, inspects the image, and publishes three *results*.
-Read its full body if you like (`oc get tasks.tekton.dev image-size-report -n ogsr-parasol-tasks -o yaml`) — it is a short shell script.
-The point is that it lives in the *shared library*, so every Parasol pipeline gets image-size reporting by adding *one `taskRef`*, not by copying a script.
+*What just happened:* a Task you could have written: an image reference and a budget in as *parameters*, three *results* out.
+Because it lives in the *shared library*, every Parasol pipeline gets image-size reporting with *one `taskRef`*, not a copied script (its body is a short shell script; the Challenge reads it).
 
-[NOTE]
 .`ClusterTask` is gone — the resolver is how you share Tasks now
+[%collapsible]
 ====
 Older Tekton shared Tasks cluster-wide with a `ClusterTask` kind.
 It has since been removed from OpenShift Pipelines, so it does not exist here.
@@ -701,7 +757,7 @@ The *cluster resolver* you have been reading — `resolver: cluster` with `name`
 
 [.checkpoint]
 ****
-✔ *Verify:* You can list `ogsr-parasol-tasks` and find `maven-jdk21` and `image-size-report` in it; you confirmed the shipped `maven` Task runs on a Java 17 image with no image parameter, while `maven-jdk21` runs on Java 21; and you read the parameters and results of `image-size-report`.
+✔ *Verify:* `ogsr-parasol-tasks` lists `maven-jdk21` and `image-size-report`; the shipped `maven` Task runs on a Java 17 image with no image parameter, `maven-jdk21` on Java 21; and you read the parameters and results of `image-size-report`.
 You can explain why the platform team curated the library.
 ****
 
@@ -709,31 +765,29 @@ You can explain why the platform team curated the library.
 ⏱ *~10 min* · edit a test in your fork, watch the pipeline refuse the bad change (a 2-minute run), then fix it (a 4-minute run)
 
 A pipeline that tests but ships anyway is theater.
-The value is that a *failing test stops the build* — a broken change never becomes a deployed image.
-You will prove that by breaking a real rule, in *your own fork*.
+Parasol's rule is that *a claim cannot be Approved while its adjuster is still Unassigned*; break the test that guards it, in your own fork, and watch the pipeline refuse to ship.
 
-The rule is Parasol's: *a claim cannot be Approved while its adjuster is still Unassigned* — somebody has to own a claim before the company agrees to pay it.
-`parasol-claims` *enforces* it in the service: `ClaimResource.updateStatus()` answers a `PUT {"status":"Approved"}` against an unowned claim with *409 Conflict*, never 200.
-(409 rather than 400 is deliberate — the request body is perfectly valid, it is the *claim* that is not in a state that allows the change.)
+*You'll end with:* a red run stopped at `unit-test` with build and deploy skipped, then a green run from the fixed commit.
 
-A unit test drives that rule from the outside, and it is green as shipped: it opens a claim *with* an adjuster, approves it, and the service accepts.
-You will flip a one-line toggle so the test opens the claim with *no* adjuster instead — the service then refuses the approval, the test fails on the 409, the pipeline goes red, and you revert.
+[mermaid]
+....
+include::example$diagrams/pipelines-fundamentals/07-test-gate.mmd[]
+....
 
 In your *Gitea tab* ({gitea_url}/{user}/parasol-claims[{user}/parasol-claims^]):
 
-. Open `src/test/java/com/parasol/claims/ClaimResourceTest.java`.
-. Click the *pencil* (Edit) icon.
-. Use your browser's find (kbd:[Ctrl+F] / kbd:[Cmd+F]) for `assignAdjusterBeforeApproval` — it is a single declaration, currently around line 527:
+. Open `src/test/java/com/parasol/claims/ClaimResourceTest.java` and click the *pencil* (Edit) icon.
+. Find (kbd:[Ctrl+F] / kbd:[Cmd+F]) `assignAdjusterBeforeApproval`, a single declaration around line 527:
 +
 [source,java]
 ----
 final boolean assignAdjusterBeforeApproval = true;
 ----
 . Change `true` to `false`.
-. Scroll down and *Commit Changes* directly to the `main` branch (commit message e.g. "break: approve without an adjuster").
+. *Commit Changes* directly to the `main` branch (commit message e.g. "break: approve without an adjuster").
 
-[NOTE]
-.No Dev Spaces required
+.Prefer Dev Spaces? (optional)
+[%collapsible]
 ====
 Editing the file in the Gitea web UI *is* a commit and push — that is all the pipeline needs, and it is the path this lab is written for.
 
@@ -741,9 +795,8 @@ If you did the Dev Spaces module you can make the same edit *in your Dev Spaces 
 That has to be the *Dev Spaces* terminal, not the *Terminal* tab beside these instructions: the workspace was cloned with your Gitea credentials, and the cockpit terminal has none, so a `git push` there stops at `fatal: could not read Username for 'http://gitea.ogsr-gitea.svc:3000'`.
 ====
 
-Now run the pipeline against *your fork* (not the shared default).
-This is why `git-url` is a parameter — the same Pipeline builds any repository.
-First set this exercise's shortcut, in either lane:
+Now run the pipeline against *your fork*; `git-url` is a parameter, so the same Pipeline builds any repository.
+Set this exercise's shortcut first, in either lane:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -761,9 +814,9 @@ NS={user}-cicd
 Console::
 +
 --
-Open the `parasol-claims-build-test-deploy` Pipeline → *Actions* → *Start* again.
-This time change the *git-url* parameter to your fork's in-cluster address — `http://gitea.ogsr-gitea.svc:3000/{user}/parasol-claims.git` — set *shared-workspace* to *VolumeClaimTemplate* as before, then click *Start*.
-Open the new run under *Pipelines* → *PipelineRuns*: the graph goes *red at `unit-test`* and never reaches the build.
+*Actions* → *Start* on the Pipeline again.
+Set *git-url* to your fork's in-cluster address, `http://gitea.ogsr-gitea.svc:3000/{user}/parasol-claims.git`, set *shared-workspace* to *VolumeClaimTemplate*, and click *Start*.
+Under *Pipelines* → *PipelineRuns*, the graph goes *red at `unit-test`* and never reaches the build.
 --
 CLI::
 +
@@ -788,21 +841,21 @@ tkn pipeline start parasol-claims-build-test-deploy -n $NS \
 --
 ====
 
-[NOTE]
 .Why `http://gitea.ogsr-gitea.svc:3000/...`
+[%collapsible]
 ====
 That is the *in-cluster* address of the very repo you see in the browser at {gitea_url}/{user}/parasol-claims.
 The pipeline runs inside the cluster, so it clones over the internal service — no external round-trip, no TLS to configure.
 ====
 
-Follow the run — this time it *fails fast*, at the test, and never reaches the build:
+Follow the run; this time it *fails fast*, at the test:
 
 [source,sh,role=execute]
 ----
 tkn pipelinerun logs --last -f -n $NS
 ----
 
-The `unit-test` step goes red with a readable message (your claim number and the `Time elapsed` figure will differ — both are produced at test time — and the `Tests run` total grows as the suite does, so read `Failures: 1`, not the count):
+`unit-test` goes red with a readable message (claim number, `Time elapsed` and the `Tests run` total vary from run to run: read `Failures: 1`):
 
 // GROUNDING for the run summary below.
 //
@@ -858,11 +911,25 @@ Approved while its adjuster is Unassigned - assign an adjuster before approving 
 [INFO] BUILD FAILURE
 ----
 
-Read that message once more, because it is the whole point of a test in a pipeline: the `409` and the `{"error":...}` beside it are the *claims service's own words*.
-The test did not invent a rule — it asked the running API to approve an unowned claim, and the API refused.
-(The stream then ends with `failed to get logs for task unit-test : container step-mvn-goals has failed`: that is `tkn` reporting the same failed step, not a second problem.)
+*What just happened:* the `409` and the `{"error":...}` beside it are the *claims service's own words*.
+The test did not invent a rule: it asked the running API to approve an unowned claim, and the API refused.
 
-Now confirm the important part — the build and deploy *never ran*.
+[mermaid]
+....
+include::example$diagrams/pipelines-fundamentals/08-rule-409.mmd[]
+....
+
+.Why 409, and what the stream's last line means
+[%collapsible]
+====
+`ClaimResource.updateStatus()` answers a `PUT {"status":"Approved"}` against an unowned claim with *409 Conflict*, never 200.
+409 rather than 400 is deliberate — the request body is perfectly valid, it is the *claim* that is not in a state that allows the change.
+As shipped, the test opens a claim *with* an adjuster, approves it, and the service accepts; your toggle made it open the claim with *no* adjuster.
+
+The stream ends with `failed to get logs for task unit-test : container step-mvn-goals has failed`: that is `tkn` reporting the same failed step, not a second problem.
+====
+
+*Predict, then run:* `unit-test` failed. Which of the three Tasks after it ran?
 
 // Performed live on OCP 4.22.5 (2026-07-26): flipped the Ex3 toggle in user1's fork, ran the
 // pipeline against it, and the run failed in 5m — fetch-source Succeeded, unit-test StepFailed,
@@ -878,10 +945,9 @@ Now confirm the important part — the build and deploy *never ran*.
 Console::
 +
 --
-On the run's graph (*Pipelines* → *PipelineRuns* → your failed run), `unit-test` is red and the three Tasks after it — `build-image`, `image-report`, `deploy` — are greyed out: they never ran.
-Read the *Conditions* table lower down the *Details* page for the count in words — `Tasks Completed: 2 (Failed: 1, Cancelled 0), Skipped: 3`.
-The graph greys skipped and failed nodes differently, but both print `0/1`, so the Conditions line is the unambiguous read.
-A failed run's *Details* page also grows a *Log snippet* panel showing the tail of the failing step — the fastest way to see *why* without leaving the page.
+On the failed run's graph, `unit-test` is red and `build-image`, `image-report` and `deploy` are greyed out.
+Failed and skipped nodes both print `0/1`, so read the *Conditions* table lower on the *Details* page for the count in words: `Tasks Completed: 2 (Failed: 1, Cancelled 0), Skipped: 3`.
+The *Log snippet* panel on a failed run shows the tail of the failing step: the fastest way to see *why*.
 --
 CLI::
 +
@@ -908,11 +974,11 @@ Skipped Tasks
 
 image::pipelines-fundamentals/pipelines-fundamentals-03-pipelinerun-failed.png["Failed PipelineRun details: fetch-source green at 1/1, unit-test outlined in red at 0/1, and build-image, image-report and deploy greyed out at 0/1 — note every not-run task shows the same 0/1 counter, so colour is the only visual difference between failed and skipped. Status reads Failed, and a Log snippet panel shows the Maven ERROR tail"]
 
-That is the whole lesson: `unit-test` failed, so `build-image`, `image-report`, and `deploy` were *skipped* — the overall run is `Failed`, and its message reads `Tasks Completed: 2 (Failed: 1, Cancelled 0), Skipped: 3`.
-The broken change could not become a running image.
+*What just happened:* none of them ran.
+The run is `Failed` with `Tasks Completed: 2 (Failed: 1, Cancelled 0), Skipped: 3`: the broken change could not become a running image.
 
 *Fix it.*
-Back in the Gitea tab, edit `ClaimResourceTest.java` again, flip the toggle from `false` back to `true`, and *Commit Changes* to `main`.
+In the Gitea tab, edit `ClaimResourceTest.java` again, flip the toggle from `false` back to `true`, and *Commit Changes* to `main`.
 Then re-run against your fork:
 
 // Performed live on OCP 4.22.5 (2026-07-26): reverted the toggle in user1's fork and re-ran
@@ -959,8 +1025,8 @@ Then re-run against your fork:
 Console::
 +
 --
-As before, open the Pipeline → *Actions* → *Start*, set *git-url* to `http://gitea.ogsr-gitea.svc:3000/{user}/parasol-claims.git`, set *shared-workspace* to *VolumeClaimTemplate*, and *Start*.
-Watch the new run under *Pipelines* → *PipelineRuns*: this time `unit-test` goes *green* and the graph continues into `build-image`.
+As before: *Actions* → *Start*, *git-url* `http://gitea.ogsr-gitea.svc:3000/{user}/parasol-claims.git`, *shared-workspace* *VolumeClaimTemplate*, *Start*.
+Under *Pipelines* → *PipelineRuns*, `unit-test` goes *green* this time and the graph continues into `build-image`.
 --
 CLI::
 +
@@ -983,19 +1049,19 @@ tkn pipeline start parasol-claims-build-test-deploy -n $NS \
 --
 ====
 
-Watch just far enough to see the test pass — once `unit-test` is green, the fix is proven and the rest of the pipeline builds and deploys on its own:
+Watch until the test passes; the rest of the pipeline builds and deploys on its own:
 
 [source,sh,role=execute]
 ----
 tkn pipelinerun logs --last -f -n $NS
 ----
 
-When `unit-test` reports `Failures: 0` and moves on to `build-image`, you have your answer: the pipeline builds the fixed code and refused the broken code, with the exact same command.
-(Look at `Failures`, not at the `Tests run` total beside it — the suite grows over time, so the count is not the signal.)
+When `unit-test` reports `Failures: 0` and moves on to `build-image`, the fix is proven: the same command refused the broken code and builds the fixed code.
+(Read `Failures`, not the `Tests run` total, which grows with the suite.)
 
 [.checkpoint]
 ****
-✔ *Verify:* Your broken commit produced a `Failed` run with `unit-test` red (the claims API answered `409` and refused the approval) and `build-image`/`deploy` *skipped*; after reverting, a new run passes `unit-test` (`Failures: 0`) and proceeds to build.
+✔ *Verify:* your broken commit produced a `Failed` run with `unit-test` red (the claims API answered `409`) and `build-image`/`deploy` *skipped*; after the revert, a new run passes `unit-test` (`Failures: 0`) and proceeds to build.
 The test is a *gate*, not a report.
 ****
 
@@ -1003,8 +1069,17 @@ The test is a *gate*, not a report.
 ⏱ *~10 min* · wire a webhook so the pipeline fires on every push — no `oc create`
 
 So far *you* started every run.
-Pipelines-as-Code (PaC) removes that step: the PipelineRun definition already lives in your fork, at `.tekton/pull-request.yaml`, and a *push* fires it.
-Confirm the file is there:
+Parasol wants every push built the same way, with nobody pressing *Start*: that is Pipelines-as-Code (PaC).
+
+*You'll end with:* a commit in your fork that starts a `parasol-claims-pull-request-…` run you did not create.
+
+[mermaid]
+....
+include::example$diagrams/pipelines-fundamentals/09-pac-flow.mmd[]
+....
+
+The PipelineRun definition already lives in your fork, at `.tekton/pull-request.yaml`.
+Confirm it is there:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -1013,8 +1088,8 @@ curl -s -o /dev/null -w "%\{http_code}\n" \
   {gitea_url}/{user}/parasol-claims/raw/branch/main/.tekton/pull-request.yaml
 ----
 
-A `200` means the entry state seeded it into your fork.
-Your namespace also already has a `Repository` resource — the anchor PaC matches an incoming webhook to — and it is pre-wired to read your Gitea credentials from a Secret named `gitea-pac-secret`:
+A `200` means the entry state seeded it.
+Your namespace also has a `Repository` resource, the anchor PaC matches an incoming webhook to, pre-wired to read your Gitea credentials from a Secret named `gitea-pac-secret`:
 
 // Grounded live on OCP 4.22.5 (2026-07-26) as user1 — CORRECTS an earlier claim. The Repository
 // page does NOT show a "Git provider" field; there is no such field on it. It shows the repo URL
@@ -1033,11 +1108,16 @@ Your namespace also already has a `Repository` resource — the anchor PaC match
 Console::
 +
 --
-In the navigation, choose *Pipelines* → *Repositories* (project `{user}-cicd`) and click `parasol-claims`.
-Its *Details* page shows the repository *URL* pointing at your fork, and the `gitea-pac-secret` Secret behind both *Git access token* and *Webhook secret* — the credentials PaC uses to talk to Gitea.
+*Pipelines* → *Repositories* (project `{user}-cicd`) → `parasol-claims`.
+Its *Details* page shows the *URL* of your fork, and the `gitea-pac-secret` Secret behind both *Git access token* and *Webhook secret*: the credentials PaC uses to talk to Gitea.
+
+.Reading the Repository page
+[%collapsible]
+=====
 The *Succeeded* / *StartTime* fields read `-`, and they can stay `-` even after PaC has run the pipeline, so do not read them as a sign that nothing fired.
 Once pushes start firing later in this exercise, those runs appear on this page's *PipelineRuns* tab, which is the place to look.
-NOTE: the *Repositories* page is badged *Dev preview* — that is expected, and does not mean anything is misconfigured.
+The page is badged *Dev preview*: that is expected, and does not mean anything is misconfigured.
+=====
 --
 CLI::
 +
@@ -1060,16 +1140,15 @@ image::pipelines-fundamentals/pipelines-fundamentals-06-pac-repository.png["The 
 
 Two pieces remain: create that Secret, and create the webhook that feeds it.
 
-*First*, give PaC a Gitea token (to read your repo and report status) and a *webhook secret* (a shared string that lets PaC trust the incoming push).
-Create the token in Gitea, then store both in the `gitea-pac-secret` the `Repository` already expects:
+*First*, the Secret: a Gitea token (PaC reads your repo and reports status with it) and a *webhook secret* (a shared string that lets PaC trust the incoming push).
 
 // Measured 2026-11-12 as user8 after `ws reset`: Gitea kept the first pass's `pac` token and its
 // webhook (a reset never touches the fork's settings). Re-creating `pac` answered HTTP 400 "access
 // token name has been used already"; the leftover webhook fired on reset's own seed commits and logged
 // RepositorySecretMissing warnings. Deleting both first, then repeating the exercise, gave one token,
 // one webhook and exactly one PaC run per push.
-[NOTE]
 .Doing this exercise a second time?
+[%collapsible]
 ====
 Gitea keeps what your last pass created, because `ws reset` never touches your fork's settings.
 Delete both before you start, or Gitea refuses the token name `pac` and every push is delivered twice:
@@ -1079,11 +1158,10 @@ Delete both before you start, or Gitea refuses the token name `pac` and every pu
 ====
 
 . In Gitea, click your avatar (top right) → *Settings* → *Applications*.
-. Under *Manage Access Tokens*, name a token `pac`, and under *Select scopes* choose *write:repository*.
+. Under *Manage Access Tokens*, name a token `pac` with scope *write:repository*.
 Click *Generate Token* and *copy the value* (Gitea shows it once).
-. Store the token plus a webhook secret you generate into the Secret.
-Run this block first — it ends at a prompt and waits; paste the token you just copied and press *Enter*.
-It is read silently, so nothing appears as you paste:
+. Run this block; it ends at a silent prompt and waits.
+Paste the token and press *Enter*; nothing appears as you paste:
 // DO NOT merge this block with the one below it. An interactive `read` must be the LAST
 // line of a click-to-run block: content/supplemental-ui/js/click-to-run.js sends the whole
 // block to the terminal in a SINGLE write (commandText() takes the block's entire
@@ -1118,30 +1196,34 @@ else
 fi
 ----
 
-*Second*, create the webhook in Gitea that POSTs to the PaC controller.
-The controller is reachable at a predictable address built from your cluster domain — print it:
+*Second*, the webhook that POSTs to the PaC controller.
+Print the controller's address:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
 echo "https://pipelines-as-code-controller-openshift-pipelines.{cluster_domain}"
 ----
 
-In your fork's Gitea page:
+In your fork's Gitea page, *Settings* → *Webhooks* → *Add Webhook* → *Gitea*, fill in these fields, then click *Add Webhook*:
 
-. *Settings* → *Webhooks* → *Add Webhook* → *Gitea*.
-. *Target URL*: the URL printed above.
-. *HTTP Method*: `POST`; *POST Content Type*: `application/json`.
-. *Secret*: the `$WEBHOOK_SECRET` value printed earlier.
-. *Trigger On*: *Push Events* (leave the default branch filter).
-. *Active*: checked. Click *Add Webhook*.
+[cols="1,2",options="header"]
+|===
+| Field | Value
+
+| *Target URL* | the URL printed above
+| *HTTP Method* | `POST`
+| *POST Content Type* | `application/json`
+| *Secret* | the `$WEBHOOK_SECRET` value printed earlier
+| *Trigger On* | *Push Events* (leave the default branch filter)
+| *Active* | checked
+|===
 
 // media-pass: screenshot pipelines-fundamentals-02-gitea-webhook.png — the Gitea Add Webhook
 // form (Target URL = the pipelines-as-code-controller route, content type application/json, secret
 // filled in, Push Events). Embed here. See media-manifest.md.
 
-Now *make a change and push it* — and watch the pipeline start with no `oc create`.
-Any commit to `main` works; make a visible one from the Gitea UI (open `README.md`, click the pencil, add a line like `built by my pipeline`, and *Commit Changes*).
-Within a few seconds PaC creates a run:
+Now *push a change*: any commit to `main` works.
+In Gitea, open `README.md`, click the pencil, add a line like `built by my pipeline`, and *Commit Changes*.
 
 // Partially grounded 2026-07-30 on OCP 4.22.5, as user1; re-grounded 2026-07-31 on user7-cicd
 // after `adm start pipelines-fundamentals --user user7` (user1-cicd had since been evicted by
@@ -1243,7 +1325,7 @@ parasol-claims-pull-request-...              Unknown     Running                
 --
 ====
 
-A PipelineRun you did not create is building the commit you just pushed.
+*What just happened:* the push fired the webhook, PaC matched it to your `Repository`, and started the run defined in `.tekton/pull-request.yaml`, building the commit you just pushed.
 Follow it:
 
 [source,sh,role=execute]
@@ -1251,7 +1333,7 @@ Follow it:
 tkn pipelinerun logs --last -f -n $NS
 ----
 
-That is the whole Pipelines-as-Code idea: the pipeline definition lives in the repo, a webhook connects the repo to the controller, and *every push is built the same way* — the foundation the supply-chain and GitOps modules build on.
+That is the whole Pipelines-as-Code idea: the pipeline lives in the repo, a webhook connects the repo to the controller, and *every push is built the same way*: the foundation the supply-chain and GitOps modules build on.
 
 [.checkpoint]
 ****
@@ -1262,21 +1344,19 @@ The pipeline now fires on Git push.
 == Challenge (optional)
 ⏱ *no hand-holding*
 
-You have the mechanics.
 Try these on your own:
 
 * *Tighten the budget.*
-Re-run the pipeline with `-p max-size-mb=300` (add a `params` entry, or `tkn pipeline start ... -p max-size-mb=300`) and read the `image-report` step: the image is in the high 300s of MB, so `within-budget` flips to `false`.
-Notice the run still *succeeds* — the report *flags*, it does not *fail* the build.
-How would you make it a hard gate?
+Re-run with `-p max-size-mb=300` (a `params` entry, or `tkn pipeline start ... -p max-size-mb=300`): the image is in the high 300s of MB, so `within-budget` flips to `false`, yet the run still *succeeds*.
+The report *flags*; it does not *fail* the build. How would you make it a hard gate?
 * *Read a Task's full body.*
-`oc get tasks.tekton.dev image-size-report -n ogsr-parasol-tasks -o yaml` — find where it writes its three results (the `$(results.<name>.path)` files).
-That is how any Task publishes data.
+`oc get tasks.tekton.dev image-size-report -n ogsr-parasol-tasks -o yaml`: find where it writes its three results (the `$(results.<name>.path)` files), which is how any Task publishes data.
 * *Trigger on a pull request.*
-Open a PR in Gitea against `main` instead of pushing to it, and watch PaC run the pipeline for the PR — the same `.tekton/` file handles both (`on-event: [push, pull_request]`).
+Open a PR in Gitea against `main` instead of pushing: the same `.tekton/` file handles both (`on-event: [push, pull_request]`).
 * *Find the run in the console.*
-Open *Pipelines → PipelineRuns* in the {ocp_console_url}[OpenShift console^], select your latest run, and read the graph — the same five Tasks, visualized.
+Open *Pipelines → PipelineRuns* in the {ocp_console_url}[OpenShift console^] and read your latest run's graph.
 
 When you are done, run `ws verify {module-id}` — or `ws prep {module-id} --yes` to wipe `{user}-cicd` back to the entry state (the pipeline and `claims-db`, your fork intact) and start fresh.
 
 endif::demo[]
+
