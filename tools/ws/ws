@@ -21,8 +21,8 @@
 #   adm preflight                    SA/admin: pre-install readiness + adoption forecast (run before install)
 #   adm status [--user U]            SA/admin: one-glance cohort health (platform + per-user dashboard)
 #   adm ready [--timeout 60m]        SA/admin: wait until the workshop is ready for attendees (warm-ups done)
-#   adm hide [<module>…]             SA/admin: take modules out of this delivery (no module: list hidden)
-#   adm show <module>…               SA/admin: put hidden modules back (both restart the shared cockpits)
+#   adm hide [--dry-run] [<module>…] SA/admin: take modules out of this delivery (no module: list hidden)
+#   adm show [--dry-run] <module>…   SA/admin: put hidden modules back (both restart the shared cockpits)
 #   adm diag [--user U] [<module>]   SA/admin: read-only troubleshooting bundle for a stuck attendee
 #   adm by-design                    SA/admin: every resource this workshop breaks/drifts ON PURPOSE
 #                                    — answers "is this Degraded/OutOfSync app expected?" in one step
@@ -3927,7 +3927,8 @@ cmd_hide_show() {  # hide|show [--dry-run] [<module>…] — WRITES; with no mod
   done
   need_oc
   local app="workshop-config" idx raw
-  idx="$(maas_param_index "$app" "$ARGO_NS" modulesDisabledCSV)"
+  idx="$(maas_param_index "$app" "$ARGO_NS" modulesDisabledCSV)" \
+    || die "cannot read Application ${app} in ${ARGO_NS} — is the workshop layer installed, and are you cluster-admin? check: oc get application ${app} -n ${ARGO_NS}"
   [[ -n "$idx" ]] || die "no modulesDisabledCSV helm parameter on Application ${app} (${ARGO_NS}) — this install cannot hide modules after the fact; set modules_disabled in bootstrap/vars.yaml and re-run bootstrap/install.sh"
   raw="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath="{.spec.source.helm.parameters[${idx}].value}")" \
     || die "cannot read ${app}'s modulesDisabledCSV — inspect: oc get application ${app} -n ${ARGO_NS} -o yaml"
@@ -3965,6 +3966,10 @@ cmd_hide_show() {  # hide|show [--dry-run] [<module>…] — WRITES; with no mod
   if [[ "$(csv_sorted "$new")" == "$(csv_sorted "$raw")" ]]; then
     ok "nothing to change — modulesDisabledCSV stays '${raw}'"; return 0
   fi
+  # An Application another Argo app tracks (the helm/bootstrap FSC path) would be self-healed back.
+  local owner
+  owner="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.metadata.annotations.argocd\.argoproj\.io/tracking-id}{.metadata.labels.app\.kubernetes\.io/instance}' 2>/dev/null || true)"
+  [[ -z "$owner" ]] || die "${app} is managed by another Argo CD app (${owner}) — a patch here would be reverted; change modulesDisabledCSV in that app's values instead"
   # A module the INSTALL left out may also lack its platform stack (pp-<stack>, both install paths):
   # showing it would list a module whose `ws prep` can only time out. Hiding needs no such check.
   if [[ "$verb" == show ]]; then
@@ -3977,10 +3982,6 @@ cmd_hide_show() {  # hide|show [--dry-run] [<module>…] — WRITES; with no mod
     done
     [[ -z "$missing" ]] || die "show: this install left out the platform stack(s) these modules need:${missing} — enable the module(s) in bootstrap/vars.yaml and re-run bootstrap/install.sh, which installs the stack and un-hides them"
   fi
-  # An Application another Argo app tracks (the helm/bootstrap FSC path) would be self-healed back.
-  local owner
-  owner="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.metadata.annotations.argocd\.argoproj\.io/tracking-id}{.metadata.labels.app\.kubernetes\.io/instance}' 2>/dev/null || true)"
-  [[ -z "$owner" ]] || die "${app} is managed by another Argo CD app (${owner}) — a patch here would be reverted; change modulesDisabledCSV in that app's values instead"
 
   # test-then-write: a reordered parameter list or a concurrent edit fails the patch, never mis-writes.
   # An EMPTY value is stored with no `value` key at all (omitempty; measured live 2026-11-15), so a
@@ -3998,8 +3999,12 @@ cmd_hide_show() {  # hide|show [--dry-run] [<module>…] — WRITES; with no mod
   if [[ "$verb" == hide ]]; then
     info "workshop-config also drops the module's per-user extras (e.g. Tempo viewer access, SonarQube seed, per-user Perses data source); its operators stay installed. ${WS_CMD} show restores them."
   fi
-  oc patch application "$app" -n "$ARGO_NS" --type=json -p "$patch" >/dev/null \
-    || die "could not patch ${app} (parameter moved or value changed underneath?) — re-run; inspect: oc get application ${app} -n ${ARGO_NS} -o yaml"
+  if ! oc patch application "$app" -n "$ARGO_NS" --type=json -p "$patch" >/dev/null; then
+    # An error is not proof nothing landed (e.g. a timeout after the write) — look before advising.
+    [[ "$(oc get application "$app" -n "$ARGO_NS" -o jsonpath="{.spec.source.helm.parameters[${idx}].value}" 2>/dev/null || true)" == "$new" ]] \
+      || die "could not patch ${app}; nothing was written (parameter moved or value changed underneath?) — re-run: ${WS_CMD} ${verb}${want% }; inspect: oc get application ${app} -n ${ARGO_NS} -o yaml"
+    warn "oc patch reported an error, but ${app} already carries '${new}' — continuing"
+  fi
   ok "${app} modulesDisabledCSV = '${new}'"
   # Auto-sync (both installers set it) picks the spec change up at once; an explicit operation on top
   # would only wait out that ~6-min sync first. Sync ourselves only when auto-sync is off.
@@ -4015,20 +4020,24 @@ cmd_hide_show() {  # hide|show [--dry-run] [<module>…] — WRITES; with no mod
   if [[ ${#deps[@]} -eq 0 ]]; then
     ok "no shared cockpit here — per-user cockpits roll themselves on the value change (checksum/user-data)"; return 0
   fi
+  # From here the new value HAS landed, so a re-run is a no-op that restarts nothing: every failure
+  # below names the restart to run by hand instead (nav stays stale while ws prep already refuses).
+  local recover="oc rollout restart ${deps[*]/#/deploy/} -n ${SHOWROOM_NS}"
+  for dep in "${deps[@]}"; do recover="${recover} && oc rollout status deploy/${dep} -n ${SHOWROOM_NS} --timeout=300s"; done
   info "waiting (≤600s) for Argo to render the new set into ${deps[*]/%/-userdata}…"
   for dep in "${deps[@]}"; do
     cm="${dep}-userdata"
     until [[ "$(cockpit_hidden_csv "$cm")" == "$want_set" ]]; do
-      (( SECONDS - t0 < 600 )) || die "${cm} still hides '$(cockpit_hidden_csv "$cm")' after 600s (want '${want_set}') — inspect: oc get application ${app} -n ${ARGO_NS}; cockpits NOT restarted"
+      (( SECONDS - t0 < 600 )) || die "${cm} still hides '$(cockpit_hidden_csv "$cm")' after 600s (want '${want_set}'), cockpits NOT restarted — once oc get application ${app} -n ${ARGO_NS} shows Synced, run: ${recover}"
       sleep 5
     done
   done
   ok "cockpit userdata updated in $(( SECONDS - t0 ))s"
-  oc rollout restart "${deps[@]/#/deploy/}" -n "$SHOWROOM_NS" >/dev/null || die "could not restart ${deps[*]} in ${SHOWROOM_NS}"
+  oc rollout restart "${deps[@]/#/deploy/}" -n "$SHOWROOM_NS" >/dev/null || die "modulesDisabledCSV is set, but the cockpit restart failed (RBAC?) — run: ${recover}"
   # rollout status completes only when the NEW ReplicaSet is available and no old pod is left.
   for dep in "${deps[@]}"; do
     oc rollout status "deploy/${dep}" -n "$SHOWROOM_NS" --timeout=300s >/dev/null \
-      || die "${dep}: new pod not Ready in 300s — check: oc rollout status deploy/${dep} -n ${SHOWROOM_NS}"
+      || die "${dep}: new pod not Ready in 300s (modulesDisabledCSV is set) — check: oc get pods -n ${SHOWROOM_NS}; then run: ${recover}"
     ok "${dep} rebuilt and Ready"
   done
   ok "${verb}: done — attendees see the change on a page reload; ${WS_CMD} list shows the new set"

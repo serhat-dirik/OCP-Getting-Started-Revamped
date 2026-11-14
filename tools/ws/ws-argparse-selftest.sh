@@ -368,7 +368,7 @@ run_suite() {
     "unknown module 'nosuch-module'" -- hide m07 nosuch-module
   expect_refusal module "adm show: an out-of-range number is refused" \
     "module number out of range: 'm99'" -- show m99
-  expect_accepted control "adm hide: mNN and slug resolve, several at once" "" -- hide m07 packaging-distributing
+  expect_accepted control "adm hide: accepts mNN and slug, several at once" "" -- hide m07 packaging-distributing
   expect_accepted control "adm hide: no module = the read-only list" "" -- hide
 }
 
