@@ -29,17 +29,33 @@ PROD={user}-prod
 echo "payments team home: $NS  (+ $PROD, and {user}-stage)"
 ----
 
-You are the platform engineer for Parasol's new *payments team*.
-Your `{user}-dev`, `{user}-stage`, and `{user}-prod` projects *are* that team's sandbox, and three ServiceAccounts have been seeded in it: `payments-ci` and `payments-ops` (two teammates you must govern) and `root-demander` (a workload with a security problem you'll meet first).
-In this lab you make that sandbox safe: reject a root-demanding workload and fix it, grant each teammate exactly the right access, author a custom least-privilege Role, live inside the team's quota, and finally inspect how the platform provisioned *you* the same way.
+You are the platform engineer for Parasol's new *payments team*, whose sandbox is your `{user}-dev`, `{user}-stage` and `{user}-prod` projects.
+Three ServiceAccounts are seeded there:
+
+[cols="1,3"]
+|===
+|ServiceAccount |Who it is
+
+|`payments-ci` |A teammate to govern: the developer identity
+|`payments-ops` |A teammate to govern: the CI robot
+|`root-demander` |A workload with a security problem, met first
+|===
 
 [TIP]
-.Two ways for most steps; a few are terminal-only
+.Console or CLI, and the `$NS` shortcut
 ====
-Most steps below are offered two ways: the *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`), the *CLI* tab uses `oc` in the *Terminal* tab beside these instructions.
-Pick a path once — the tabs stay in sync across the page.
+Most steps have a *Console* tab and a *CLI* tab that stay in sync across the page; a few are terminal-only.
+`$NS` and `$PROD` live only in this terminal: *if it reconnects, re-run the first block of the exercise you are in* (in exercise 1, the block above).
+====
+
+.Which steps are terminal-only, and why every exercise resets `$NS`
+[%collapsible]
+====
+The *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`); the *CLI* tab uses `oc` in the *Terminal* tab beside these instructions.
 A few steps are *terminal-only* because the console adds nothing: minting a bound token, `oc adm policy who-can` audits, the read-only "how you were provisioned" tour, and the cluster-policy reads and connection probes in exercise 7.
-The `$NS`/`$PROD` shortcuts live only in this terminal, so every exercise sets them again in its first block: *if your terminal reconnects, run the first block of the exercise you are in again* — in exercise 1 that is the block above.
+Because the `$NS`/`$PROD` shortcuts live only in this terminal, every exercise sets them again in its first block.
+
+In this lab you make the sandbox safe: reject a root-demanding workload and fix it, grant each teammate exactly the right access, author a custom least-privilege Role, live inside the team's quota, inspect how the platform provisioned *you* the same way, and see how every namespace is born governed.
 ====
 endif::demo[]
 
@@ -253,12 +269,19 @@ endif::demo[]
 // ============================================================================
 ifndef::demo[]
 
+
 == 1. The workload the platform won't run
 ⏱ *~7 min* · watch restricted-v2 reject a root-demanding Pod, then fix it
 
-Start where the trouble is loudest.
-Your project has a Deployment called `root-demander`, seeded at *zero replicas* so nothing has tried to schedule yet.
-Its container demands to run as root (`runAsUser: 0`).
+Parasol's payments team inherited `root-demander`, a container that demands root (`runAsUser: 0`), seeded at *zero replicas*.
+
+*You'll end with:* `root-demander` refused at admission, then running as a non-root UID from your namespace's range.
+
+[mermaid]
+....
+include::example$diagrams/multi-tenancy-workload-security/07-root-demander-path.mmd[]
+....
+
 Scale it up and watch what OpenShift does:
 
 // Grounded live 2026-07-31 in the browser as user3 (session tools/media/shot-profile-user3.session.json;
@@ -298,9 +321,11 @@ Scale it up and watch what OpenShift does:
 Console::
 +
 --
-In the {ocp_console_url}[web console^] (project `{user}-dev`), open *Workloads* → *Deployments* → `root-demander`, and use the *Actions* menu → *Edit Pod count* (or the scale-up arrow) to set it to *1*.
-The Deployment will sit at *0 of 1* — the Pod never appears.
-The *why* is recorded against the *ReplicaSet*, not the Deployment (the Deployment's own *Events* tab shows only scale-ups): open the *ReplicaSets* tab, click the current `root-demander-…` ReplicaSet, then its *Events* tab to read the rejection.
+. In the {ocp_console_url}[web console^] (project `{user}-dev`): *Workloads* → *Deployments* → `root-demander`.
+. *Actions* → *Edit Pod count* (or the scale-up arrow): set it to *1*.
+It sits at *0 of 1*; the Pod never appears.
+. For the *why*, open the *ReplicaSets* tab → the current `root-demander-…` ReplicaSet → its *Events* tab.
+The Deployment's own *Events* tab shows only scale-ups.
 
 image::multi-tenancy-workload-security/multi-tenancy-workload-security-01-deploy-0of1-event.png["The root-demander ReplicaSet's Events tab, streaming one event, Generated from replicaset-controller and already repeated 16 times. The message is the whole lesson: Error creating: pods root-demander-... is forbidden: unable to validate against any security context constraint, followed by every SCC the platform tried and why each said no — provider restricted-v2 refusing .containers[0].runAsUser: Invalid value: 0: must be in the ranges 1001990000 to 1001999999, and every privileged provider simply Forbidden: not usable by user or serviceaccount. Note the tab does not print the event REASON (FailedCreate) that the CLI shows; the message is what this view gives you. The 0 of 1 pod count is on the Deployment page you came from."]
 --
@@ -314,7 +339,7 @@ oc scale deploy/root-demander --replicas=1 -n $NS
 --
 ====
 
-Give it a few seconds, then look at the Deployment — it is stuck at `0/1`, and there are *no Pods*:
+After a few seconds the Deployment is stuck at `0/1`, with *no Pods*:
 
 [source,sh,role=execute]
 ----
@@ -330,9 +355,8 @@ root-demander   0/1     0            0           18m
 No resources found in {user}-dev namespace.
 ----
 
-The Pod was *rejected at admission* — it never got created.
-The reason is on the ReplicaSet's events.
-The full message lists *every* Security Context Constraint on the cluster and why each one refused the Pod (about thirty of them), which is a wall of text — so pull out the one line that matters:
+The Pod was *rejected at admission*: it never got created.
+Pull the one line that matters out of the ReplicaSet's event:
 
 [source,sh,role=execute]
 ----
@@ -348,10 +372,16 @@ echo "${MSG:-rejection event not found yet — wait a few seconds and re-run}"
 provider restricted-v2: .containers[0].runAsUser: Invalid value: 0: must be in the ranges: [1000960000, 1000969999]
 ----
 
-Read that carefully.
-The default SCC, *restricted-v2*, will only admit a Pod whose UID falls in a 10000-UID band — and `0` (root) is not in it.
-The numbers in *your* error will differ from the sample above: the band is *your namespace's own assigned range* (every namespace gets a different one), stamped on the project as an annotation.
-Read yours, and confirm it is the same range your rejection named:
+*What just happened:* the default Security Context Constraint (SCC), *restricted-v2*, admits only a UID in a 10000-UID band, and `0` (root) is not in it.
+
+.Why filter the event?
+[%collapsible]
+====
+The full message lists *every* Security Context Constraint on the cluster and why each one refused the Pod (about thirty of them), which is a wall of text.
+The `grep` keeps only the restricted-v2 clause.
+====
+
+That band is your namespace's own range, stamped on the project. Read it:
 
 [source,sh,role=execute]
 ----
@@ -364,14 +394,18 @@ oc get ns $NS -o jsonpath='uid-range={.metadata.annotations.openshift\.io/sa\.sc
 uid-range=1000960000/10000
 ----
 
-The annotation reads `<start>/10000` — "10000 UIDs starting at `<start>`." — which is exactly the `[<start>, <start+9999>]` band the rejection named.
+`<start>/10000` means 10000 UIDs starting at `<start>`, the same `[<start>, <start+9999>]` band your rejection named.
+
+.Why the error and the annotation always agree
+[%collapsible]
+====
+The numbers in *your* error differ from the sample above: every namespace gets a different range.
 Whatever your start value is, the error and the annotation always agree, because the annotation is where admission got the range.
 Every workload in this namespace gets a UID from that band, and none of them can be root.
 That is the platform's default, and it is doing its job.
+====
 
-Now *fix it*.
-The honest fix is almost always to stop demanding root: drop `runAsUser: 0` and declare the container compliant with the restricted profile.
-Patch the Deployment's security context:
+Now *fix it*: drop `runAsUser: 0` and declare the container compliant with the restricted profile:
 
 // Grounded 2026-07-30 on OCP 4.22.5, signed in as an attendee (user1), viewport 1600x1000.
 // Grounded against Deployment `claims-db` (user1-dev; `root-demander` is not staged in this
@@ -384,9 +418,9 @@ Patch the Deployment's security context:
 Console::
 +
 --
-Open `root-demander` → *Actions* → *Edit Deployment* → *YAML*.
-In the container's `securityContext`, delete `runAsUser: 0` and replace it with the restricted-compliant block from the *CLI* tab (`runAsNonRoot`, dropped capabilities, seccomp), then *Save*.
-The Deployment rolls out and the Pod appears.
+. `root-demander` → *Actions* → *Edit Deployment* → *YAML*.
+. In the container's `securityContext`, replace `runAsUser: 0` with the *CLI* tab's block (`runAsNonRoot`, dropped capabilities, seccomp), then *Save*.
+The Pod appears.
 --
 CLI::
 +
@@ -399,8 +433,7 @@ oc rollout status deploy/root-demander -n $NS --timeout=90s
 --
 ====
 
-This time the Pod is admitted and runs.
-See *which UID it landed on* — you never chose one, so restricted-v2 assigned the bottom of the namespace range:
+*Predict, then run:* the Pod is admitted now, and you never chose a UID. Which one will it land on?
 
 [source,sh,role=execute]
 ----
@@ -416,13 +449,10 @@ scc=restricted-v2  phase=Running
 uid=1000960000(1000960000) gid=0(root) groups=0(root),1000960000
 ----
 
-The workload runs as the bottom UID of your namespace's range (`1000960000` in this sample) — non-root, drawn from the band the annotation declares, under the `restricted-v2` SCC it never had to ask for.
+*What just happened:* restricted-v2 assigned the *bottom* of your range, under an SCC the Pod never had to ask for.
 No image rebuild, no exception, no root.
 
-Sometimes a workload *genuinely* needs a fixed or elevated UID — a legacy database image, a node agent.
-The answer is *not* to run everything as root; it is a *narrowly scoped* exception: a namespaced RoleBinding to a less-restrictive SCC (`nonroot-v2`, or `anyuid` only if UID 0 is truly required) targeting *one ServiceAccount*.
-Try to grant that exception yourself.
-`--dry-run=server` asks the API for its decision and changes nothing:
+Some workloads *genuinely* need a fixed UID. Try to grant `root-demander` that exception yourself (`--dry-run=server` changes nothing):
 
 // Performed 2026-11-12 on OCP 4.22.22 as user7 (impersonated with its real groups). The refusal is
 // RBAC escalation prevention, not a missing verb: admin may create RoleBindings, but not one that
@@ -440,17 +470,34 @@ Error from server (Forbidden): rolebindings.rbac.authorization.k8s.io "system:op
 {APIGroups:["security.openshift.io"], Resources:["securitycontextconstraints"], ResourceNames:["nonroot-v2"], Verbs:["use"]}
 ----
 
-You are `admin` in this namespace, and you still cannot hand out `use` of an SCC you do not hold yourself.
-The exception is a platform-team grant: requested, reviewed, and scoped to one ServiceAccount.
-That friction is deliberate, and it is why fixing the image almost always wins.
+*What just happened:* even as `admin` of this namespace, you cannot hand out `use` of an SCC you do not hold.
+
+.The scoped exception, and why fixing the image wins
+[%collapsible]
+====
+Workloads that genuinely need a fixed or elevated UID exist: a legacy database image, a node agent.
+The answer is *not* to run everything as root; it is a *narrowly scoped* exception: a namespaced RoleBinding to a less-restrictive SCC (`nonroot-v2`, or `anyuid` only if UID 0 is truly required) targeting *one ServiceAccount*.
+That exception is a platform-team grant: requested, reviewed, and scoped to one ServiceAccount.
+The friction is deliberate, and it is why fixing the image almost always wins.
+====
 
 [.checkpoint]
 ****
-✔ *Verify:* Scaling `root-demander` produced *no Pod* and a `restricted-v2 … runAsUser: Invalid value: 0` rejection naming your namespace's own UID range (the number differs per namespace — you read it off the annotation); after dropping the forced root, the Pod runs as a non-root UID drawn from that range under the `restricted-v2` SCC; and your own attempt to grant `nonroot-v2` was refused as an escalation.
+✔ *Verify:* scaling gave *no Pod* and a `restricted-v2 … runAsUser: Invalid value: 0` rejection naming your range; the fixed Pod runs under `restricted-v2` as a non-root UID from it; your `nonroot-v2` grant was refused.
 ****
 
 == 2. Give the workload a safe identity
 ⏱ *~5 min* · ServiceAccounts and short-lived bound tokens
+
+The Pod you just fixed runs *as* the `root-demander` ServiceAccount, and nobody typed a password.
+How does a workload prove who it is, without a secret that lives forever?
+
+*You'll end with:* a 10-minute bound token for `payments-ci`, and its decoded claims.
+
+[mermaid]
+....
+include::example$diagrams/multi-tenancy-workload-security/08-bound-token.mmd[]
+....
 
 Set this exercise's shortcuts first:
 
@@ -459,12 +506,7 @@ Set this exercise's shortcuts first:
 NS={user}-dev; PROD={user}-prod
 ----
 
-The Pod you just fixed runs *as a ServiceAccount* — `root-demander` — even though nobody typed a password.
-Workloads authenticate as ServiceAccounts the way people authenticate through an identity provider, and RBAC governs them identically.
-So how does a workload *prove* it is that ServiceAccount?
-
-Not with a long-lived secret.
-Current OpenShift no longer auto-generates a permanent token Secret for each ServiceAccount — check what secrets `payments-ci` actually has:
+List the secrets `payments-ci` has:
 
 [source,sh,role=execute]
 ----
@@ -477,16 +519,16 @@ oc get sa payments-ci -n $NS -o jsonpath='{range .secrets[*]}{.name}{"\n"}{end}'
 payments-ci-dockercfg-4cvv9
 ----
 
-Only a `dockercfg` pull secret — *no* `service-account-token`.
-Instead you mint a *bound token* on demand, scoped to a lifetime you choose:
+*What just happened:* only a `dockercfg` pull secret, *no* `service-account-token`: current OpenShift no longer generates a permanent token Secret per ServiceAccount.
+
+Mint a *bound token* on demand instead:
 
 [source,sh,role=execute]
 ----
 oc create token payments-ci -n $NS --duration=10m >/dev/null && echo "minted a 10-minute bound token for payments-ci"
 ----
 
-The token is a JWT you would hand to a workload; *never print or paste it into chat*.
-What matters is its *claims* — decode them (the middle segment) to see the guarantees a bound token gives you:
+It is a JWT: *never print or paste it into chat*. Decode its claims (the middle segment):
 
 [source,sh,role=execute]
 ----
@@ -494,7 +536,7 @@ oc create token payments-ci -n $NS --duration=10m \
   | cut -d. -f2 | base64 -d 2>/dev/null | tr ',' '\n' | grep -E '"exp"|"sub"|"namespace"' | head -3
 ----
 
-The namespace in the captured output below is the sample user's `user1-dev`; *yours* is `{user}-dev` — read the *shape*, not the exact name.
+The capture below is the sample user's `user1-dev`; yours reads `{user}-dev`.
 
 .Expected output (`exp` is a Unix timestamp ~600 s from now)
 [source,texinfo]
@@ -504,22 +546,35 @@ The namespace in the captured output below is the sample user's `user1-dev`; *yo
 "sub":"system:serviceaccount:user1-dev:payments-ci"}
 ----
 
-A bounded lifetime (the `exp` timestamp is the 600 seconds you asked for), an audience of the cluster API, and a subject that names *exactly which ServiceAccount in which namespace*.
+*What just happened:* `exp` is the 600 seconds you asked for, and `sub` names exactly one ServiceAccount in one namespace.
+
+.Why this is workload identity done right
+[%collapsible]
+====
+Workloads authenticate as ServiceAccounts the way people authenticate through an identity provider, and RBAC governs them identically.
+A bound token gives a bounded lifetime, an audience of the cluster API, and a subject that names exactly which ServiceAccount in which namespace.
 Short-lived, scoped, and — when mounted in a Pod — invalidated the moment the Pod is deleted.
-That is workload identity done right, and it is the same least-privilege pattern an AI agent uses to reach the cluster in a later module.
+It is the same least-privilege pattern an AI agent uses to reach the cluster in a later module.
+====
 
 [.checkpoint]
 ****
-✔ *Verify:* `payments-ci` has only a `dockercfg` secret (no permanent token); `oc create token payments-ci --duration=10m` mints a JWT whose claims name a bounded lifetime and the subject `system:serviceaccount:{user}-dev:payments-ci`.
+✔ *Verify:* `payments-ci` has only a `dockercfg` secret, and its token decodes to a bounded `exp` and the subject `system:serviceaccount:{user}-dev:payments-ci`.
 ****
 
 == 3. Govern the payments team
 ⏱ *~7 min* · grant each teammate exactly the right access, per environment
 
-Now the RBAC that makes the sandbox a *team's* sandbox.
-`payments-ci` is a developer identity: it should have full access in *dev* but be *read-only* in *prod* — the everyday shape of an environment promotion.
+`payments-ci` is the team's developer: full access in *dev*, *read-only* in *prod*.
 
-First, prove it currently has *nothing* — and meet the audit command you'll use throughout:
+*You'll end with:* one ServiceAccount with `edit` in dev and `view` in prod, proven with `oc auth can-i`.
+
+[mermaid]
+....
+include::example$diagrams/multi-tenancy-workload-security/05-access-per-namespace.mmd[]
+....
+
+Prove it has *nothing* yet, with the auditor's favourite question, "who may do X here?":
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -531,9 +586,7 @@ else
 fi
 ----
 
-The `who-can` command answers "who is allowed to do X here?" — an auditor's favourite question.
-(You'll see in a moment why the *filter* matters.)
-Now grant `payments-ci` `edit` in dev:
+Grant `payments-ci` `edit` in dev:
 
 // Grounded 2026-07-29 on OCP 4.22.5 as an attendee (user1), at /k8s/ns/{user}-partner/rolebindings/~new.
 // TWO corrections, both measured on the live form:
@@ -550,8 +603,9 @@ Now grant `payments-ci` `edit` in dev:
 Console::
 +
 --
-In the console (project `{user}-dev`), go to *User Management* → *RoleBindings* → *Create RoleBinding*.
-Give it a *Name*, leave *Namespace* as `{user}-dev`, set *Role name* = `edit`, choose *ServiceAccount* in the subject radio group, then fill the *Subject namespace* = `{user}-dev` and *Subject name* = `payments-ci` fields it reveals, and click *Create*.
+. In project `{user}-dev`: *User Management* → *RoleBindings* → *Create RoleBinding*.
+. Set a *Name*, keep *Namespace* `{user}-dev`, and set *Role name* = `edit`.
+. Choose *ServiceAccount* as the subject, then *Subject namespace* = `{user}-dev` and *Subject name* = `payments-ci`. Click *Create*.
 
 // media-pass: screenshot multi-tenancy-workload-security-02-create-rolebinding.png — the Create
 // RoleBinding form filled in (Subject = ServiceAccount, Subject namespace/name = payments-ci, Role
@@ -572,15 +626,14 @@ The `-z` flag means "a ServiceAccount in this namespace."
 --
 ====
 
-Then grant the *same* teammate only `view` in prod.
-Because the ServiceAccount lives in `{user}-dev` but the binding goes in `{user}-prod`, name the subject in full:
+Grant the same teammate only `view` in prod. The binding lives in `{user}-prod`, so name the subject in full:
 
 [source,sh,role=execute]
 ----
 oc adm policy add-role-to-user view system:serviceaccount:$NS:payments-ci -n $PROD
 ----
 
-Now *prove* the access differs per environment — this is the real skill, verifying outcomes with `oc auth can-i`:
+Verify the outcome, not the intent:
 
 [source,sh,role=execute]
 ----
@@ -605,9 +658,9 @@ echo -n "  get secrets:        "; oc auth can-i get secrets      --as=system:ser
   get secrets:        no
 ----
 
-One identity, two environments, two levels of access — and note that even `view` in prod *cannot* read Secrets.
-Now re-run the audit, and see why the filter is not optional.
-Ask who can read Secrets in dev — *unfiltered first*:
+*What just happened:* one identity, two levels of access, and even `view` in prod *cannot* read Secrets.
+
+*Predict, then run:* how many ServiceAccounts can read Secrets in your dev namespace?
 
 [source,sh,role=execute]
 ----
@@ -620,9 +673,7 @@ oc adm policy who-can get secrets -n $NS | grep -c 'system:serviceaccount'
 101
 ----
 
-Over a *hundred* subjects — platform controllers, operators, every namespace's builder — can read Secrets in your namespace.
-An audit that dumps a hundred rows is an audit nobody reads.
-The skill is *always pairing `who-can` with a filter* for the subjects you actually care about:
+Over a hundred. Filter for the subjects you govern:
 
 [source,sh,role=execute]
 ----
@@ -635,21 +686,33 @@ oc adm policy who-can get secrets -n $NS | grep payments
         system:serviceaccount:{user}-dev:payments-ci
 ----
 
-There is `payments-ci` — because `edit` (which you granted it in dev) *can* read Secrets.
-Hold that thought: the next teammate must *not*.
+*What just happened:* `payments-ci` appears because `edit` *can* read Secrets. The next teammate must *not*.
+
+.Why the filter is not optional
+[%collapsible]
+====
+Over a *hundred* subjects — platform controllers, operators, every namespace's builder — can read Secrets in your namespace.
+An audit that dumps a hundred rows is an audit nobody reads.
+The skill is *always pairing `who-can` with a filter* for the subjects you actually care about.
+====
 
 [.checkpoint]
 ****
-✔ *Verify:* `payments-ci` can `update`/`delete` Deployments in `{user}-dev` (edit) but only `get` in `{user}-prod` (view — no create, no secrets); `who-can get secrets` returns over a hundred subjects unfiltered, and `payments-ci` appears when you filter, confirming `edit` grants Secret reads.
+✔ *Verify:* `payments-ci` can update and delete Deployments in `{user}-dev` but only `get` in `{user}-prod`; `who-can get secrets` lists over a hundred subjects, and filtered it names `payments-ci`.
 ****
 
 == 4. Author a least-privilege custom Role
 ⏱ *~5 min* · a `deployer` Role that ships Deployments but is blind to Secrets
 
-`payments-ops` is the CI robot.
-It must *ship* Deployments — but it must *never* read the payment Secrets.
-The built-in `edit` role would work for deploying, but you just proved `edit` can read Secrets, so it's too much.
-This is exactly when you *write your own Role*.
+`payments-ops`, the CI robot, must *ship* Deployments and *never* read the payment Secrets.
+`edit` reads Secrets, so write your own Role.
+
+*You'll end with:* a `deployer` Role that lets `payments-ops` ship Deployments and nothing else.
+
+[mermaid]
+....
+include::example$diagrams/multi-tenancy-workload-security/09-deployer-checks.mmd[]
+....
 
 Set this exercise's shortcuts first:
 
@@ -658,7 +721,7 @@ Set this exercise's shortcuts first:
 NS={user}-dev; PROD={user}-prod
 ----
 
-Create a `deployer` Role: full lifecycle on Deployments, read access to Pods to watch a rollout, and *deliberately no rule for Secrets or ConfigMaps*:
+Create `deployer`: full lifecycle on Deployments, read on Pods, and *no rule for Secrets or ConfigMaps*:
 
 // Grounded 2026-07-29 on OCP 4.22.5, signed in as an attendee (user1), viewport 1600x1000:
 //   · the masthead button is labelled "Quick create" (exact aria-label) and renders as a ⊕ icon,
@@ -682,8 +745,8 @@ Create a `deployer` Role: full lifecycle on Deployments, read access to Pods to 
 Console::
 +
 --
-Use the masthead *+* (*Import YAML*), paste the manifest from the *CLI* tab, and *Create*.
-The Role appears under *User Management* → *Roles* in `{user}-dev`.
+. Masthead *+* (*Import YAML*): paste the manifest from the *CLI* tab, then *Create*.
+. It appears under *User Management* → *Roles* in `{user}-dev`.
 --
 CLI::
 +
@@ -709,14 +772,14 @@ EOF
 --
 ====
 
-Bind it to `payments-ops` (referencing the Role by name in this namespace):
+Bind it to `payments-ops`:
 
 [source,sh,role=execute]
 ----
 oc adm policy add-role-to-user deployer -z payments-ops --role-namespace=$NS -n $NS
 ----
 
-Now prove the least-privilege boundary — it can do its job, and *only* its job:
+Prove the boundary:
 
 [source,sh,role=execute]
 ----
@@ -735,19 +798,36 @@ get secrets:        no
 get configmaps:     no
 ----
 
-That is the whole point of a custom Role: `payments-ops` can ship and scale Deployments all day, and is *completely blind* to the team's Secrets.
-Contrast it with `payments-ci`, which holds `edit` in dev and therefore *can* read Secrets — same team, two different trust levels, expressed precisely in RBAC.
+*What just happened:* `payments-ops` ships and scales Deployments and is *blind* to Secrets.
+No deny rule was needed: RBAC grants only what some rule lists.
+
+.Same team, two trust levels
+[cols="2,1,1"]
+|===
+| |`edit` (`payments-ci`) |`deployer` (`payments-ops`)
+
+|Create, update, scale Deployments |yes |yes
+|Read Pods and their logs |yes |yes
+|Read Secrets, ConfigMaps |yes |*no*
+|===
 
 [.checkpoint]
 ****
-✔ *Verify:* The custom `deployer` Role lets `payments-ops` `create`/`update`/`scale` Deployments in `{user}-dev` but returns `no` for `get secrets` and `get configmaps` — least privilege, authored by you.
+✔ *Verify:* as `payments-ops` in `{user}-dev`, `can-i` says `yes` to create and scale Deployments and `no` to Secrets and ConfigMaps.
 ****
 
 == 5. The quota and limits you live under
 ⏱ *~6 min* · read the team's budget, blow past it, and fix it
 
-RBAC is *what actions* are allowed; *ResourceQuota* is *how much* the namespace may consume.
-Your team's quota is standing platform policy — read what budget you have and what you've used.
+RBAC decides *what* the payments team may do; *ResourceQuota* decides *how much* its namespace may consume.
+
+*You'll end with:* an over-budget Deployment refused then fixed, a bare Pod given LimitRange defaults, and your reserved-versus-used CPU.
+
+[mermaid]
+....
+include::example$diagrams/multi-tenancy-workload-security/10-quota-admission.mmd[]
+....
+
 Set this exercise's shortcuts first:
 
 [source,sh,role=execute,subs="attributes+"]
@@ -755,6 +835,7 @@ Set this exercise's shortcuts first:
 NS={user}-dev; PROD={user}-prod
 ----
 
+Read your budget:
 
 // Verified live OCP 4.22.5, 2026-07-26: the ResourceQuota detail page (tabs Details · YAML) leads with
 // percentage/ratio gauges — limits.cpu "28.3% used", pods "4 of 30 used" — over a
@@ -765,8 +846,7 @@ NS={user}-dev; PROD={user}-prod
 Console::
 +
 --
-Open *Administration* → *ResourceQuotas* → `workshop-quota` in `{user}-dev`.
-The gauges show used-vs-hard for CPU, memory, Pods, and PVCs.
+*Administration* → *ResourceQuotas* → `workshop-quota` in `{user}-dev`: gauges of used-vs-hard for CPU, memory, Pods, and PVCs.
 
 // RE-CAPTURED 2026-08-16 in user8-dev, and this note records what it fixed so the same shot is not
 // re-taken from a dirty namespace again. The previous image was wrong TWICE over:
@@ -809,10 +889,10 @@ requests.cpu            50m    3
 requests.memory         64Mi   6Gi
 ----
 
-Your team may reserve up to `3` cores and `6Gi` of memory in *requests*, cap at `8` cores / `12Gi` in *limits*, and run `30` Pods.
-Note you *cannot create this quota yourself* — a namespace `admin` can read it but not change it, because quota is the platform team's lever, not the tenant's.
-Now *blow past it* on purpose.
-Deploy something that asks for `8Gi` — more than the whole `6Gi` requests budget:
+*What just happened:* requests up to `3` cores / `6Gi`, limits up to `8` / `12Gi`, `30` Pods.
+As namespace `admin` you can read this quota but not change it: quota is the platform team's lever.
+
+*Predict, then run:* this asks for `8Gi`, more than the whole `6Gi` budget. Will the Deployment be created?
 
 [source,sh,role=execute]
 ----
@@ -836,8 +916,7 @@ sleep 5
 oc get deploy quota-buster -n $NS
 ----
 
-The Deployment is created but stuck at `0/1` — like the SCC rejection in exercise 1, the *Pod* was refused.
-Read why:
+It is created, but stuck at `0/1`: as in exercise 1, the *Pod* was refused. Read why:
 
 [source,sh,role=execute]
 ----
@@ -853,8 +932,7 @@ echo "${MSG:-rejection event not found yet — wait a few seconds and re-run}"
 (combined from similar events): Error creating: pods "quota-buster-6df5879b69-dw8kj" is forbidden: exceeded quota: workshop-quota, requested: requests.memory=8Gi, used: requests.memory=64Mi, limited: requests.memory=6Gi
 ----
 
-`exceeded quota … requested: requests.memory=8Gi … limited: requests.memory=6Gi` — the quota told you exactly what you asked for and what the ceiling is.
-*Fix it* by bringing the request within budget:
+*What just happened:* the quota names your request (`8Gi`) and the ceiling (`6Gi`). *Fix it* within budget:
 
 [source,sh,role=execute]
 ----
@@ -862,10 +940,7 @@ oc set resources deploy/quota-buster -n $NS --requests=cpu=100m,memory=512Mi --l
 oc rollout status deploy/quota-buster -n $NS --timeout=60s
 ----
 
-It schedules.
-Finally, see the *LimitRange* — the quota's partner — in action.
-A quota that enforces `requests.memory` means every Pod *must* declare one; a LimitRange supplies a *default* so a bare Pod isn't refused.
-Create a Pod that declares *no* resources at all:
+It schedules. Now create a Pod that declares *no* resources:
 
 [source,sh,role=execute]
 ----
@@ -881,12 +956,17 @@ requests={"cpu":"100m","memory":"256Mi"}
 limits={"cpu":"1500m","memory":"1Gi"}
 ----
 
-You declared nothing, yet the Pod arrived with `requests` of `100m`/`256Mi` and `limits` of `1500m`/`1Gi` — the LimitRange stamped its defaults so the quota-enforced namespace would accept it.
-Quota is the budget; LimitRange makes sure every Pod shows up with a price tag.
+*What just happened:* the *LimitRange* stamped default requests and limits, so the quota-enforced namespace accepts the Pod.
+Quota is the budget; LimitRange gives every Pod a price tag.
 
-So who reads the bill?
-Open the console's *Observe → Metrics* page, and run this — it needs no cost product and nothing installed, because cluster monitoring has been recording it all along.
-Substitute your own username for `userN`; PromQL's own braces mean this block cannot carry the attribute for you:
+.Why a quota needs a LimitRange
+[%collapsible]
+====
+A quota that enforces `requests.memory` means every Pod *must* declare one; a LimitRange supplies a *default* so a bare Pod isn't refused.
+You declared nothing, yet the Pod arrived with `requests` of `100m`/`256Mi` and `limits` of `1500m`/`1Gi`.
+====
+
+*Who reads the bill?* In the console's *Observe → Metrics*, run this, with your username for `userN` (PromQL's braces keep the attribute out of this block):
 
 [source,text]
 ----
@@ -896,20 +976,26 @@ sum by (namespace) (kube_pod_container_resource_requests{resource="cpu",namespac
 // Smoke-tested 2026-11-12 in the real cockpit as user3: the console's Observe -> Metrics runs a
 // tenant's query against the per-project endpoint, so the `userN-.*` pattern returned the selected
 // project (user3-dev) only; the cluster-wide query endpoint answered 403.
-That is what your project *reserved*.
-You see one row, `{user}-dev`, even though the pattern matches all your namespaces: the console answers a tenant's query for the selected project only, and the cluster-wide endpoint that would cover every namespace refuses you.
-Now ask what it actually burned:
+That is what your project *reserved*: one row, `{user}-dev`, because the console answers a tenant's query for the selected project only.
+Now what it burned:
 
 [source,text]
 ----
 sum by (namespace) (rate(container_cpu_usage_seconds_total{namespace=~"userN-.*",container!=""}[5m]))
 ----
 
-The gap between the two numbers is your waste, and it is the number a chargeback model bills you for — you pay for the reservation, not the usage.
-Compare them against the `3` cores your quota allows and you have the whole showback story on one screen.
+*What just happened:* the gap is your waste, and chargeback bills the reservation, not the usage.
 
-[NOTE]
+.Showback with nothing installed
+[%collapsible]
+====
+These queries need no cost product and nothing installed, because cluster monitoring has been recording them all along.
+You see one row even though the pattern matches all your namespaces: the cluster-wide endpoint that would cover every namespace refuses a tenant.
+Compare both numbers against the `3` cores your quota allows and you have the whole showback story on one screen.
+====
+
 .Rolling it up per team, not per namespace
+[%collapsible]
 ====
 A platform team does not care about `{user}-dev`; it cares about what a *team* costs across every namespace it owns.
 That is a label join — group by a namespace label instead of by namespace:
@@ -926,7 +1012,7 @@ This workshop stamps `workshop.redhat.com/user` on every namespace it creates, s
 Reading every namespace this way needs `cluster-monitoring-view`, which a tenant does not have, and that asymmetry is the point: showback is a platform-team view built from tenant-scoped facts.
 ====
 
-Clean up the two workloads you created here (`--wait=false` returns at once; the Pods finish terminating in the background):
+Clean up the two workloads (`--wait=false` returns at once; the Pods finish terminating in the background):
 
 [source,sh,role=execute]
 ----
@@ -935,17 +1021,22 @@ oc delete deploy/quota-buster pod/no-resources-pod -n $NS --wait=false
 
 [.checkpoint]
 ****
-✔ *Verify:* You read `workshop-quota` (couldn't change it), watched an `8Gi` Deployment be refused with `exceeded quota … limited: requests.memory=6Gi`, fixed it within budget, saw a LimitRange inject default `requests`/`limits` onto a Pod that declared none, and read your own reserved-vs-used gap in *Observe → Metrics*.
+✔ *Verify:* you read `workshop-quota` but could not change it; the `8Gi` Deployment was refused with `exceeded quota … limited: requests.memory=6Gi` and ran once resized; the bare Pod got LimitRange defaults; *Observe → Metrics* showed your reserved-vs-used gap.
 ****
 
 == 6. How you were provisioned
 ⏱ *~5 min* · the platform did to you exactly what you did to the payments team
 
-Everything you just did to `payments-ci` and `payments-ops`, the platform team already did to *you*.
-Turn the lens around and inspect your own governance — read-only.
+The platform team governed *you* the way you just governed the payments team. Inspect it, read-only.
 
-Start in your own namespace: the platform bound *you* to a role with a RoleBinding — exactly the way you just bound `payments-ci`.
-Read the bindings in your project (you can, because you are `admin` here):
+*You'll end with:* the grants behind your own access: `admin` on your projects, cluster-wide read through your group, nothing on a peer's namespace.
+
+[mermaid]
+....
+include::example$diagrams/multi-tenancy-workload-security/11-your-own-access.mmd[]
+....
+
+Read your project's RoleBindings:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -960,10 +1051,9 @@ NAME          ROLE    SUBJECT
 {user}-admin   admin   {user}
 ----
 
-There it is: a RoleBinding named `{user}-admin` grants *you* the built-in `admin` role in this namespace — the platform did to you exactly what you did to `payments-ci`.
-Your *cluster-wide* read access comes from a different grant: the platform team bound a whole *group* you belong to (`workshop-attendees`) to a custom `platform-observer` ClusterRole.
-That binding is a cluster-scoped object the platform team owns — you *can't* read it directly (try `oc get clusterrolebinding platform-observer` and you're refused; that wall is the whole point of this exercise), but you can see its *effect*.
-So you *can* read the shared infrastructure it grants:
+*What just happened:* `{user}-admin` binds *you* to the built-in `admin` role here, just as you bound `payments-ci`.
+
+Cluster-wide read comes from your group, `workshop-attendees`, bound to the `platform-observer` ClusterRole. Use it:
 
 [source,sh,role=execute]
 ----
@@ -971,9 +1061,7 @@ oc get nodes
 oc get storageclass
 ----
 
-Both return results — `platform-observer` grants `get`/`list` on nodes, storage classes, and more.
-But you are *scoped*: try to reach beyond your own projects and RBAC stops you.
-Probe a *peer's* namespace — the first line derives one that is never your own, so the test is honest no matter which user you are:
+Both answer. Now probe a *peer's* namespace (the first line picks one that is never yours):
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -991,12 +1079,18 @@ Error from server (Forbidden): pods is forbidden: User "user1" cannot list resou
 Error from server (Forbidden): namespaces is forbidden: User "user1" cannot list resource "namespaces" in API group "" at the cluster scope
 ----
 
-You can read cluster-wide *facts* (nodes, storage) but not peer *workloads*, and you can't list all namespaces — the platform deliberately did *not* grant you a cluster-wide `namespaces` read, precisely so one tenant can't enumerate everyone else's projects.
-This is the same design you applied: bind to a group, grant the minimum, scope to a namespace.
+*What just happened:* cluster-wide *facts* yes; peer *workloads* and the namespace list no, so no tenant can enumerate the others.
 
-One last surprise about `admin`.
-You hold `admin` on your own projects — yet you already discovered it can't apply a quota or grant an SCC.
-Confirm the boundary directly:
+.The binding you cannot see, and the design it shares with yours
+[%collapsible]
+====
+The group binding is a cluster-scoped object the platform team owns: you *can't* read it directly (try `oc get clusterrolebinding platform-observer` and you're refused), but you can see its *effect*.
+`platform-observer` grants `get`/`list` on nodes, storage classes, and more.
+The platform deliberately did *not* grant you a cluster-wide `namespaces` read, precisely so one tenant can't enumerate everyone else's projects.
+This is the same design you applied: bind to a group, grant the minimum, scope to a namespace.
+====
+
+Last, the walls of `admin` itself:
 
 [source,sh,role=execute]
 ----
@@ -1011,27 +1105,35 @@ as namespace admin, can I create a ResourceQuota? no
 as namespace admin, can I create an SCC?          no
 ----
 
-`admin` is a *scoped* word by design.
-You govern your team; the platform governs the cluster; and the wall between them is RBAC's escalation-prevention rule — you cannot grant yourself a power you were not given.
-That is what makes the sandbox safe to hand out.
+*What just happened:* `admin` is scoped by design: RBAC's escalation-prevention rule means you cannot grant yourself a power you were not given.
+That wall is what makes the sandbox safe to hand out.
 
 [.checkpoint]
 ****
-✔ *Verify:* You saw the `{user}-admin` RoleBinding that grants you `admin` (the platform governing you the way you governed the team), read cluster nodes/storage through your group's `platform-observer` grant but were refused a peer's Pods and the full namespace list, and confirmed your namespace `admin` returns `no` for creating a ResourceQuota or an SCC.
+✔ *Verify:* you saw the `{user}-admin` RoleBinding, read nodes and storage through `platform-observer`, were refused a peer's Pods and the namespace list, and `can-i` said `no` to a ResourceQuota and an SCC.
 ****
 
 == 7. Every namespace born governed
 ⏱ *~8 min* · feel the cluster's project policy, read it, then put its guardrails on your own namespace
 
-So far you governed what happens *inside* a namespace.
-The platform team also decides how a namespace comes to *exist*, with two cluster-wide settings the workshop install applied before you arrived:
+Parasol's platform team also decides how a namespace comes to *exist*, through two cluster-wide settings applied at install, before you arrived:
 
-* *Self-provisioning is off.* By default any signed-in user may create projects; on this cluster only the platform team can.
-* *A project request template* stamps every project the platform does create with a default-deny NetworkPolicy and a starter quota.
+[cols="1,2"]
+|===
+|Setting |On this cluster
 
-These are cluster singletons, so you do not change them.
-You feel them, read them, and then apply the same guardrails to a namespace you own.
-Every step here is terminal-only except the policy apply, which has a Console tab.
+|*Self-provisioning* |*Off*: only the platform team creates projects (by default, any signed-in user may)
+|*Project request template* |Stamps every new project with a default-deny NetworkPolicy and a starter quota
+|===
+
+You cannot change these singletons: feel them, read them, then put the same guardrails on a namespace you own.
+
+*You'll end with:* `{user}-dev` closed to other namespaces and open inside, proven by a probe from each side.
+
+[mermaid]
+....
+include::example$diagrams/multi-tenancy-workload-security/13-default-deny-probe.mmd[]
+....
 
 // Exercise 7 replaces the former instructor demo (owner rule 2026-11-12: no instructor-only exercise;
 // the cluster is DEDICATED, so the install sets the cluster-wide levers before the workshop).
@@ -1061,7 +1163,7 @@ oc new-project {user}-sandbox
 Error from server (Forbidden): You may not request a new project via this API.
 ----
 
-Ask the API the same question directly:
+Ask the API directly:
 
 [source,sh,role=execute]
 ----
@@ -1074,8 +1176,7 @@ echo -n "can I request a project? "; oc auth can-i create projectrequests 2>/dev
 can I request a project? no
 ----
 
-A `ProjectRequest` is how `oc new-project` and the console's *Create Project* button ask for a namespace.
-Nothing grants it to you, so every namespace you work in was created by the platform on purpose, your own `{user}-*` projects included.
+*What just happened:* `oc new-project` and the console's *Create Project* both send a `ProjectRequest`, and nothing grants it to you, so the platform created every namespace you use, on purpose.
 
 === Read it: the policy behind the refusal
 
@@ -1114,13 +1215,21 @@ NetworkPolicy/allow-from-openshift-devspaces
 ResourceQuota/starter-quota
 ----
 
-The first two objects are OpenShift's default: the project and an `admin` binding for whoever asked.
-The rest is the platform team's policy.
-`deny-by-default` refuses all inbound traffic, and four narrow allows let back in only the project's own pods, the router, monitoring, and Dev Spaces.
-`starter-quota` caps object counts.
+*What just happened:* after OpenShift's two defaults (the project, an `admin` binding for whoever asked), the rest is the platform team's policy:
 
-Who may sign in at all is the same kind of cluster singleton.
-Read the identity providers wired into the OAuth server:
+[mermaid]
+....
+include::example$diagrams/multi-tenancy-workload-security/12-project-template.mmd[]
+....
+
+.What each policy object does
+[%collapsible]
+====
+`deny-by-default` refuses all inbound traffic, and four narrow allows let back in only the project's own Pods, the router, monitoring, and Dev Spaces.
+`starter-quota` caps object counts.
+====
+
+Who may sign in is the same kind of singleton. Read the OAuth server's identity providers:
 
 // Ran live as user6 on 2026-11-12 after the single-IdP change (platform-observer grants oauths get).
 [source,sh,role=execute]
@@ -1134,14 +1243,17 @@ oc get oauth cluster -o jsonpath='{range .spec.identityProviders[*]}{.name}  ({.
 rhbk  (OpenID)
 ----
 
-That one row is the provider you signed in through: a Red Hat build of Keycloak realm, plugged in as an OpenID provider.
+*What just happened:* that one row is the provider you signed in through: a Red Hat build of Keycloak realm, plugged in as an OpenID provider.
+
+.Why one provider
+[%collapsible]
+====
 With a single provider, OpenShift never asks you to choose a sign-in method, and the same Keycloak can back application login too.
+====
 
 === Do it: put the guardrails on your own namespace
 
-You cannot create a project, but you are `admin` of `{user}-dev`, and NetworkPolicy is a namespace object you may write.
-First, prove the namespace is open.
-This block defines a `probe` helper, then starts a small web server, `web`, in `{user}-dev`:
+This block defines a `probe` helper and starts a small web server, `web`, in `{user}-dev`:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -1156,10 +1268,9 @@ oc run web -n $NS --image=$IMG --port=8080 --expose --command -- python3 -m http
 oc wait pod/web -n $NS --for=condition=Ready --timeout=60s
 ----
 
-`probe` lives only in this terminal session.
-If the terminal reconnects, run this block again; `oc run web` then reports `AlreadyExists`, which is harmless.
+`probe` lives only in this terminal; if it reconnects, run this block again (`oc run web` then reports a harmless `AlreadyExists`).
 
-Call it from `{user}-prod`, a different namespace:
+*Predict, then run:* a Pod in `{user}-prod` calls `web` in `{user}-dev`. Connected, or blocked?
 
 [source,sh,role=execute]
 ----
@@ -1172,17 +1283,17 @@ probe $PROD
 from {user}-prod: connected
 ----
 
-A namespace is not a network boundary by default.
-Any Pod in any namespace on the cluster could have made that call.
+*What just happened:* connected. A namespace is not a network boundary by default: any Pod on the cluster could have made that call.
 
-Now apply the template's first two policies to `{user}-dev`, unchanged:
+Apply the template's first two policies to `{user}-dev`, unchanged:
 
 [tabs]
 ====
 Console::
 +
 --
-Use the masthead *+* (*Import YAML*) with project `{user}-dev` selected, paste the two policies from the *CLI* tab (both documents, including the `---` between them), and *Create*.
+. Masthead *+* (*Import YAML*), with project `{user}-dev` selected.
+. Paste both policies from the *CLI* tab, `---` included, and *Create*.
 They appear under *Networking* → *NetworkPolicies*.
 --
 CLI::
@@ -1213,7 +1324,7 @@ EOF
 --
 ====
 
-Probe again, from the other namespace and from inside:
+Probe again, from outside and from inside:
 
 [source,sh,role=execute]
 ----
@@ -1228,11 +1339,10 @@ from {user}-prod: blocked (no answer in 3s)
 from {user}-dev: connected
 ----
 
-The connection from `{user}-prod` is now dropped, and Pods inside `{user}-dev` still reach each other.
-That is what every project the platform creates looks like from its first second.
+*What just happened:* `{user}-prod` is dropped; Pods inside `{user}-dev` still connect.
+Every project the platform creates looks like this from its first second.
 
-The template's quota is the other half.
-Try to apply it yourself:
+Now try the template's quota:
 
 [source,sh,role=execute]
 ----
@@ -1246,9 +1356,8 @@ oc create quota starter-quota -n $NS --dry-run=server \
 error: failed to create quota: resourcequotas is forbidden: User "{user}" cannot create resource "resourcequotas" in API group "" in the namespace "{user}-dev"
 ----
 
-You could write the NetworkPolicy, but not the quota.
-That is why the quota lives in the template.
-The platform applies it with its own authority when it creates a project, the same way it applied the `workshop-quota` you read in exercise 5.
+*What just happened:* as `admin` you could write the NetworkPolicy, not the quota.
+That is why the quota lives in the template: the platform applies it with its own authority at creation, as it did `workshop-quota`.
 
 Remove the web server, and keep the two policies:
 
@@ -1259,20 +1368,32 @@ oc delete pod/web svc/web -n $NS --wait=false
 
 [.checkpoint]
 ****
-✔ *Verify:* `oc new-project` was refused and `can-i create projectrequests` said `no`; you read the cluster's `projectRequestTemplate` and the objects it stamps, plus the live identity providers; after `deny-by-default` and `allow-from-same-namespace`, a probe from `{user}-prod` was blocked while one from `{user}-dev` connected; and the template's quota was refused when you tried to create it.
+✔ *Verify:* `oc new-project` and `can-i create projectrequests` were refused; you read the template, its objects and the identity provider; with both policies on, `{user}-prod` was blocked and `{user}-dev` connected; the template's quota was refused.
 ****
 
 == Challenge (optional)
 ⏱ *no hand-holding*
 
-You have the mechanics.
 Try these on your own:
 
+* *Scope a Role too widely, then catch it:* swap `payments-ops` to the built-in `admin` role, catch the over-grant with `who-can`, then put it back.
+* *Prove the escalation rule:* bind `payments-ci` to `cluster-admin` inside your own namespace, and read the refusal.
+* *Mint a token and use it:* act *as* `payments-ci` with its bound token, and confirm the token is denied Secrets in `{user}-prod`.
+
+.Hints
+[%collapsible]
+====
 * *Scope a Role too widely, then catch it.* Grant `payments-ops` the built-in `admin` role in `{user}-dev` instead of `deployer`, then use `oc adm policy who-can get secrets -n {user}-dev | grep payments` to prove it can now read Secrets — the over-grant you'd flag in a review. Put it back to `deployer`.
 * *Prove the escalation rule.* As your namespace `admin`, try to bind `payments-ci` to `cluster-admin` inside your own namespace (`oc create rolebinding payments-ci-cluster-admin --clusterrole=cluster-admin --serviceaccount={user}-dev:payments-ci -n {user}-dev --dry-run=server`). The refusal says you are `attempting to grant RBAC permissions not currently held` — you can't hand out a power you don't hold, even in a namespace you administer. (A *ClusterRoleBinding* would fail sooner, for a plainer reason: you cannot create cluster-scoped bindings at all.)
 * *Mint a token and use it.* Create a bound token for `payments-ci` (`oc create token payments-ci -n {user}-dev`), then use it with `oc --token=… --server=… get pods -n {user}-dev` to act *as the ServiceAccount*, and confirm the same token is denied `get secrets` in `{user}-prod`.
+====
 
-When you are done, run `ws verify {module-id}` in the Terminal — or run `ws prep {module-id} --yes` to return your world to ungoverned teammates and a not-yet-run workload.
-(`ws prep --yes` also removes the RoleBindings, Role and NetworkPolicies you authored by hand in this lab, so the teammates return to fully ungoverned and `{user}-dev` is open again.)
+When you are done, run `ws verify {module-id}` in the Terminal — or `ws prep {module-id} --yes` to return to ungoverned teammates and a not-yet-run workload.
+
+.What `ws prep --yes` removes
+[%collapsible]
+====
+`ws prep --yes` also removes the RoleBindings, Role and NetworkPolicies you authored by hand in this lab, so the teammates return to fully ungoverned and `{user}-dev` is open again.
+====
 
 endif::demo[]
