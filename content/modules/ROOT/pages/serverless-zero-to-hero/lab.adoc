@@ -35,19 +35,16 @@ echo "dev namespace: $NS"
 ----
 
 You are the platform engineer for Parasol's *claims-processor*.
-It is already deployed in `{user}-dev` — but *not* as an ordinary Deployment. It's a *Knative Service* (`ksvc`): a scale-to-zero, request-driven service that Knative fronts with an auto-created edge Route.
-Right now it is holding *zero pods*.
-In this lab you *observe* the deployed service, *wake it from zero* and feel the cold start, *autoscale* it under load and watch it melt back to zero, *tune* its concurrency, *split traffic* between two revisions, *build a function* from source on the cluster and run it as a second service, and wire a first *taste of eventing* — a source → broker → trigger that wakes the service on an event.
+It already runs in `{user}-dev` as a *Knative Service* (`ksvc`), not an ordinary Deployment, and right now it holds *zero pods*.
+You'll wake it, load it, split its traffic, build a second service from source, and trigger it with an event.
 
 [TIP]
 .Two ways for the config steps; driving traffic is terminal-only
 ====
-Where you create or change a Knative object, you get two tabs: the *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`) — the *Serverless* area of the navigation, or the masthead *Quick create* (+) menu → *Import YAML* — and the *CLI* tab uses `kn` (the Knative CLI) in the *Terminal* tab beside these instructions.
-Pick a path once — the tabs stay in sync across the page.
-Two things are terminal-only on purpose: *driving traffic* from inside the cluster is an `oc exec … curl`, and *watching pods scale* is a `oc get pods -w` (the console *Topology* view shows the same scale-to-zero, but the numbers you'll read are from the terminal).
-The output blocks below show *your* namespace, `{user}-dev`, and your cluster's domain; ages, timings and pod names will differ — read the *shape*, not the exact values.
-Exercises 2 to 6 each open with a block that sets the shell shortcuts they use, `$NS` and the service URL; exercise 1 uses the block above and sets `$URL` itself.
-*If your terminal reconnects, run the exercise's first block again* — a fresh shell has none of those shortcuts.
+* *Console* tab: the {ocp_console_url}[OpenShift web console^] (as `{user}`), under *Serverless* or *Quick create* (+) → *Import YAML*. *CLI* tab: `kn` in the *Terminal*.
+* Driving traffic (`oc exec … curl`) and watching pods scale (`oc get pods -w`) are terminal-only.
+* Outputs show your namespace and domain; ages, timings and pod names differ, so read the *shape*.
+* *If your terminal reconnects, run the exercise's first block again*: it re-sets `$NS` and the service URL. Exercise 1 uses the block above.
 ====
 endif::demo[]
 
@@ -227,15 +224,25 @@ ifndef::demo[]
 == 1. Observe your deployed Knative Service
 ⏱ *~5 min* · meet the ksvc, its auto-created Route, and its revision
 
-Start by looking at what's already running. The claims-processor is a *Knative Service* — one object that Knative expands into a Deployment, a Service, a Route, a Configuration, and a Revision.
+Before tuning Parasol's claims-processor, see what it really is: one object Knative expands into a Configuration, a Revision, a Route, a Deployment and a Service.
+
+*You'll end with:* a *Ready* `parasol-claims` ksvc, its auto-created HTTPS URL, one revision at 100% traffic, and zero pods.
+
+[mermaid]
+....
+include::example$diagrams/serverless-zero-to-hero/05-ksvc-expansion.mmd[]
+....
 
 [tabs]
 ====
 Console::
 +
 --
-In the {ocp_console_url}[OpenShift web console^] (project `{user}-dev`), open *Serverless → Serving → Services* and select *parasol-claims*. Note its *URL* (a ready HTTPS address), its single *Revision*, and — in *Topology* — that it currently shows *0* pods (a dashed ring), because it's scaled to zero.
-The *CLI* tab reads the same facts from the terminal — use it to capture the exact fields.
+. In the {ocp_console_url}[OpenShift web console^] (project `{user}-dev`), open *Serverless → Serving → Services* → *parasol-claims*.
+. Note its HTTPS *URL* and its single *Revision*.
+. In *Topology*, its ring is hollow: *0* pods, scaled to zero.
+
+The *CLI* tab reads the same facts; use it to capture the exact fields.
 
 // CAPTURED 2026-07-30 and embedded below. Shot as an attendee (user1) against the module's own
 // entry state, opened and eyeballed before committing. The teaching contrast is IN FRAME and is
@@ -266,7 +273,9 @@ NAME                SERVICE          TRAFFIC   TAGS   GENERATION   AGE   CONDITI
 parasol-claims-v1   parasol-claims   100%             1            6m    3 OK / 4     True
 ----
 
-The service is *Ready* and its whole address is that `URL` — *Knative created it for you*. There is *no* `oc create route edge` here: for a `ksvc`, the Serverless operator auto-creates an edge-terminated OpenShift Route (backed by the Kourier ingress) and publishes it as `status.url`. Read it once and save it — it's how you reach the service for the rest of the lab:
+*What just happened:* Knative created the whole address. A ksvc never needs `oc create route edge`: the Serverless operator auto-creates an edge-terminated Route (Kourier ingress) and publishes it as `status.url`.
+
+Save that URL; you reach the service through it for the rest of the lab:
 
 [source,sh,role=execute]
 ----
@@ -282,7 +291,7 @@ service URL: https://parasol-claims-{user}-dev.{cluster_domain}
 ready=True  latestReady=parasol-claims-v1
 ----
 
-Confirm the scale-to-zero claim directly — with no traffic, the service holds *no* pods (only the always-on database and load client run):
+Confirm scale-to-zero: with no traffic, only the always-on database and load client run:
 
 [source,sh,role=execute]
 ----
@@ -297,29 +306,32 @@ claims-db-...                  1/1     Running   0          8m
 demo-client-...                1/1     Running   0          8m
 ----
 
-[NOTE]
-.If a `parasol-claims` pod is still here, that's normal — you're just early
-====
-Right after `ws prep` materializes this module, the initial `parasol-claims` pod can still be *Running* for close to a minute (measured 71-84 seconds old on this cluster) before Knative finishes draining it to zero — a normally-paced reader can easily reach this step before that finishes.
-If you see a `parasol-claims-...` pod above, the scale-to-zero claim is still true; the drain is just still in flight.
-Exercise 2 waits for zero pods before timing the cold start — re-run the command above after a minute, or continue on and let that wait catch you up.
-====
+NOTE: Still see a `parasol-claims-...` pod? Right after `ws prep` the initial pod takes a minute or more to drain (measured 71–84 s). Exercise 2 waits for zero, so carry on.
 
-[NOTE]
 .What Knative built under the one object you see
+[%collapsible]
 ====
 The `parasol-claims` `ksvc` is the *only* object you'd author. Behind it, `oc get` shows the machinery Knative manages: a `configuration.serving.knative.dev` (the latest desired version), a `route.serving.knative.dev` (whose `URL` matches the `ksvc`), and a `revision.serving.knative.dev` (the immutable snapshot the traffic points at). When a pod *is* running, it carries *two* containers — your `parasol-claims` app *and* a `queue-proxy` sidecar Knative injects to meter concurrency and buffer during scale-up. You'll see that pod appear in the next exercise.
 ====
 
 [.checkpoint]
 ****
-✔ *Verify:* You found the `parasol-claims` *Knative Service* — *Ready*, one *Revision* (`parasol-claims-v1`) at 100% traffic — read its *auto-created* HTTPS `status.url` (no hand-rolled Route), and confirmed it holds *zero pods* once idle (allowing for the brief post-setup drain window noted above).
+✔ *Verify:* `parasol-claims` is *Ready* with one revision, `parasol-claims-v1`, at 100%; its HTTPS `status.url` was auto-created (no hand-made Route); and once idle it holds *zero pods* (allow for the post-setup drain).
 ****
 
 == 2. Scale to zero and back — feel the cold start
 ⏱ *~6 min* · wake the service with one request, and measure the honest cost
 
-Set this exercise's shortcuts first — your namespace and the service URL (re-run this block after a reconnect):
+Parasol's adjusters feel a slow first request before any dashboard shows it. Measure what scale-to-zero really costs.
+
+*You'll end with:* a measured cold start (10–30 s) beside a warm request (~0.1 s), and a client timeout that survives the cold start.
+
+[mermaid]
+....
+include::example$diagrams/serverless-zero-to-hero/06-wake-from-zero.mmd[]
+....
+
+Set this exercise's shortcuts (re-run after a reconnect):
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -328,7 +340,7 @@ URL=$(oc get ksvc parasol-claims -n $NS -o jsonpath='{.status.url}')
 echo "namespace: $NS  service URL: ${URL:-(none: parasol-claims is missing, see exercise 1)}"
 ----
 
-For a real cold start the service must be at *zero* first — and right after you set up the module its initial pod is often still running. Wait for Knative to scale it away (about 60-90s of no traffic), watching the pod disappear:
+Wait for *zero* pods (about 60–90 s of no traffic), so the next request pays a real cold start:
 
 [source,sh,role=execute]
 ----
@@ -337,9 +349,13 @@ until [ "$(oc get pods -n $NS -l serving.knative.dev/service=parasol-claims --no
 echo "scaled to zero — the next request pays a real cold start"
 ----
 
-If this wait never ends and the lingering pod is *not* `Running` (`CrashLoopBackOff`, `ImagePullBackOff`, …), the service is *broken*, not scaling — press kbd:[Ctrl+C] and check `oc get pods -n $NS`.
+.The wait never ends?
+[%collapsible]
+====
+If the lingering pod is *not* `Running` (`CrashLoopBackOff`, `ImagePullBackOff`, …), the service is *broken*, not scaling: press kbd:[Ctrl+C] and check `oc get pods -n $NS`.
+====
 
-Now send it a request and *time it* — the first caller pays the *cold start* while Knative schedules a pod, boots the JVM, and hands the request through the activator. Drive the request from the in-cluster `demo-client`:
+Time the first request, sent from the in-cluster `demo-client`:
 
 [source,sh,role=execute]
 ----
@@ -360,7 +376,9 @@ oc exec deploy/demo-client -n $NS -- curl -s -k -o /dev/null -w "cold start: HTT
 cold start: HTTP 200 in 15.269703s
 ----
 
-That is *not* a hang — it's the cold start, and it's the whole tradeoff of scale-to-zero made concrete. A pod is now running; send a *second* request and watch it return warm:
+*What just happened:* not a hang. The activator held your request while Knative scheduled a pod and booted the JVM: the trade-off of scale-to-zero, made concrete.
+
+*Predict, then run:* a pod is running now. How much faster will the same request be?
 
 [source,sh,role=execute]
 ----
@@ -376,7 +394,7 @@ NAME                                            READY   STATUS    RESTARTS   AGE
 parasol-claims-v1-deployment-...                2/2     Running   0          20s
 ----
 
-The pod is `2/2` — your `parasol-claims` container plus the `queue-proxy` sidecar. The service really works; confirm it's serving real claims data:
+The pod is `2/2`: your `parasol-claims` container plus the `queue-proxy` sidecar. Confirm it serves real claims:
 
 [source,sh,role=execute]
 ----
@@ -389,7 +407,9 @@ oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k "'${URL:?is empty - run t
 [{"claimNumber":"CLM-1001","claimant":"Alice Nguyen","type":"auto","status":"UnderReview","amount":4200.00,...
 ----
 
-Now the deliberate *break-and-fix*, because it teaches the cold start the hard way. Let the service scale back to zero, then hit it with a client timeout *shorter than the cold start*:
+*Break it on purpose.* Let the service drain to zero again, then call it with a 5-second client timeout, *shorter than the cold start*.
+
+*Predict, then run:* what will `curl` report?
 
 [source,sh,role=execute]
 ----
@@ -409,7 +429,8 @@ command terminated with exit code 28
 curl gave up (exit 28) — the cold start outran the 5s timeout
 ----
 
-The client gave up at 5 seconds, before the cold start could complete — a classic "why does my first request fail?" trap. *Fix it* the way you would in production: either give the client a realistic timeout, or keep one pod warm so there's *no* cold start on the critical path.
+*What just happened:* the client gave up before the pod was ready, the classic "why does my first request fail?" trap.
+*Fix it* as production does: a realistic client timeout (A), or one warm pod so the critical path never cold-starts (B). This block runs both:
 
 [source,sh,role=execute]
 ----
@@ -431,37 +452,48 @@ with -m60: HTTP 200 in 4.903990s
 Service 'parasol-claims' updated in namespace '{user}-dev'.
 ----
 
-Option A came back in a few seconds rather than a full cold start: the abandoned `-m5` request had already woken a pod, which was still booting when option A arrived. The point is the timeout — on a true cold start of 10–30 seconds, `-m 60` still has room, and `-m 5` never does.
+Option A was quick only because the abandoned `-m5` request had already woken a pod; on a full 10–30 s cold start, `-m 60` still has room and `-m 5` never does.
 
-[NOTE]
-.A stderr warning you'll see on every `kn service update` in this lab
+.`kn service update` printed a `securityContext` warning?
+[%collapsible]
 ====
 `kn service update` also prints a warning to stderr, ahead of the `Service '...' updated` line: `Warning: Kubernetes default value is insecure, Knative may default this to secure in a future release:`, followed by four `securityContext` field paths.
 It's harmless — Knative's note about pod security defaults it may tighten later, not an error — and the expected-output blocks in this lab capture stdout only, so it won't appear in them.
 Expect it on every `kn service update` from here on.
 ====
 
-[NOTE]
-.min-scale is a tradeoff, not a fix-all
-====
-`--scale-min 1` gives up scale-to-*zero* (you now always pay for one pod) in exchange for *no cold start* on the critical path — the right call for a latency-sensitive service. For a bursty, latency-tolerant one, leave `min-scale` at `0` and let the cold start happen. To finish this exercise as a scale-to-zero service, put the floor back to zero — again with a fresh revision name, since the template is changing:
+Finish as a scale-to-zero service: put the floor back to zero, under a fresh revision name because the template changes:
 
 [source,sh,role=execute]
 ----
 oc delete revision parasol-claims-v1-cold -n $NS --ignore-not-found=true >/dev/null 2>&1 || true
 kn service update parasol-claims -n $NS --scale-min 0 --revision-name parasol-claims-v1-cold --no-wait
 ----
+
+.min-scale is a tradeoff, not a fix-all
+[%collapsible]
+====
+`--scale-min 1` gives up scale-to-*zero* (you now always pay for one pod) in exchange for *no cold start* on the critical path — the right call for a latency-sensitive service. For a bursty, latency-tolerant one, leave `min-scale` at `0` and let the cold start happen.
 ====
 
 [.checkpoint]
 ****
-✔ *Verify:* You woke the service from zero and *measured* the cold start (`HTTP 200` in 10–30 s) against a warm request (~0.1 s), saw the `2/2` pod (app + `queue-proxy`) serve real claims, and hit — then fixed — the cold-start-vs-client-timeout trap (a 5 s timeout fails; a realistic timeout or a `min-scale` warm floor succeeds).
+✔ *Verify:* cold `HTTP 200` in 10–30 s, warm in ~0.1 s, from a `2/2` pod (app + `queue-proxy`) serving real claims; a 5 s timeout failed, a realistic timeout or a `min-scale` warm floor succeeded.
 ****
 
 == 3. Autoscale under load, and tune concurrency
 ⏱ *~8 min* · watch it climb from zero to the ceiling on concurrency, then melt back down
 
-Set this exercise's shortcuts first — your namespace and the service URL (re-run this block after a reconnect):
+Claims spike after a storm. Parasol needs pods added with the burst, and a ceiling so one service can't take the whole cluster.
+
+*You'll end with:* revision `parasol-claims-v2` (at most 2 requests per pod, at most 3 pods), seen climbing from 0 to 3 under load and back to 0.
+
+[mermaid]
+....
+include::example$diagrams/serverless-zero-to-hero/07-concurrency-scaling.mmd[]
+....
+
+Set this exercise's shortcuts (re-run after a reconnect):
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -470,14 +502,20 @@ URL=$(oc get ksvc parasol-claims -n $NS -o jsonpath='{.status.url}')
 echo "namespace: $NS  service URL: ${URL:-(none: parasol-claims is missing, see exercise 1)}"
 ----
 
-Knative's autoscaler scales on *concurrency* — how many requests are in flight at once — not on CPU. To make that visible, first *tune* the service: cap each pod at a *hard* concurrency of `2` and a *max-scale* of `3`. Changing the template mints a new revision — name it `parasol-claims-v2`.
+Knative scales on *concurrency* (requests in flight), not CPU. Make it visible with a new revision, `parasol-claims-v2`: a *hard* limit of `2` per pod and *max-scale* `3`.
 
-Revisions from an earlier pass stay in this namespace until `ws prep` or `ws reset` clears them — a leftover `parasol-claims-v2` from an earlier pass whose content differs even slightly (a rebuilt image, a different concurrency setting) makes *this exact step* fail with `Ready=False` / a rejected "changes without a name change" (or `already exists`) error, and no new revision gets created. Clear it first — safe even on a first run (no-op if absent), and covers both tabs below:
+First clear any `parasol-claims-v2` an earlier pass left behind (a no-op on a first run; it covers both tabs below):
 
 [source,sh,role=execute]
 ----
 oc delete revision parasol-claims-v2 -n $NS --ignore-not-found=true
 ----
+
+.Why clear it first?
+[%collapsible]
+====
+Revisions from an earlier pass stay in this namespace until `ws prep` or `ws reset` clears them — a leftover `parasol-claims-v2` from an earlier pass whose content differs even slightly (a rebuilt image, a different concurrency setting) makes *the tuning step* fail with `Ready=False` / a rejected "changes without a name change" (or `already exists`) error, and no new revision gets created.
+====
 
 [tabs]
 ====
@@ -519,7 +557,7 @@ kn service update parasol-claims -n $NS \
 Service 'parasol-claims' updated in namespace '{user}-dev'.
 ----
 
-Confirm the revision set — you're at *four* revisions now: `v1`, the two floor-change revisions exercise 2 minted (`-warm`, `-cold`), and the new `v2` — then wait for it to settle back to zero before starting the burst:
+List the revisions, then wait for zero pods before the burst:
 
 [source,sh,role=execute]
 ----
@@ -607,8 +645,10 @@ parasol-claims-v1        parasol-claims                    1            13m   3 
 scaled to zero — the burst below starts from a clean zero
 ----
 
-[NOTE]
-.If `v2` shows `Deploying` and the traffic is still on the old revision
+*What just happened:* *four* revisions: `v1`, exercise 2's `-warm` and `-cold`, and `v2`, latest at 100%. `v2` booted one pod for its readiness check; the loop waited for it to drain.
+
+.`v2` shows `Deploying` and the traffic is still on the old revision?
+[%collapsible]
 ====
 That is the expected state for the first few seconds, not a failed mint. The update above ran with
 `--no-wait`, so it returns *before* `v2` is Ready — and `kn revision list` is the very next line, which
@@ -625,11 +665,17 @@ already waiting that out, so by the time the block finishes you will have the se
 Re-run `kn revision list -n $NS` if you want to watch it flip.
 ====
 
-Now the payoff. With a hard limit of *2 requests per pod*, a burst of concurrent traffic *forces* Knative to add pods to keep up — up to your ceiling of 3.
+IMPORTANT: *Start from zero.* If a `parasol-claims` pod is still listed, wait about a minute of no traffic; from warm, this burst can sit at one pod indefinitely.
 
-IMPORTANT: *Start from zero.* Check `oc get pods -n $NS -l serving.knative.dev/service=parasol-claims` first — if any pod is still running from an earlier step, wait for it to disappear (about a minute of no traffic) before you start. This is not fussiness: scaling *from zero* routes through Knative's activator, which sees the whole burst at once and adds capacity immediately. A service that is already warm scales on *measured average concurrency* instead, and a shell loop that spawns a fresh `curl` per request spends most of its time starting processes rather than holding connections open — so a warm service can sit at *one pod for as long as you care to wait*. Measured on this cluster: from zero, 3 pods; from warm, never.
+.Why the burst must start from zero
+[%collapsible]
+====
+Check with `oc get pods -n $NS -l serving.knative.dev/service=parasol-claims`. This is not fussiness: scaling *from zero* routes through Knative's activator, which sees the whole burst at once and adds capacity immediately. A service that is already warm scales on *measured average concurrency* instead, and a shell loop that spawns a fresh `curl` per request spends most of its time starting processes rather than holding connections open — so a warm service can sit at *one pod for as long as you care to wait*. Measured on this cluster: from zero, 3 pods; from warm, never.
+====
 
-Drive a burst from the `demo-client` in the background and *watch the pods climb from zero*:
+*Predict, then run:* twelve parallel callers, at most two requests per pod, a ceiling of three. How many pods will you see?
+
+Drive a 90-second burst from `demo-client` in the background and watch the pods:
 
 [source,sh,role=execute]
 ----
@@ -659,9 +705,14 @@ parasol-claims-v2-deployment-...-rptf6          2/2     Running             0   
 parasol-claims-v2-deployment-...-5nh5r          2/2     Running             0          12s
 ----
 
-You saw the replica count go from *0* straight to *3* — the `max-scale` ceiling you set, so a single bursting service can't exhaust the cluster.
+*What just happened:* *0* straight to *3*, the `max-scale` ceiling, so one bursting service can't exhaust the cluster.
+The activator saw twelve requests waiting against a limit of two per pod and asked for the ceiling at once.
 
-Watch the *shape*, not the stopwatch. From zero the activator holds every request in the burst, sees twelve of them waiting against a limit of two per pod, and asks for the ceiling at once — on this cluster all three pods were created within two seconds and serving about 15 seconds into the burst. On a slower or busier cluster you may instead see one pod first and the rest join tens of seconds later, once the autoscaler has measured sustained concurrency. Either way the count stops at 3.
+.Read the shape, not the stopwatch
+[%collapsible]
+====
+On this cluster all three pods were created within two seconds and serving about 15 seconds into the burst. On a slower or busier cluster you may instead see one pod first and the rest join tens of seconds later, once the autoscaler has measured sustained concurrency. Either way the count stops at 3.
+====
 
 // DELIVERED 2026-08-07, mid-burst, gated on readyReplicas==3 before the shutter fired.
 // THE ALT TEXT DELIBERATELY DOES NOT SAY "3". The media-pass note asked for a ring "showing 3/3
@@ -674,7 +725,7 @@ Watch the *shape*, not the stopwatch. From zero the activator holds every reques
 // HOLLOW outline (zero pods, still 100% of traffic), this one is a thick SOLID blue band.
 image::serverless-zero-to-hero/serverless-zero-to-hero-02-topology-scaled-up.png["Topology view of the {user}-dev project during the burst. claims-db, demo-client and the claim-ticker PingSource are drawn alongside the parasol-claims Knative Service, which sits in a dashed grouping box with a REV badge on revision v2 and a 100 percent traffic badge. Its readiness ring is now a thick solid blue band rather than the hollow outline it showed at rest — the revision has scaled up under load and is running pods.",role=lightbox]
 
-The autoscaler gives capacity back as soon as measured concurrency drops — often before the 90-second burst has ended, because this small client cannot keep three pods busy. Watch it return to zero:
+Now watch it give the capacity back, often before the burst ends, because this small client can't keep three pods busy:
 
 [source,sh,role=execute]
 ----
@@ -694,23 +745,32 @@ parasol-claims-v2-deployment-...-5nh5r          0/2     Error               0   
 ----
 
 // MEASURED 2026-11-12 (user10): on a drained pod the app container exits 143 (Error) and queue-proxy 0.
-A terminating pod ends as `0/2 Error`. That is normal for a drained Knative pod, not a failure: when Knative removes it, the JVM in the `parasol-claims` container answers the shutdown signal with exit code 143, and Kubernetes reports any non-zero exit as `Error`. The `queue-proxy` sidecar exits cleanly.
+*What just happened:* back to zero, in steps. `0/2 Error` is normal for a drained pod: the JVM exits 143 on the shutdown signal, Kubernetes reports any non-zero exit as `Error`, and `queue-proxy` exits cleanly.
 
-[NOTE]
 .Why concurrency, and why the *hard* limit here
+[%collapsible]
 ====
 Knative's default target is a *soft* concurrency goal (`autoscaling.knative.dev/target`, default ~100 in-flight requests per pod). We used the *hard* `containerConcurrency: 2` for this exercise because it makes the scale-up *deterministic and visible from a small, CPU-limited load client* — with only two requests allowed per pod, even a modest burst *must* fan out to the ceiling. In production you'd usually tune the *soft target* to your service's real capacity and set `max-scale` for safety; the mechanism — *replicas track concurrency* — is identical.
 ====
 
 [.checkpoint]
 ****
-✔ *Verify:* You *tuned* concurrency (minting revision `parasol-claims-v2` with `containerConcurrency: 2` and `max-scale: 3`), drove a concurrent burst, and watched the autoscaler climb from *0* to the `max-scale` ceiling of *3* on concurrency and stop there — then melt back to *zero* as the load fell away.
+✔ *Verify:* revision `parasol-claims-v2` (`containerConcurrency: 2`, `max-scale: 3`) climbed from *0* to the ceiling of *3* under the burst, stopped there, and melted back to *zero* (`oc get pods -w`).
 ****
 
 == 4. Split traffic between revisions
 ⏱ *~8 min* · an 80/20 blue-green split, and a one-line rollback
 
-Set this exercise's shortcuts first — your namespace and the service URL (re-run this block after a reconnect):
+Parasol wants `v2` in front of real adjusters without betting everything on it: 20% first, and a one-line way back.
+
+*You'll end with:* an 80/20 split between `stable` (v1) and `candidate` (v2), each tag on its own sub-route, after a rollback and a re-apply.
+
+[mermaid]
+....
+include::example$diagrams/serverless-zero-to-hero/08-traffic-split.mmd[]
+....
+
+Set this exercise's shortcuts (re-run after a reconnect):
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -719,7 +779,7 @@ URL=$(oc get ksvc parasol-claims -n $NS -o jsonpath='{.status.url}')
 echo "namespace: $NS  service URL: ${URL:-(none: parasol-claims is missing, see exercise 1)}"
 ----
 
-You now have *four* revisions — but *two routable targets*: `v1` (the original) and `v2` (the tuned one); the `-warm`/`-cold` pair from exercise 2 sit unrouted in the history. Because a revision is a frozen, addressable version, shifting traffic between the two targets is a *one-object change* on the Route: tag `v1` as `stable` at 80% and `v2` as `candidate` at 20%.
+Two of your four revisions are routable: `v1` (original) and `v2` (tuned); exercise 2's `-warm`/`-cold` sit unrouted. Tag `v1` `stable` at 80% and `v2` `candidate` at 20%:
 
 [tabs]
 ====
@@ -757,7 +817,7 @@ kn service update parasol-claims -n $NS \
 --
 ====
 
-Read the split back — Knative reports the weights *and* the per-tag sub-routes it created:
+Read the split back: the weights *and* the per-tag sub-routes Knative created:
 
 [source,sh,role=execute]
 ----
@@ -821,7 +881,9 @@ tag=candidate rev=parasol-claims-v2 percent=20
   url=https://candidate-parasol-claims-{user}-dev.{cluster_domain}
 ----
 
-The two *tagged sub-routes* let you address either revision *directly* — hit each and confirm it serves:
+*What just happened:* a revision is a frozen, addressable version, so the split is a *one-object change* on the ksvc's Route, and each tag gets its own URL.
+
+Hit each revision directly through its sub-route:
 
 [source,sh,role=execute]
 ----
@@ -838,7 +900,7 @@ stable    (v1) direct: HTTP 200
 candidate (v2) direct: HTTP 200
 ----
 
-Now prove the *main* URL really splits across both revisions — send a batch through it, then confirm *both* revision Deployments were woken:
+Prove the *main* URL splits: send 50 requests through it, then check that *both* revision Deployments woke:
 
 [source,sh,role=execute]
 ----
@@ -861,7 +923,9 @@ parasol-claims-v1-warm-deployment   <none>
 parasol-claims-v2-deployment        1
 ----
 
-Finally, the *rollback* — the reason this model is cheap. Send *100%* back to `stable` in one line; the candidate revision stays put, ready to re-weight:
+Now the *rollback*, the reason this model is cheap: *100%* back to `stable` in one line.
+
+*Predict, then run:* will the `candidate` revision still be listed afterwards?
 
 [source,sh,role=execute]
 ----
@@ -899,22 +963,33 @@ parasol-claims-v1-warm   parasol-claims                         2            12m
 parasol-claims-v1        parasol-claims   100%      stable      1            20m   3 OK / 4     True
 ----
 
-That's rollout *and* rollback as a *Route weight*. Re-apply the 80/20 split before moving on, so the module ends in its split end state:
+*What just happened:* yes. Rollout *and* rollback are a *Route weight*; the candidate stays, tag and all, ready to re-weight.
+Re-apply the 80/20 split before moving on, so the module ends in its split end state:
 
 [source,sh,role=execute]
 ----
 kn service update parasol-claims -n $NS --traffic stable=80 --traffic candidate=20 --no-wait
 ----
 
-[NOTE]
-.The third way to shift traffic
-====
-This is the same outcome as an Argo Rollouts canary (GitOps at Scale) or a service-mesh weighted route (Service Mesh), at a *different layer*: here the split lives on the *Route* the `ksvc` owns, over *immutable revisions*, and the rollback target is a revision that *already exists*. Reach for Knative's version when the workload is already a `ksvc`; reach for Rollouts when you want metric-gated, automated promotion; reach for the mesh when the split is one of many L7 policies across services.
-====
+Other layers split traffic too:
+
+[cols="2,3",options="header"]
+|===
+| Way to split | Reach for it when
+
+| Knative revisions (here)
+| The workload is already a `ksvc`
+
+| Argo Rollouts canary (GitOps at Scale)
+| You want metric-gated, automated promotion
+
+| Mesh weighted route (Service Mesh)
+| The split is one of many L7 policies across services
+|===
 
 [.checkpoint]
 ****
-✔ *Verify:* You split traffic *80/20* across two revisions with tags (`stable`/`candidate`), read the weights *and* the per-tag sub-routes from Knative, hit each revision directly (both `200`), confirmed the main URL woke *both* revision Deployments, and *rolled back* to 100% stable in one line — then re-applied the split.
+✔ *Verify:* `kn revision list` shows `stable` (v1) 80% and `candidate` (v2) 20%; both sub-routes answered `200`, the main URL woke *both* revisions, and you rolled back to 100% stable in one line, then re-applied the split.
 ****
 
 == 5. Build and deploy a Function
@@ -941,11 +1016,16 @@ This is the same outcome as an Argo Rollouts canary (GitOps at Scale) or a servi
 // every artifact `from mirror.default`, none from central. `kn func config envs add` would NOT do this:
 // it sets the function's RUN-time env (and prompts interactively).
 
-Everything so far started from an image somebody else built. `kn func` starts one step earlier, from source: a language template gives you a project with a single handler in it, and `kn func deploy` turns that into a running Knative Service — no Dockerfile, no registry to set up, no `ksvc` YAML.
-This terminal has no container engine, so you build *on the cluster*: `--remote` uploads your source into `{user}-dev` and runs the build there as an OpenShift Pipelines pipeline, pushes the image to the internal registry, and deploys it.
-What comes out is a `ksvc` like `parasol-claims`, so everything from exercises 1–4 applies to it unchanged.
+Parasol's pricing team has a premium formula, not a container image. `kn func` turns a one-handler template into a running Knative Service: no Dockerfile, no registry setup, no `ksvc` YAML.
 
-Set this exercise's shortcuts first — your namespace and, once you have deployed it, the function's URL (re-run this block after a reconnect; it does not touch the project):
+*You'll end with:* `premium-calculator`, a second scale-to-zero `ksvc` built *on the cluster* by an OpenShift Pipelines run, answering in seconds from cold.
+
+[mermaid]
+....
+include::example$diagrams/serverless-zero-to-hero/09-func-remote-build.mmd[]
+....
+
+Set this exercise's shortcuts, including the function's URL once deployed (re-run after a reconnect; it does not touch the project):
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -954,7 +1034,7 @@ FURL=$(oc get ksvc premium-calculator -n $NS -o jsonpath='{.status.url}' 2>/dev/
 echo "namespace: $NS  function URL: ${FURL:-(none yet: you deploy it below)}"
 ----
 
-Create the project from the Quarkus HTTP template. The first line clears a project an earlier pass may have left, because `kn func create` refuses an existing one:
+Create the project from the Quarkus HTTP template (the first line clears a leftover, because `kn func create` refuses an existing one):
 
 [source,sh,role=execute]
 ----
@@ -970,7 +1050,7 @@ v1.17.0
 Created quarkus function in .../premium-calculator
 ----
 
-Read the handler — one method annotated `@Funq`, next to two small classes for its input and output. Quarkus Funqy maps the HTTP request body onto `Input` and the return value onto the response:
+Read the handler, one method annotated `@Funq`:
 
 [source,sh,role=execute]
 ----
@@ -990,9 +1070,9 @@ sed -n '/@Funq/,/^    }/p' src/main/java/functions/Function.java
     }
 ----
 
-This is where Parasol's premium formula would go. The template's echo is enough here — the subject is the path from source to a running service, not the formula.
+*What just happened:* Quarkus Funqy maps the request body onto `Input` and the returned `Output` onto the response. Parasol's formula would go here; the echo is enough, because the subject is the path to a running service.
 
-The build is a Source-to-Image Maven build. This cluster runs a Maven mirror inside it; point the build at it the standard S2I way, with an `.s2i/environment` file that the Java builder reads:
+Point the build's Maven at the in-cluster mirror, the standard S2I way:
 
 [source,sh,role=execute]
 ----
@@ -1007,9 +1087,14 @@ cat .s2i/environment
 MAVEN_MIRROR_URL=http://maven-mirror.ogsr-maven-mirror.svc:8080
 ----
 
+.Why a mirror, and why `.s2i/environment`?
+[%collapsible]
+====
+The build is a Source-to-Image Maven build, and the Java builder reads an `.s2i/environment` file.
 Measured on this cluster: Maven took about 40 seconds through the mirror, against about two and a quarter minutes straight from Maven Central. Your own organization's Nexus or Artifactory mirror plugs in the same way.
+====
 
-Now build and deploy. The command waits until the function is running — about *two minutes*:
+Build and deploy. The command waits until the function is running, about *two minutes*:
 
 [source,sh,role=execute]
 ----
@@ -1028,6 +1113,8 @@ Running Pipeline Task: Deploying function to the cluster
 Function Deployed at https://premium-calculator-{user}-dev.{cluster_domain}
 ----
 
+*What just happened:* with no container engine in this terminal, `--remote` built your source *in* `{user}-dev` as an OpenShift Pipelines run, pushed the image to the internal registry, and deployed a `ksvc` like `parasol-claims`.
+
 While it runs, watch the build — or read it back afterwards:
 
 [tabs]
@@ -1037,7 +1124,9 @@ Console::
 --
 // Console path grounded on the nav verified in trusted-supply-chain/lab.adoc (2026-07-31): the
 // Pipelines page carries a Pipelines | PipelineRuns | Repositories tab row; a task node opens Logs.
-In the {ocp_console_url}[OpenShift web console^] (project `{user}-dev`), open *Pipelines* in the navigation, switch to the *PipelineRuns* tab, and select the `premium-calculator-s2i-upload-pipeline-run-…` run. Its three tasks run in order: *scaffold*, *build* (the S2I build and the push to the internal registry), and *deploy* (which creates the `ksvc`). Click the *build* node in the graph to follow its log.
+. In the {ocp_console_url}[OpenShift web console^] (project `{user}-dev`), open *Pipelines* → *PipelineRuns*.
+. Select the `premium-calculator-s2i-upload-pipeline-run-…` run. Its tasks run in order: *scaffold*, *build* (S2I build and push to the internal registry), *deploy* (creates the `ksvc`).
+. Click the *build* node to follow its log.
 --
 CLI::
 +
@@ -1062,13 +1151,13 @@ NAME                                                               STATUS   VOLU
 persistentvolumeclaim/premium-calculator-s2i-upload-pipeline-pvc   Bound    pvc-...  256Mi      RWO            ...            <unset>                 2m
 ----
 
-[NOTE]
 .What `--remote` put in your namespace
+[%collapsible]
 ====
 `kn func deploy --remote` created everything it needed in `{user}-dev`, as you: the *Pipeline* (scaffold → build → deploy), a *PipelineRun* of it, a 256 MiB *PVC* holding your uploaded source and the build's Maven cache, and a *Secret* with push credentials for the internal registry, derived from your own session. The run itself executes as the `pipeline` ServiceAccount, which OpenShift Pipelines provisions in every namespace. Nothing came from Git: without `--git-url` the source is uploaded from your terminal, which is why no repository was needed.
 ====
 
-The function is a Knative Service now. Wait for it to scale to zero — about a minute and a half after the deploy — then call it from the in-cluster client, once cold and once warm:
+Wait for the function to scale to zero (about a minute and a half after the deploy):
 
 [source,sh,role=execute]
 ----
@@ -1087,6 +1176,8 @@ premium-calculator   https://premium-calculator-{user}-dev.{cluster_domain}     
 scaled to zero — the next call is a cold start
 ----
 
+Call it from the in-cluster client, once cold and once warm:
+
 [source,sh,role=execute]
 ----
 oc exec deploy/demo-client -n $NS -- curl -s -k -m 60 -w "\ncold start: HTTP %{http_code} in %{time_total}s\n" -H "Content-Type: application/json" -d '{"message":"premium quote for CLM-1001"}' "${FURL:?is empty - run the first block of this exercise again}"
@@ -1102,17 +1193,26 @@ cold start: HTTP 200 in 2.481537s
 warm:       HTTP 200 in 0.022012s
 ----
 
-Compare that with exercise 2. The same scale-to-zero, but the function woke in about *2.5 seconds* where `parasol-claims` took 10–30. A cold start is a property of what you deploy: one handler with a handful of extensions boots far faster than a service with a database pool behind it.
+*What just happened:* the function woke in about *2.5 seconds*, where `parasol-claims` took 10–30. A cold start is a property of what you deploy: one handler with a handful of extensions boots far faster than a service with a database pool behind it.
 
 [.checkpoint]
 ****
-✔ *Verify:* You created `premium-calculator` from a template, built it *on the cluster* with `kn func deploy --remote` (a PipelineRun in `{user}-dev`: scaffold → build → deploy), and called the resulting *Ready* `ksvc` from zero — `HTTP 200` with your message echoed back, in a few seconds cold and a few hundredths warm.
+✔ *Verify:* `premium-calculator` is *Ready* in `kn service list`, built by a PipelineRun in `{user}-dev` (scaffold → build → deploy), and echoed your message with `HTTP 200`: seconds cold, hundredths warm.
 ****
 
 == 6. A taste of eventing — source, broker, trigger
 ⏱ *~8 min* · wake the service on an event, and meet the honest boundary
 
-Set this exercise's shortcuts first — your namespace and the service URL (re-run this block after a reconnect):
+Not every claim arrives as an HTTP call; some arrive as events. Wire one that wakes the claims service from zero.
+
+*You'll end with:* a `PingSource` → `Broker` → `Trigger` chain, all *Ready*, delivering to `parasol-claims`, and an honest `405` that marks where processing begins.
+
+[mermaid]
+....
+include::example$diagrams/serverless-zero-to-hero/10-eventing-chain.mmd[]
+....
+
+Set this exercise's shortcuts (re-run after a reconnect):
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -1121,16 +1221,17 @@ URL=$(oc get ksvc parasol-claims -n $NS -o jsonpath='{.status.url}')
 echo "namespace: $NS  service URL: ${URL:-(none: parasol-claims is missing, see exercise 1)}"
 ----
 
-So far everything has been *request-driven*. Knative *Eventing* adds *event-driven* delivery: a *source* emits events into a *broker*, and a *trigger* routes them to a *sink* — your `ksvc`, which *wakes from zero* to receive them. Wire all three.
-
-First, an in-memory *Broker* (no external messaging system needed) and a *Trigger* pointing at the claims-processor:
+Create an in-memory *Broker* (no external messaging system needed) and a *Trigger* that delivers to the claims-processor:
 
 [tabs]
 ====
 Console::
 +
 --
-In *Serverless → Eventing*, create a *Broker* named `default`, then a *Trigger* named `claims-processor` whose subscriber is the *parasol-claims* Service. Or use the masthead *Quick create* (+) menu → *Import YAML* with the manifests from the *CLI* tab.
+. In *Serverless → Eventing*, create a *Broker* named `default`.
+. Create a *Trigger* named `claims-processor` whose subscriber is the *parasol-claims* Service.
+
+Or use *Quick create* (+) → *Import YAML* with the manifests from the *CLI* tab.
 --
 CLI::
 +
@@ -1150,14 +1251,17 @@ Broker 'default' successfully created in namespace '{user}-dev'.
 Trigger 'claims-processor' successfully created in namespace '{user}-dev'.
 ----
 
-Now a *Source* — a `PingSource` that emits a small event into the broker on a schedule (every minute):
+Add a *Source*: a `PingSource` that emits a small event into the broker every minute:
 
 [tabs]
 ====
 Console::
 +
 --
-In *Serverless → Eventing → Create → Event Source → PingSource*, set the schedule `* * * * *`, a small JSON data payload, and the *Broker* `default` as the sink. Or the masthead *Quick create* (+) menu → *Import YAML* with the manifest from the *CLI* tab.
+. Open *Serverless → Eventing → Create → Event Source → PingSource*.
+. Set the schedule `* * * * *`, a small JSON data payload, and the *Broker* `default` as the sink.
+
+Or use *Quick create* (+) → *Import YAML* with the manifest from the *CLI* tab.
 --
 CLI::
 +
@@ -1183,7 +1287,7 @@ EOF
 --
 ====
 
-Confirm the whole chain is *Ready* — source, broker, and trigger:
+Confirm the chain is *Ready*:
 
 [source,sh,role=execute]
 ----
@@ -1210,7 +1314,9 @@ trigger.eventing.knative.dev/claims-processor   default   http://parasol-claims.
 // row. Alt text written to that frame, not to the marker's wish.
 image::serverless-zero-to-hero/serverless-zero-to-hero-04-serverless-eventing.png["The Serverless Eventing page for the {user}-dev project, Triggers tab. A single row for the claims-processor Trigger: Ready reads True with 7 OK of 7 conditions, the Broker column links to the default Broker, and the Subscriber column carries a KSVC badge linking to parasol-claims — the delivery edge from Broker to Knative Service in one line. The Event Sources, Brokers, Channels and Subscriptions tabs sit alongside, each holding its own part of the wiring.",role=lightbox]
 
-The wiring is live: every minute the `PingSource` emits an event, the `Broker` receives it, and the `Trigger` delivers it to the claims-processor — which *wakes from zero* to receive it. See the delivery for yourself by sending one event exactly as the trigger does — a CloudEvents POST to the service:
+*What just happened:* the wiring is live. Every minute the `PingSource` emits an event, the `Broker` receives it, and the `Trigger` delivers it to its *sink*, the claims-processor, which *wakes from zero* to receive it.
+
+See the delivery yourself: send one event exactly as the trigger does, a CloudEvents POST to the service:
 
 [source,sh,role=execute]
 ----
@@ -1228,15 +1334,17 @@ oc exec deploy/demo-client -n $NS -- sh -c '
 event delivered to ksvc: HTTP 405
 ----
 
-[NOTE]
+*What just happened:* the delivery is real and the `405` is *expected*: the app has *no CloudEvents handler*, so a `POST` to `/` is *Method Not Allowed*. Processing events is the *Eventing Deep-Dive & Serverless Workflows* module.
+
 .Read the 405 correctly — the plumbing works; the processing is the next module
+[%collapsible]
 ====
 That `405` is *expected*, and it's the honest boundary of this taste. The event was *genuinely delivered*: the trigger POSTed it to the `ksvc`, which *woke from zero* to receive it. The app *serves* `/` (a `GET` returns `200`), but it has *no CloudEvents handler* — so a `POST` to `/` is *Method Not Allowed*, `405`. That is even sharper than a `404`: the route exists and the request arrived, the app simply has nothing wired to *handle* a posted event. What you have proved is real and valuable: *source → broker → trigger → scale-up on an event*. What you have *not* done is *process* the event — parse the CloudEvent, branch on its data, reply. That is the whole subject of the *Eventing Deep-Dive & Serverless Workflows* module, which starts from exactly this end state. Don't add a fake handler to force a `200`; the `405` is the truth, and the next module is where the handler lives.
 ====
 
 [.checkpoint]
 ****
-✔ *Verify:* You wired *source → broker → trigger* — a `PingSource` into an in-memory `Broker`, a `Trigger` delivering to the `parasol-claims` `ksvc` — confirmed all three *Ready*, and saw a real event delivery *wake the service from zero* and return an honest `HTTP 405` (the app serves `/` but has no *POST* event handler yet — that's Eventing).
+✔ *Verify:* `oc get pingsource,broker,trigger` shows all three *Ready*, delivering to `parasol-claims`, and a real event woke it from zero with an honest `HTTP 405` (no POST handler yet).
 ****
 
 == Challenge (optional)
@@ -1244,10 +1352,10 @@ That `405` is *expected*, and it's the honest boundary of this taste. The event 
 
 You have the mechanics. Try these on your own:
 
-* *Prove scale-to-zero timing.* Drive one request, then run `oc get pods -n $NS -l serving.knative.dev/service=parasol-claims -w` and *time* how long after the last request the pod is removed. Reason about the two Knative defaults that add up to it (the stable window and the scale-to-zero grace period).
-* *Tune the soft target instead of the hard limit.* Re-tune the service with `--concurrency-target 5` (a soft goal) instead of `--concurrency-limit 2` (a hard cap), drive the same burst, and reason about why the scale-up curve differs — and which knob you'd reach for in production.
-* *Make the function do the math.* Replace the echo in `~/premium-calculator/src/main/java/functions/Function.java` with a real premium (say, a base rate times a risk factor carried in the message), run `kn func deploy --remote -n $NS` again, and confirm with `kn revision list -n $NS` that the redeploy minted `premium-calculator-00002` while `00001` stayed.
-* *Mirror the traffic decision.* You split 80/20 with revision tags here, an Argo Rollouts canary in GitOps at Scale, and a mesh weighted route in Service Mesh. Write two sentences on which you'd choose for (a) a request-driven `ksvc` and (b) a service that's one of many in an mTLS mesh — and why.
+* *Prove scale-to-zero timing.* Drive one request, watch `oc get pods -n $NS -l serving.knative.dev/service=parasol-claims -w`, and *time* how long after it the pod goes. Which two Knative defaults add up to it?
+* *Tune the soft target instead.* Re-tune with `--concurrency-target 5` (a soft goal) instead of `--concurrency-limit 2` (a hard cap), drive the same burst, and explain the different scale-up curve. Which knob would you use in production?
+* *Make the function do the math.* Replace the echo in `~/premium-calculator/src/main/java/functions/Function.java` with a real premium (say, a base rate times a risk factor from the message), redeploy with `kn func deploy --remote -n $NS`, and confirm in `kn revision list -n $NS` that `premium-calculator-00002` appeared while `00001` stayed.
+* *Mirror the traffic decision.* Revision tags, an Argo Rollouts canary, a mesh weighted route: in two sentences, which would you choose for (a) a request-driven `ksvc` and (b) one service of many in an mTLS mesh, and why?
 
 When you are done, run `ws verify {module-id}` in the Terminal — or run `ws prep {module-id} --yes` to return your world to the entry state (one scale-to-zero revision, no split, no function, no eventing).
 
