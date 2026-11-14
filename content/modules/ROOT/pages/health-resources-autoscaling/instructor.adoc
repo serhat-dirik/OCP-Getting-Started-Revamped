@@ -59,9 +59,9 @@ adm start health-resources-autoscaling --user user1
 ws verify health-resources-autoscaling --user user1 --entry-only
 ----
 
-// UNVERIFIED until Part B: the check counts (9 entry, 12 end) are by construction from the script.
+// UNVERIFIED until Part B: the check counts (9 entry, 14 end) are by construction from the script.
 Expect `✅ all 9 checks passed`: namespace, marker, quota, `claims-db`, `parasol-claims` and `claims-load` ready, Route `200`, *no probes* on `parasol-claims`, *no HPA*.
-A completed lab verifies 12/12: the 7 shared checks plus all three probes, a CPU request, a memory limit, a CPU HPA with a floor of 2, and at least 2 ready replicas.
+A completed lab verifies 14/14: the 7 shared checks plus all three probes, liveness on `/q/health/live`, a CPU request, a memory limit, a CPU HPA with a floor of 2, at least 2 ready replicas, and a completed rollout.
 --
 
 . *The prebuilt image is present*:
@@ -149,7 +149,8 @@ Read `oc get pod <name> -o jsonpath='{.status.containerStatuses[0].lastState.ter
 
 *4. "My HPA says `<unknown>` — is it broken?"*::
 For the first minute, no: it has no CPU sample yet.
-If it stays `<unknown>`, the container has no CPU request to compute a percentage against — exercise 3 sets `200m`; check it is still there.
+If it stays `<unknown>`, the metrics API is not answering — run pre-flight item 3 (`oc get apiservice v1beta1.metrics.k8s.io …` should print `True`); from the attendee's side, `oc adm top pod -l app=parasol-claims` errors instead of listing figures.
+It is not a missing CPU request: the namespace LimitRange gives every container one.
 
 *5. "Why is the scale-out so slow, and why won't it scale back down?"*::
 Up: the autoscaler decides instantly, but CPU has to be sampled first (*24–40 s* before it first read over target in the measured runs), and the climb often steps 2 → 3 → 4.
@@ -158,7 +159,9 @@ Down: a deliberate *5-minute stabilization window*, so a short lull does not cau
 == Watchouts
 
 * *Exercise 3 leaves a crash-looping pod until the attendee restores the limit.*
-An attendee who stops after the `OOMKilled` step has a held rollout and a pod in `CrashLoopBackOff`; `ws verify` then fails the readiness check with a hint to restore the limit.
+An attendee who stops after the `OOMKilled` step has a held rollout and a pod in `CrashLoopBackOff` — while the old pod keeps serving, so every readiness check stays green.
+`ws verify` catches it on its end check `parasol-claims rollout complete (no stuck new pod)`, whose hint names the `oc set resources … --requests=memory=256Mi --limits=memory=512Mi` restore.
+The same goes for exercise 2's liveness typo: `liveness probe checks /q/health/live` fails with the fix in its hint.
 Point them at the restore block.
 * *The `128Mi` value depends on the Java runtime.*
 It was chosen from a local measurement with a wide margin (the JVM needed ~173 MB to start); a future image that starts smaller could survive it.

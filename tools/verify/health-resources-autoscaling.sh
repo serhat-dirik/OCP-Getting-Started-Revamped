@@ -4,9 +4,11 @@
 #          NO probes and there is NO HorizontalPodAutoscaler yet (adding both is the lab). With
 #          --entry-only, those two absences are asserted, so a half-done lab never passes as a
 #          clean entry and `ws prep` never takes its "already prepared" fast path over it.
-#   End:   parasol-claims carries all three probes, an explicit CPU request (the HPA computes
-#          utilization against it) and a memory limit; an HPA targets it on CPU with a floor of
-#          at least 2; at least 2 replicas are ready; the Route answers 200.
+#   End:   parasol-claims carries all three probes with liveness on /q/health/live (not exercise
+#          2's typo), an explicit CPU request (the HPA computes utilization against it) and a memory
+#          limit; an HPA targets it on CPU with a floor of at least 2; at least 2 replicas are ready;
+#          its latest rollout completed (catches exercise 3's OOMKilled break left in place, which
+#          every ">= N ready" check misses); the Route answers 200.
 #          Every count is >=, never ==: the HPA may legitimately hold 3 or 4 after the load beat.
 # Runnable as the attendee with only oc + curl, reading only {user}-dev. See tools/verify/README.md.
 set -euo pipefail
@@ -61,6 +63,31 @@ deploy_resource_set() {
   [[ -n "$OC_OUT" ]]
 }
 
+# End: liveness points at the real endpoint. Presence alone passes with exercise 2's deliberate typo
+# (/q/health/alive) still in place — that pod restarts every ~30 s yet is ready most of the time, so
+# no readiness check notices it.
+liveness_path_ok() {
+  oc_read get deploy parasol-claims -n "$NS" -o jsonpath='{.spec.template.spec.containers[0].livenessProbe.httpGet.path}' || return 1
+  [[ "$OC_OUT" == "/q/health/live" ]]
+}
+
+# End: the latest rollout finished — every replica runs the current template and is ready, and no
+# old-template pod is left (what `oc rollout status` waits for). This is what catches exercise 3's
+# OOMKilled break left in place: the old pod keeps serving, so every ">= N ready" check stays green,
+# while the new pod crash-loops and the rollout never completes. Polls to the shared settle budget
+# (_lib.sh), because a rollout or an HPA scale-out legitimately takes seconds to converge.
+# Fields are '|'-separated so an absent count (rendered empty) never shifts the others.
+rollout_complete() {
+  local deadline=$(( SECONDS + VERIFY_SETTLE_BUDGET_S )) gen seen want upd total ready
+  while :; do
+    oc_read get deploy parasol-claims -n "$NS" -o jsonpath='{.metadata.generation}|{.status.observedGeneration}|{.spec.replicas}|{.status.updatedReplicas}|{.status.replicas}|{.status.readyReplicas}' || return $?
+    IFS='|' read -r gen seen want upd total ready <<<"$OC_OUT"
+    if [[ "${seen:-0}" -ge "${gen:-1}" && "${upd:-0}" == "$want" && "${total:-0}" == "$want" && "${ready:-0}" == "$want" ]]; then return 0; fi
+    if (( SECONDS >= deadline )); then return 1; fi
+    sleep "$VERIFY_SETTLE_POLL_S"
+  done
+}
+
 # End: SOME HPA targets parasol-claims on CPU with minReplicas >= 2. Name-agnostic: `oc autoscale`
 # names it parasol-claims, the console form lets the attendee pick. An unset minReplicas means 1.
 hpa_on_cpu_min2() {
@@ -91,10 +118,12 @@ else
   # --- end state (what a completed lab looks like) ---------------------------------------------
   info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
   check "parasol-claims has all three probes"                     deploy_has_all_probes                          || hint "not done yet — exercises 1 and 2 add readiness, liveness and startup (oc set probe deploy/parasol-claims --readiness/--liveness/--startup ...); expected red until you do"
+  check "liveness probe checks /q/health/live"                    liveness_path_ok                               || hint "not done yet, or exercise 2's typo is still in place (the pod keeps restarting) — fix it: oc set probe deploy/parasol-claims -n ${NS} --liveness --get-url=http://:8080/q/health/live --period-seconds=10 --failure-threshold=3"
   check "parasol-claims sets an explicit CPU request"             deploy_resource_set requests.cpu               || hint "not done yet — exercise 3 sets it (oc set resources deploy/parasol-claims --requests=cpu=200m,memory=256Mi --limits=cpu=500m,memory=512Mi); the HPA cannot compute CPU utilization without it"
   check "parasol-claims sets a memory limit"                      deploy_resource_set limits.memory              || hint "not done yet — exercise 3 sets it with the same oc set resources command; expected red until you do"
   check "an HPA scales parasol-claims on CPU (min >= 2)"          hpa_on_cpu_min2                                || hint "not done yet — exercise 4 creates it: oc autoscale deploy/parasol-claims --cpu=60% --min=2 --max=4 -n ${NS}"
   check "parasol-claims has >=2 ready replicas (HPA floor)"       deploy_ready_min parasol-claims "$NS" 2        || hint "not done yet? with no HPA nothing holds the floor at 2, so this follows from the check above. If the HPA EXISTS, give it a minute, then look: oc get hpa -n ${NS}; oc get pods -n ${NS} -l app=parasol-claims"
+  check "parasol-claims rollout complete (no stuck new pod)"      rollout_complete                               || hint "a new pod never became ready, so the old one is still serving. If it shows OOMKilled or CrashLoopBackOff, exercise 3's too-small memory limit is still in place — restore it: oc set resources deploy/parasol-claims -n ${NS} --requests=memory=256Mi --limits=memory=512Mi. Otherwise look at it: oc get pods -n ${NS} -l app=parasol-claims"
 fi
 
 verify_summary

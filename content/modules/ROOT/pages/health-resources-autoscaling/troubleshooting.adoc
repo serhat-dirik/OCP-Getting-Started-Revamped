@@ -17,7 +17,10 @@ Fix:: To see the `503`, every pod has to carry the broken probe — scale to zer
 [source,sh,role=execute]
 ----
 oc scale deploy/parasol-claims --replicas=0
+for i in $(seq 1 30); do [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 0 ] && break; sleep 2; done
 oc scale deploy/parasol-claims --replicas=1
+sleep 40
+oc get endpoints parasol-claims
 ----
 +
 Deleting a pod does not do it: the old ReplicaSet recreates a ready one.
@@ -40,7 +43,7 @@ curl -sf --retry 30 --retry-all-errors --retry-delay 2 -o /dev/null -w "Route: %
 
 Symptom:: `RESTARTS` climbs every half minute or so; `oc logs` shows a normal startup each time.
 Cause:: A liveness probe on a path the app does not serve — exercise 2's typo `/q/health/alive`, left in place.
-The kubelet reads three `404`s as "wedged" and restarts a healthy container.
+The kubelet reads three `404` responses as "wedged" and restarts a healthy container.
 `oc describe pod -l app=parasol-claims` shows `Liveness probe failed: HTTP probe failed with statuscode: 404` and `failed liveness probe, will be restarted`.
 Fix:: Point liveness at the real endpoint:
 +
@@ -76,7 +79,7 @@ oc rollout status deploy/parasol-claims
 Symptom:: During exercise 3's break, the old pod is still `1/1`, but `curl …/api/claims` sometimes returns `500`.
 Cause:: The claims service recreates and re-seeds its database schema every time it starts, and every replica shares the one `claims-db`.
 A start attempt that is killed partway through that step can leave the tables missing until the next start completes it.
-Fix:: Restore the memory limit (previous entry). The rollout's new pod finishes the schema and seed on start, and the `500`s stop.
+Fix:: Restore the memory limit (previous entry). The rollout's new pod finishes the schema and seed on start, and the `500` responses stop.
 
 == `must be less than or equal to memory limit`
 
@@ -87,16 +90,20 @@ Fix:: Set both together, as the lab does: `--requests=memory=128Mi --limits=memo
 == My HPA shows `<unknown>/60%` and is not scaling
 
 Symptom:: Just after `oc autoscale`, `oc get hpa` shows `TARGETS` as `<unknown>/60%` and `REPLICAS 0`.
-Cause:: Either the metrics pipeline has not reported CPU for the new HPA yet (it takes about a minute), or the container has no CPU *request*, so utilization cannot be computed.
+Cause:: The HPA has no CPU reading from the cluster's metrics API yet.
+For a new HPA that is normal for about a minute; if it lasts longer, the metrics API is not answering.
+(A container with no CPU request is the other textbook cause, but it cannot happen here: the namespace's LimitRange gives every container a request.)
 Fix:: Wait a minute and re-check.
-If it stays `<unknown>`, confirm the request exercise 3 sets:
+If it stays `<unknown>`, ask the metrics API directly, and read the HPA's own explanation:
 +
 [source,sh,role=execute]
 ----
-oc get deploy parasol-claims -o jsonpath='{.spec.template.spec.containers[0].resources.requests.cpu}{"\n"}'
+oc adm top pod -l app=parasol-claims
+oc describe hpa parasol-claims | grep -A4 'Conditions:'
 ----
 +
-It should print `200m`; if it is empty, run exercise 3's `oc set resources` again.
+A CPU and memory figure per pod means the metrics are flowing and the HPA catches up on its next sample.
+An error from `oc adm top` (or a `ScalingActive False` condition naming `FailedGetResourceMetric`) means the cluster's metrics API is down — a platform fault, so tell your instructor.
 
 == The burst is running but `REPLICAS` is still 2
 
