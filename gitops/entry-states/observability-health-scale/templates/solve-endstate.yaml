@@ -1,7 +1,7 @@
 {{- if .Values.solve }}
-# END state for instructor demos / `ws solve observability-health-scale`: the three outcomes the attendee builds by hand in
-# the scale + resilience beats — a CPU HorizontalPodAutoscaler, an error-rate PrometheusRule alert, and
-# a PodDisruptionBudget. Mirrors the storage-stateful solve split (entry = the world before the lab; solve = the
+# END state for instructor demos / `ws solve observability-health-scale`: the four outcomes the attendee builds by hand in
+# the alert, dashboard, scale + resilience beats — a CPU HorizontalPodAutoscaler, an error-rate PrometheusRule
+# alert, a four-panel PersesDashboard, and a PodDisruptionBudget. Mirrors the storage-stateful solve split (entry = the world before the lab; solve = the
 # world after a correct completion). parasol-claims itself is raised to 2 replicas in the shared
 # Deployment template when solve=true, so the HPA floor and the PDB quorum are satisfied on first sync.
 ---
@@ -58,6 +58,89 @@ spec:
           annotations:
             summary: "parasol-claims is returning server errors"
             description: "The claims API 5xx rate in {{ .Values.user }}-dev has exceeded 0.1/s for 2m."
+---
+# why: the dashboard-as-code beat — the lab's four-panel dashboard as it stands after the attendee's
+# one-line edit (request rate split by endpoint). Queries go through the per-user default datasource
+# thanos-tenancy (workshop-config per-user-perses.yaml), with the viewer's own token. The CRD arrives
+# with the observability stack's COO, so dry-run is skipped until it exists.
+apiVersion: perses.dev/v1alpha2
+kind: PersesDashboard
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: observability-health-scale
+    workshop.redhat.com/owner: ogsr
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  config:
+    display:
+      name: Parasol claims
+    duration: 15m
+    refreshInterval: 15s
+    panels:
+      requests:
+        kind: Panel
+        spec:
+          display: {name: Requests per second}
+          plugin: {kind: TimeSeriesChart, spec: {}}
+          queries:
+            - kind: TimeSeriesQuery
+              spec:
+                plugin:
+                  kind: PrometheusTimeSeriesQuery
+                  spec:
+                    datasource: {kind: PrometheusDatasource, name: thanos-tenancy}
+                    query: 'sum by (uri) (rate(http_server_requests_seconds_count[1m]))'
+      errors:
+        kind: Panel
+        spec:
+          display: {name: Server errors (5xx) per second}
+          plugin: {kind: TimeSeriesChart, spec: {}}
+          queries:
+            - kind: TimeSeriesQuery
+              spec:
+                plugin:
+                  kind: PrometheusTimeSeriesQuery
+                  spec:
+                    datasource: {kind: PrometheusDatasource, name: thanos-tenancy}
+                    query: 'sum(rate(http_server_requests_seconds_count{status=~"5.."}[1m])) or vector(0)'
+      latency:
+        kind: Panel
+        spec:
+          display: {name: Average latency by endpoint (seconds)}
+          plugin: {kind: TimeSeriesChart, spec: {}}
+          queries:
+            - kind: TimeSeriesQuery
+              spec:
+                plugin:
+                  kind: PrometheusTimeSeriesQuery
+                  spec:
+                    datasource: {kind: PrometheusDatasource, name: thanos-tenancy}
+                    query: 'sum by (uri) (rate(http_server_requests_seconds_sum[1m])) / sum by (uri) (rate(http_server_requests_seconds_count[1m]))'
+      cpu:
+        kind: Panel
+        spec:
+          display: {name: CPU per pod (cores)}
+          plugin: {kind: TimeSeriesChart, spec: {}}
+          queries:
+            - kind: TimeSeriesQuery
+              spec:
+                plugin:
+                  kind: PrometheusTimeSeriesQuery
+                  spec:
+                    datasource: {kind: PrometheusDatasource, name: thanos-tenancy}
+                    query: 'sum by (pod) (rate(container_cpu_usage_seconds_total{container="parasol-claims"}[2m]))'
+    layouts:
+      - kind: Grid
+        spec:
+          items:
+            - {x: 0, y: 0, width: 12, height: 8, content: {$ref: '#/spec/panels/requests'}}
+            - {x: 12, y: 0, width: 12, height: 8, content: {$ref: '#/spec/panels/errors'}}
+            - {x: 0, y: 8, width: 12, height: 8, content: {$ref: '#/spec/panels/latency'}}
+            - {x: 12, y: 8, width: 12, height: 8, content: {$ref: '#/spec/panels/cpu'}}
 ---
 # why: keep at least one claims pod serving during voluntary disruption (the [INSTRUCTOR-DEMO] node
 # drain). With the HPA floor at 2, minAvailable 1 lets the drain evict one pod while quorum holds.

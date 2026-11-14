@@ -5,6 +5,7 @@ include::partial$version-attributes.adoc[]
 // Troubleshooting for Observability. Every entry is a real surprise hit performing the lab as user2 on
 // OCP 4.21.22 on 2026-07-11: the monitoring RBAC wall, the alert's fire delay, the poisoned
 // connection pool after the DB returns, the thanos CLI 403, empty/thin traces, and HPA timing.
+// 2026-11-14 (user13): the Perses dashboard entries — No data, every panel erroring, not listed.
 
 Each entry is a symptom you (or an attendee) may hit, its cause, and the fix.
 The first three are the ones that stop the lab cold; the rest are "that's odd" moments with a one-line explanation.
@@ -111,6 +112,51 @@ Exercise 1 has the exact command; port `9093` serves `/api/v1/rules` the same wa
 The tenancy ports have no Route, so run it from the cockpit terminal.
 In the console, *Observe → Metrics* queries with your identity too.
 
+== A dashboard panel says *No data*
+
+Symptom:: In exercise 3, one or more panels of *Parasol claims* draw nothing, while the dashboard itself loads.
+Cause:: The query ran and matched no series, for one of three usual reasons.
+*No traffic yet:* right after `ws prep`, the claims metrics take a couple of minutes to reach the query engine (measured 2026-11-14: about two and a half minutes between `ws prep` returning and the first claims sample answering a query); the CPU panel comes from the platform, not the app, so it fills first.
+*A typo in the query:* a misspelled metric or label matches nothing, and the panel cannot tell that apart from no traffic.
+*A window shorter than the scrape:* container CPU arrives about every 30 seconds, so a `[1m]` window on the CPU panel draws a line with gaps; the lab uses `[2m]` for that panel.
+Fix:: Run the panel's query by itself, in *Observe → Metrics* or from the terminal (exercise 1 has the command for port `9092`).
+If it returns a value there, compare it with the file character by character; if it returns nothing there either, wait for traffic and refresh.
+The *Server errors* panel ends in `or vector(0)` precisely so it draws a zero line, not *No data*, while the service is healthy.
+
+== Every dashboard panel shows an error
+
+Symptom:: The dashboard loads, but every panel shows an error instead of a line, while the same queries work from the terminal.
+Cause:: Either the panels name a datasource that does not exist in your project, or the platform grant that lets the datasource send queries is missing.
+Asked for a datasource that is not there, Perses answers `404` with `datasource doesn't exist`; the only one in your project is `thanos-tenancy`.
+Perses sends every query as `POST`, and the tenancy port needs one extra grant for `POST` that plain `GET` from `curl` does not, so a missing grant fails only the dashboard.
+// CAPTURE-VERIFY: the 404 text is the Perses datasource proxy's API answer, measured as user13 on
+// 2026-11-14 (POST /proxy/projects/<ns>/datasources/thanos/... -> 404 "datasource doesn't exist").
+// How the console panel renders that error was not captured; the media pass confirms it.
+Fix:: Check the name first, and correct the file if it differs:
++
+[source,sh,role=execute]
+----
+oc get persesdatasource -n <user>-dev
+grep 'name: thanos' ~/parasol-claims-dashboard.yaml
+----
++
+If the name is `thanos-tenancy` everywhere and the panels still error, the grant is missing: `oc get rolebinding <user>-pod-metrics-reader -n <user>-dev` returns `NotFound`.
+That binding is a workshop-layer grant; flag it to your instructor.
+
+== My dashboard is not in the Dashboards (Perses) list
+
+Symptom:: *Observe → Dashboards (Perses)* does not list *Parasol claims*.
+Cause:: The list is filtered by project, or the dashboard was applied somewhere else.
+Fix:: Set the project selector to `<user>-dev`, then confirm the object exists and was accepted:
++
+[source,sh,role=execute]
+----
+oc get persesdashboard -n <user>-dev
+oc get persesdashboard parasol-claims -n <user>-dev -o jsonpath='{.status.conditions[?(@.type=="Available")].message}{"\n"}'
+----
++
+`Dashboard (parasol-claims) created successfully` means Perses has it; an empty list means the `oc apply` ran without `-n <user>-dev` or failed, so re-run the exercise 3 block.
+
 == Observe → Traces is empty
 
 Symptom:: You open *Observe → Traces*, run `{ resource.service.name = "parasol-claims" }`, and get no results.
@@ -205,4 +251,4 @@ Wait ~5 minutes and it steps back toward the floor of 2.
 
 '''
 
-_Last verified on OpenShift 4.21.22 with the Cluster Observability Operator 1.5.1 / Tempo 0.21.0-2 / Red Hat build of OpenTelemetry 0.152.0-1 stack — 2026-07-11; the alert-beat entries (fire timing, scrape mechanics) re-verified against the 10s-scrape entry state on 2026-07-19; the "Observe → Alerting shows no rules" entry grounded in an authenticated attendee console on 2026-07-28. The `claims-burst` image-pull entry was updated on 2026-08-12 when the burst was repinned off the frozen el8 `ose-cli:latest`; its `claims-load` cross-check is read from this module's entry-state chart, not from a fresh cluster run. The two HPA-timing entries — "the burst is running but `REPLICAS` is still 2" and the scale-down entry's scale-up aside — were measured as `user5` on OCP 4.22.8 over five runs on 2026-08-14._
+_Last verified on OpenShift 4.21.22 with the Cluster Observability Operator 1.5.1 / Tempo 0.21.0-2 / Red Hat build of OpenTelemetry 0.152.0-1 stack — 2026-07-11; the alert-beat entries (fire timing, scrape mechanics) re-verified against the 10s-scrape entry state on 2026-07-19; the "Observe → Alerting shows no rules" entry grounded in an authenticated attendee console on 2026-07-28. The `claims-burst` image-pull entry was updated on 2026-08-12 when the burst was repinned off the frozen el8 `ose-cli:latest`; its `claims-load` cross-check is read from this module's entry-state chart, not from a fresh cluster run. The two HPA-timing entries — "the burst is running but `REPLICAS` is still 2" and the scale-down entry's scale-up aside — were measured as `user5` on OCP 4.22.8 over five runs on 2026-08-14. The three dashboard entries were grounded as `user13` in the cockpit terminal on 2026-11-14, through the Perses API with the attendee's own token._

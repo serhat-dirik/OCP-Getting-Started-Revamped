@@ -5,7 +5,7 @@
 #          the golden signals and the custom claims_created_total. The scale/resilience objects the lab
 #          builds (HPA, PrometheusRule, PDB) are NOT present yet.
 #   End:   the lab's outcomes exist — a CPU HorizontalPodAutoscaler on parasol-claims (>=2 replicas),
-#          a PrometheusRule alert, and a PodDisruptionBudget.
+#          a PrometheusRule alert, a PersesDashboard with >=4 panels, and a PodDisruptionBudget.
 # Runnable as the attendee: reads only {user}-dev, and probes the app's OWN Route for /q/metrics — no
 # cross-namespace reads (rule 10). The one exception is the attendee-visibility guard at the bottom,
 # which queries the UWM *tenancy* rules endpoint with the CALLER's own token and the mandatory
@@ -70,7 +70,7 @@ claims_replicas_at_least() {
   [[ -n "$OC_OUT" && "$OC_OUT" -ge "$1" ]]
 }
 
-# The parasol-claims ServiceMonitor scrapes every 10s. Not cosmetic: the alert beat (Ex3) needs the
+# The parasol-claims ServiceMonitor scrapes every 10s. Not cosmetic: the alert beat (Ex4) needs the
 # ~30s 5xx window (DB gone -> readiness pulls the pod) to span >=3 scrapes so rate() sees a RISING
 # counter and the rule fires deterministically. A 30s scrape re-introduces the G3 "never fires" flake
 # (the counter is sampled once, at its frozen value -> rate()==0). Guards both entry and end state.
@@ -209,6 +209,25 @@ no_hpa_yet()  { ns_exists_then_absent hpa parasol-claims; }
 no_rule_yet() { ns_exists_then_absent prometheusrule; }
 no_pdb_yet()  { ns_exists_then_absent pdb parasol-claims; }
 
+# The dashboard-as-code beat (Ex3): some PersesDashboard in the namespace defines >= N panels.
+# Name-agnostic like the alert check (template rule 14): an attendee who names theirs differently still
+# passes. Counts the panel map's `"kind":"Panel"` entries — only panels carry that kind (queries are
+# TimeSeriesQuery, charts TimeSeriesChart, datasources PrometheusDatasource) — on the BEST dashboard,
+# so a stray half-written second dashboard cannot hide a complete one. A cluster without the perses.dev
+# CRDs answers "doesn't have a resource type" (rc 1, a real NO), which the hint calls out as broken.
+perses_dashboard_panels_at_least() {
+  local names name n best=0
+  oc_read get persesdashboards.perses.dev -n "$NS" -o name || return 1
+  names="$OC_OUT"
+  [[ -n "$names" ]] || return 1
+  for name in $names; do
+    oc_read get "$name" -n "$NS" -o jsonpath='{.spec.config.panels}' || return 1
+    n="$(grep -o '"kind":"Panel"' <<<"$OC_OUT" | wc -l | tr -d '[:space:]')"
+    (( n > best )) && best="$n"
+  done
+  [[ "$best" -ge "$1" ]]
+}
+
 # The HPA targets parasol-claims on CPU.
 hpa_on_cpu() {
   local tgt
@@ -228,7 +247,7 @@ check "claims Route answers 200 (/q/health/ready)"        route_ready_200       
 check "parasol-claims has OpenTelemetry export ON"        claims_otel_enabled                           || hint "OTLP disabled — entry sets QUARKUS_OTEL_SDK_DISABLED=false; ws reset observability-health-scale --user ${USER_NAME}"
 check "parasol-claims exports OTLP to shared collector"   claims_otel_endpoint                          || hint "OTEL endpoint unset — should point at otel-collector.ogsr-observability-workshop; ws reset observability-health-scale"
 check "ServiceMonitor parasol-claims present"             oc get servicemonitor parasol-claims -n "$NS" || hint "per-user metrics wiring missing — ws reset observability-health-scale --user ${USER_NAME}"
-check "ServiceMonitor scrapes every 10s (alert-beat determinism)" servicemonitor_scrape_10s          || hint "entry ships a 10s scrape so the Ex3 alert fires deterministically; a 30s interval re-introduces the flake — ws reset observability-health-scale --user ${USER_NAME}"
+check "ServiceMonitor scrapes every 10s (alert-beat determinism)" servicemonitor_scrape_10s          || hint "entry ships a 10s scrape so the Ex4 alert fires deterministically; a 30s interval re-introduces the flake — ws reset observability-health-scale --user ${USER_NAME}"
 check "load generator claims-load has >=1 ready replica"  deploy_ready claims-load "$NS"                || hint "load generator missing — ws reset observability-health-scale --user ${USER_NAME}"
 check "/q/metrics exposes http_server_requests (golden signals)" metrics_expose http_server_requests_seconds || hint "metrics endpoint not answering — check: oc get pods -n ${NS}"
 check "/q/metrics exposes claims_created_total (custom metric)"  metrics_expose claims_created_total         || hint "custom counter absent — the load generator POSTs claims to register it; check: oc logs deploy/claims-load -n ${NS}"
@@ -261,6 +280,7 @@ else
   if [[ "$TENANCY_STATE" == "ok" ]]; then
     check "attendee's Alerting rules page lists >=1 rule for ${NS}" tenancy_lists_an_alerting_rule          || hint "not done yet, or not loaded — the /dev-monitoring/ns/${NS}/alertrules?alert-source=user page is EMPTY for the attendee. If 'oc get prometheusrule -n ${NS}' is also empty you simply have not written the alert yet (alert beat) and this red is expected. If it DOES list one, that is the real case: Thanos Ruler has not loaded it — a bad expr, or give UWM ~30s and re-verify"
   fi
+  check "a PersesDashboard in ${NS} has >=4 panels"              perses_dashboard_panels_at_least 4            || hint "not done yet — the entry state ships no dashboard on purpose; applying the four-panel PersesDashboard is the dashboard-as-code beat, so this red is expected before you get there. If 'oc get persesdashboard -n ${NS}' lists one, count its panels: fewer than 4 means the file was cut short. If it errors with \"doesn't have a resource type\", that is actually broken: the cluster's observability stack (Perses) is not installed — tell your instructor"
   check "PodDisruptionBudget parasol-claims exists"               oc get pdb parasol-claims -n "$NS"            || hint "not done yet — the entry state ships no PDB on purpose; creating one is the resilience beat: oc create pdb parasol-claims --selector app=parasol-claims --min-available=1 -n ${NS}"
 fi
 

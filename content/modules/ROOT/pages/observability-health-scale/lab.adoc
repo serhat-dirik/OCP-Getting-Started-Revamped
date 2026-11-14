@@ -31,7 +31,7 @@ include::partial$version-attributes.adoc[]
 // Source-block rule: subs="attributes" ONLY where {user}/{cluster_domain} must interpolate; blocks
 // using $NS / $CLAIMS shell vars or jsonpath {..} braces omit subs. Console labels I could not ground
 // from a screenshot in the build env are marked // CAPTURE-VERIFY for the media pass.
-// 2026-11-12, as user13 on OCP 4.22.22: exercise 6's instructor-run node drain is gone. Attendees evict
+// 2026-11-12, as user13 on OCP 4.22.22: the PDB exercise's instructor-run node drain is gone. Attendees evict
 // their own parasol-claims pods through the Eviction API under the PDB (4 replicas: 201, 201, 201,
 // then 429; the retry admitted after 13s, once a replacement was Ready). Captures in ex 6 are that run.
 // CORRECTION 2026-07-28 (grounded as user1 in an authenticated console): the alerting beat used to send
@@ -47,6 +47,10 @@ include::partial$version-attributes.adoc[]
 // same day as user4 on OCP 4.22.8: 12 verbatim runs, zero pulls (`already present on machine`),
 // container Running 1.3-2.8s after `oc run`; the ~30s an attendee actually waits is the metrics
 // path, not the image. The paragraph after the burst block and instructor.adoc carry the numbers.
+// 2026-11-14, as user13 on OCP 4.22: exercise 3 (dashboard as code) is new and every exercise after it
+// moved up one. Performed in the real cockpit terminal (ws-session): the PersesDashboard applied and
+// re-applied as the attendee, each panel's PromQL answered 200 through Perses' own datasource proxy with
+// the attendee's token, and the panels' series were read back during the outage and HPA beats.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -55,7 +59,7 @@ include::partial$prereq-ws-start.adoc[]
 image::solution-map/observability-health-scale.svg["The Parasol solution map with this module's pieces highlighted: Metrics & alerts, Autoscaling, High availability, parasol-claims and claims-db.",width=900]
 
 Parasol's claims service is already *instrumented*, under a steady trickle of traffic: a load generator lists claims, reads a claim's history, files a new claim, and looks up one that does not exist.
-You will read its three signals, make an alert fire, trace a request, then make the service *autoscale* and *survive a node drain*.
+You will read its signals, make an alert fire, build its dashboard as code, trace a request, then make the service *autoscale* and *survive a node drain*.
 
 TIP: Keep the cockpit *terminal* (signed in as `{user}`) and the {ocp_console_url}[OpenShift web console^] open, and pick a lane with the *Console / CLI* toggle; it stays put across the page.
 The console's home base here is *Observe* (Metrics, Alerting, Targets, Traces, Dashboards).
@@ -97,7 +101,7 @@ Start at the source, the ground truth every other view is built from:
 curl -s "${CLAIMS:?is empty - run the first block of this exercise again}/q/metrics" | grep -E '^claims_created_total|http_server_requests_seconds_count' | head
 ----
 
-.Expected output (values differ; each line ends with a trace exemplar — that is Ex4's hook)
+.Expected output (values differ; each line ends with a trace exemplar — that is Ex5's hook)
 [%collapsible]
 ====
 [source,texinfo]
@@ -159,7 +163,7 @@ echo '--- claims filed (custom business counter) ---'
 curl -s "$CLAIMS/q/metrics" | grep '^claims_created_total'
 ----
 
-.Expected output (each line carries a trace exemplar suffix — Ex4's hook)
+.Expected output (each line carries a trace exemplar suffix — Ex5's hook)
 [%collapsible]
 =====
 [source,texinfo]
@@ -231,7 +235,7 @@ oc get servicemonitor parasol-claims -n "${NS:?is empty - run the first block of
 
 *What just happened:* the ServiceMonitor scrapes `/q/metrics` every *10 seconds*, not the more common 30.
 An alert can only see what a scrape captured, so the interval sets the *shortest fault your alert can catch*: a 30-second scrape can miss a 30-second error spike entirely.
-Exercise 3 is where that earns its keep.
+Exercise 4 is where that earns its keep.
 
 [.checkpoint]
 ****
@@ -408,7 +412,226 @@ That is a one-line platform grant, not a mistake on your part — see xref:obser
 ✔ *Verify:* `oc get prometheusrule -n {user}-dev` lists `parasol-claims-alerts`, and the project-scoped {ocp_console_url}/dev-monitoring/ns/{user}-dev/alertrules?alert-source=user[*Alerting rules* view for `{user}-dev`^] shows one row — `ParasolClaimsErrorRateHigh`, *Warning*, *User*, *State* `-`: armed, nothing active.
 ****
 
-== 3. Break it, and watch the alert catch it
+== 3. Build the claims dashboard as code
+⏱ *~7 min* · four panels in a YAML file, applied like any other object, then changed and re-applied
+
+*Observe → Metrics* answers one question at a time, and the answer is gone when you close the tab.
+The on-call engineer wants the same four answers side by side every time, on every cluster the claims service runs on.
+So write the dashboard as code: a file you can review, diff and re-apply.
+
+*You'll end with:* a `Parasol claims` dashboard in *Observe → Dashboards (Perses)* with four live panels (request rate, 5xx rate, latency and CPU per pod), defined in a file in your terminal.
+
+[mermaid]
+....
+include::example$diagrams/observability-health-scale/12-dashboard-as-code.mmd[]
+....
+
+// SCREENSHOT TODO: observability-health-scale-06-perses-dashboard.png — Observe -> Dashboards (Perses),
+// project {user}-dev, the "Parasol claims" dashboard with all four panels drawing live lines; the
+// Requests per second panel already split into one line per endpoint (after the re-apply step).
+// Embed it here as the "You'll end with" picture once captured, signed in as an attendee.
+
+Set this exercise's shortcuts (re-run this block after a reconnect):
+
+[source,sh,role=execute,subs="attributes+"]
+----
+NS={user}-dev
+CLAIMS=http://parasol-claims-{user}-dev.{cluster_domain}
+----
+
+Your project already holds the *datasource* every panel will query: `thanos-tenancy`, the same tenancy port you queried from the terminal in exercise 1, called with your own token.
+
+[source,sh,role=execute]
+----
+oc get persesdatasource -n "${NS:?is empty - run the first block of this exercise again}"
+----
+
+.Expected output
+[%collapsible]
+====
+[source,texinfo]
+----
+NAME             AGE
+thanos-tenancy   18m
+----
+====
+
+Write the dashboard to a file and apply it.
+Each panel is a name, a chart type and one PromQL query:
+
+[source,sh,role=execute]
+----
+cat > ~/parasol-claims-dashboard.yaml <<'EOF'
+apiVersion: perses.dev/v1alpha2
+kind: PersesDashboard
+metadata:
+  name: parasol-claims
+spec:
+  config:
+    display:
+      name: Parasol claims
+    duration: 15m
+    refreshInterval: 15s
+    panels:
+      requests:
+        kind: Panel
+        spec:
+          display: {name: Requests per second}
+          plugin: {kind: TimeSeriesChart, spec: {}}
+          queries:
+            - kind: TimeSeriesQuery
+              spec:
+                plugin:
+                  kind: PrometheusTimeSeriesQuery
+                  spec:
+                    datasource: {kind: PrometheusDatasource, name: thanos-tenancy}
+                    query: 'sum(rate(http_server_requests_seconds_count[1m]))'
+      errors:
+        kind: Panel
+        spec:
+          display: {name: Server errors (5xx) per second}
+          plugin: {kind: TimeSeriesChart, spec: {}}
+          queries:
+            - kind: TimeSeriesQuery
+              spec:
+                plugin:
+                  kind: PrometheusTimeSeriesQuery
+                  spec:
+                    datasource: {kind: PrometheusDatasource, name: thanos-tenancy}
+                    query: 'sum(rate(http_server_requests_seconds_count{status=~"5.."}[1m])) or vector(0)'
+      latency:
+        kind: Panel
+        spec:
+          display: {name: Average latency by endpoint (seconds)}
+          plugin: {kind: TimeSeriesChart, spec: {}}
+          queries:
+            - kind: TimeSeriesQuery
+              spec:
+                plugin:
+                  kind: PrometheusTimeSeriesQuery
+                  spec:
+                    datasource: {kind: PrometheusDatasource, name: thanos-tenancy}
+                    query: 'sum by (uri) (rate(http_server_requests_seconds_sum[1m])) / sum by (uri) (rate(http_server_requests_seconds_count[1m]))'
+      cpu:
+        kind: Panel
+        spec:
+          display: {name: CPU per pod (cores)}
+          plugin: {kind: TimeSeriesChart, spec: {}}
+          queries:
+            - kind: TimeSeriesQuery
+              spec:
+                plugin:
+                  kind: PrometheusTimeSeriesQuery
+                  spec:
+                    datasource: {kind: PrometheusDatasource, name: thanos-tenancy}
+                    query: 'sum by (pod) (rate(container_cpu_usage_seconds_total{container="parasol-claims"}[2m]))'
+    layouts:
+      - kind: Grid
+        spec:
+          items:
+            - {x: 0, y: 0, width: 12, height: 8, content: {$ref: '#/spec/panels/requests'}}
+            - {x: 12, y: 0, width: 12, height: 8, content: {$ref: '#/spec/panels/errors'}}
+            - {x: 0, y: 8, width: 12, height: 8, content: {$ref: '#/spec/panels/latency'}}
+            - {x: 12, y: 8, width: 12, height: 8, content: {$ref: '#/spec/panels/cpu'}}
+EOF
+oc apply -n "${NS:?is empty - run the first block of this exercise again}" -f ~/parasol-claims-dashboard.yaml
+oc get persesdashboard parasol-claims -n $NS -o jsonpath='{.status.conditions[?(@.type=="Available")].message}{"\n"}'
+----
+
+.Expected output
+[%collapsible]
+====
+[source,texinfo]
+----
+persesdashboard.perses.dev/parasol-claims created
+Dashboard (parasol-claims) created successfully
+----
+====
+
+Now open it.
+A dashboard is a picture, so both lanes read it in the console:
+
+. In the {ocp_console_url}[OpenShift web console^], open *Observe* → *Dashboards (Perses)*, set the project to `{user}-dev`, and open *Parasol claims*.
+Or go straight to it: {ocp_console_url}/monitoring/v2/dashboards/view?dashboard=parasol-claims&project={user}-dev[your *Parasol claims* dashboard^].
+// CAPTURE-VERIFY: the nav label "Dashboards (Perses)" (admin perspective, Observe section) and the
+// /monitoring/v2/dashboards/view?dashboard=<name>&project=<ns> deep link are read from the
+// monitoring console plugin's own plugin-manifest.json and bundle (2026-11-14), not yet from a
+// signed-in screenshot. The media pass confirms both when it captures 06-perses-dashboard.png.
+. Read the four panels against what you know: about one request per second, a flat zero for server errors (the load generator makes only 404s), a few milliseconds of latency, and one pod using a sliver of a core.
+
+*What just happened:* the dashboard is a Kubernetes object in your project, like the alert rule before it.
+The console's Perses view lists every dashboard your account can read, and runs each panel's query through `thanos-tenancy`, which forwards *your* token to the tenancy port.
+So the panels see only `{user}-dev`, exactly like your terminal query in exercise 1, and nobody granted you a dashboard tool to get there.
+
+.Why the windows are 1m and 2m here, but 5m in the alert
+[%collapsible]
+====
+A dashboard is for watching, so it should move within seconds: the app is scraped every 10 seconds, so a 1-minute `rate()` window reacts almost at once.
+An alert is for waking people up, so its 5-minute window is deliberately slow and a blip never pages anyone.
+The CPU panel uses 2 minutes because the platform reports container CPU only about every 30 seconds, and a 1-minute window then draws a line with gaps.
+====
+
+.Why average latency, not a p95?
+[%collapsible]
+====
+A percentile such as p95 needs a *histogram*: request counts sorted into latency buckets, which PromQL turns into `histogram_quantile(0.95, …)`.
+This app's HTTP timer exposes a sum and a count (exercise 1's raw output has no `_bucket` lines), so the honest panel is the average: time spent divided by requests served.
+Turning on histogram buckets is an application setting; once the app publishes them, the panel's query becomes a p95 and nothing else in the dashboard changes.
+====
+
+.Why `or vector(0)` on the error panel?
+[%collapsible]
+====
+Until the first 5xx, the app has no 5xx series at all, so the query matches nothing and the panel would read *No data*: indistinguishable from a broken query.
+`or vector(0)` draws an honest zero instead, and the line climbs off it the moment a server error is counted.
+====
+
+Now change it like code.
+The *Requests per second* panel is one line for the whole service: when it moves, which endpoint moved?
+Split it by endpoint with a one-line edit, review the change, and re-apply:
+
+[source,sh,role=execute]
+----
+cd ~
+sed -i.orig 's/sum(rate(http_server_requests_seconds_count\[1m\]))/sum by (uri) (rate(http_server_requests_seconds_count[1m]))/' parasol-claims-dashboard.yaml
+git --no-pager diff --no-index parasol-claims-dashboard.yaml.orig parasol-claims-dashboard.yaml
+oc apply -n "${NS:?is empty - run the first block of this exercise again}" -f parasol-claims-dashboard.yaml
+----
+
+.Expected output (the diff is the whole change: one query, one panel)
+[%collapsible]
+====
+[source,texinfo]
+----
+diff --git a/parasol-claims-dashboard.yaml.orig b/parasol-claims-dashboard.yaml
+index 3d27284..01b84f0 100644
+--- a/parasol-claims-dashboard.yaml.orig
++++ b/parasol-claims-dashboard.yaml
+@@ -21,7 +21,7 @@ spec:
+                   kind: PrometheusTimeSeriesQuery
+                   spec:
+                     datasource: {kind: PrometheusDatasource, name: thanos-tenancy}
+-                    query: 'sum(rate(http_server_requests_seconds_count[1m]))'
++                    query: 'sum by (uri) (rate(http_server_requests_seconds_count[1m]))'
+       errors:
+         kind: Panel
+         spec:
+persesdashboard.perses.dev/parasol-claims configured
+----
+====
+
+Reload the dashboard in the console: *Requests per second* now draws three lines, one per endpoint (`/api/claims`, `/api/claims/\{claimNumber}` and `/api/claims/\{claimNumber}/history`), and the other three panels are untouched.
+
+*What just happened:* you changed a dashboard the way you change a Deployment: edit the file, read the diff, apply.
+That diff is what a reviewer approves in a pull request, and the file is what an Argo CD application ships to every cluster, so the on-call view is identical in dev, stage and prod, and it comes back on its own after a rebuild.
+Keep the tab open: the next exercise breaks the service, and these panels show it.
+
+[.checkpoint]
+****
+✔ *Verify:* `oc get persesdashboard parasol-claims -n {user}-dev` lists your dashboard; in *Observe → Dashboards (Perses)* its four panels draw live lines, and after your re-apply *Requests per second* shows one line per endpoint.
+****
+
+== 4. Break it, and watch the alert catch it
 ⏱ *~6 min* · take the database away, read all three signals, then recover
 
 Now earn the alert.
@@ -535,6 +758,12 @@ Check the companion {ocp_console_url}/dev-monitoring/ns/{user}-dev/alerts[*Alert
 // has to win a race is a capture that will eventually lie. Left ungrounded on purpose rather than
 // described from the docs — if the lab ever needs it, lengthen `for:` first so the state can be held.
 
+Your dashboard from exercise 3 saw it first, with no query to type: during the burst *Server errors (5xx) per second* jumps off its zero line to several per second (it peaked near 6/s on the build run), and *Requests per second* spikes on `/api/claims`.
+Both fall back within a minute or two, once the router stops sending traffic to the failing pod and nothing more reaches the app to count.
+// Measured 2026-11-14 as user13, read back through Perses' datasource proxy with the attendee's token:
+// 5xx panel max 5.851/s over the burst (6.137/s on the 8-minute window after recovery), requests
+// panel /api/claims max 56.8 req/s vs 0.44 on the other two endpoints. Alert firing ~2m44s after the break.
+
 While it climbs, read the *three signals* on the same fault — the whole module in ninety seconds:
 
 [cols="1,3,3"]
@@ -619,7 +848,7 @@ ParasolClaimsErrorRateHigh  firing  ok
 That "restart to drop the poisoned connection pool" step is the fix worth remembering.
 ****
 
-== 4. Follow a request with a trace
+== 5. Follow a request with a trace
 ⏱ *~7 min* · see the path a request takes, and rank requests by where the time goes
 
 Metrics told you the 5xx rate was up; they cannot tell you *which* request or *where* it spent its time.
@@ -668,7 +897,7 @@ A trace waterfall has no terminal equivalent, so this exercise has one path: the
 [.copy]
 `{ resource.service.name = "parasol-claims" }`
 . *Sort by duration* and open the slowest trace: one request, with its HTTP method, route, status and total time.
-Right after exercise 3, the slowest are usually `GET /api/claims` requests from the outage and from the restarted pod's first, cold requests — up to about a second.
+Right after exercise 4, the slowest are usually `GET /api/claims` requests from the outage and from the restarted pod's first, cold requests — up to about a second.
 . Open a `GET /api/claims/\{claimNumber}/history` trace and compare its time with the cold ones (this endpoint hides a deliberate N+1, below).
 
 *What just happened:* the trace named the exact request that was slow, and when.
@@ -707,7 +936,7 @@ Until then, rank by duration and confirm the cause in the code.
 You can say what a trace tells you that a metric cannot — *where in the request the time went* — and you saw the `trace_id` *exemplar* that links a metric back to a single request.
 ****
 
-== 5. Autoscale under load with an HPA
+== 6. Autoscale under load with an HPA
 ⏱ *~7 min* · add replicas automatically when CPU climbs, and watch it happen
 
 Monday, 9 a.m.: every adjuster signs in at once, and the claims service runs at a fixed replica count.
@@ -893,6 +1122,11 @@ parasol-claims   Deployment/parasol-claims   cpu: 132%/60%   2         4        
 *What just happened:* CPU shot well past 60% and the HPA reached the *ceiling of 4* in *42–115 seconds*, not a few: its *decision* is instant, but it waits on the CPU measurement, then the pods.
 Give it a couple of minutes before you decide something is wrong.
 
+Your exercise 3 dashboard shows the same thing without a command: *CPU per pod (cores)* climbs, then gains a line for each new pod, and *Average latency by endpoint* rises from a few milliseconds to tens of milliseconds while the burst runs.
+// Measured 2026-11-14 as user13 through Perses' datasource proxy: over the 4 minutes after the burst
+// the CPU panel held 4 live pod series (peaks 0.14-0.28 cores) plus the pre-restart pod's fading one;
+// latency panel peaked 0.07-0.09 s per endpoint, against 3-10 ms at the idle baseline. 2 -> 4 in 47 s.
+
 .Measured: where the 42–115 seconds go
 [%collapsible]
 ====
@@ -958,7 +1192,7 @@ That is correct behavior, not a stuck autoscaler.
 ✔ *Verify:* `oc get hpa parasol-claims -n {user}-dev` shows a CPU-targeted HPA (min 2, max 4), and you watched `REPLICAS` climb to 4 while `TARGETS` spiked past 60% — or, in Topology, the *Resources* panel list the new pods (the status ring looks identical at 2 and 4, so read the Pods list).
 ****
 
-== 6. Survive a node drain with a PodDisruptionBudget
+== 7. Survive a node drain with a PodDisruptionBudget
 ⏱ *~8 min* · put a floor under voluntary disruption, then drain your own pods through it
 
 Every patch cycle, Parasol's platform team drains nodes; a drain must never take the claims service's last healthy pod.
@@ -1032,7 +1266,7 @@ parasol-claims   1               N/A               3                     1s
 |===
 |Healthy pods |Allowed disruptions |When
 
-|4 |3 |The HPA from exercise 5 still holds four (5-minute scale-down window)
+|4 |3 |The HPA from exercise 6 still holds four (5-minute scale-down window)
 |2 |1 |It settled back to its floor
 |===
 
@@ -1124,11 +1358,11 @@ The drain *waits* rather than taking the last healthy pod: that is what makes no
 ws verify {module-id}
 ----
 
-You instrumented nothing and consumed everything: the golden signals and a custom business metric in user-workload monitoring, an alert you authored and then *made fire*, a trace that shows a request's path, an HPA that grows the service under load, and a PDB that keeps it alive through maintenance.
+You instrumented nothing and consumed everything: the golden signals and a custom business metric in user-workload monitoring, an alert you authored and then *made fire*, a dashboard you wrote, changed and re-applied as code, a trace that shows a request's path, an HPA that grows the service under load, and a PDB that keeps it alive through maintenance.
 
 [.checkpoint]
 ****
-✔ *Verify:* `ws verify {module-id}` passes — the CPU HPA (≥2 replicas), the `parasol-claims-alerts` PrometheusRule, and the `parasol-claims` PodDisruptionBudget all exist in `{user}-dev`, on top of the always-present instrumented app + ServiceMonitor.
+✔ *Verify:* `ws verify {module-id}` passes — the CPU HPA (≥2 replicas), the `parasol-claims-alerts` PrometheusRule, a PersesDashboard with at least four panels, and the `parasol-claims` PodDisruptionBudget all exist in `{user}-dev`, on top of the always-present instrumented app + ServiceMonitor.
 ****
 endif::demo[]
 
