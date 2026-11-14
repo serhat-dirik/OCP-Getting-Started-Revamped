@@ -23,7 +23,32 @@ image::solution-map/app-security-testing.svg["The Parasol solution map with this
 
 include::partial$idp-choice.adoc[]
 
-Set the shortcuts you'll reuse throughout the lab — your CI/CD project and your seeded fork:
+Parasol's `parasol-claims` build is green, and insecure: a colleague's `seed-appsec` branch shipped five security regressions the old pipeline never looked for.
+Drive the eleven-stage *DevSecOps capstone* from *red to green*, one gate and one fix at a time.
+
+[mermaid]
+....
+include::example$diagrams/app-security-testing/05-fix-loop.mmd[]
+....
+
+[cols="2,5"]
+|===
+|You… |Where
+
+|*Start and re-run* the pipeline |The *OpenShift Pipelines console*, or `tkn`/`oc`
+|*Read* each finding |Its own console (*SonarQube*, the *TaskRun logs*), or the CLI
+|*Fix* each finding |A real commit to `seed-appsec`, from the terminal
+|See *RHACS Central* |Your instructor shows it (no attendee account); its verdicts are in your TaskRun logs
+|===
+
+[IMPORTANT]
+.This lab is build-bound — budget ~40–60 minutes of hands-on time
+====
+From Exercise 3 on, each re-run rebuilds the app from scratch: about five minutes, unit tests and image build in parallel, nothing cached.
+Each fix is one command block, so use the wait: read ahead, or open the last gate's report.
+====
+
+Set the shortcuts the lab reuses:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -33,34 +58,7 @@ echo "project: $NS"
 echo "seeded fork (the lab's build target): $FORK  (branch: seed-appsec)"
 ----
 
-Every exercise sets the shortcuts it uses again in its first block: *if your terminal reconnects, run the first block of the exercise you are in again*.
-
-You are a Parasol platform engineer, and the `parasol-claims` build is *green* — it compiles, its tests pass, it deploys.
-It is also *insecure*: a colleague's `seed-appsec` branch has shipped five security regressions, and the old pipeline waved every one of them through.
-Your job is to run the *DevSecOps capstone* — an eleven-stage pipeline with a security gate at every layer — and drive it from *red to green*, fixing each finding *and reading it in its own console* along the way.
-
-[TIP]
-.How this lab is driven — console for the pipeline, terminal for the fixes
-=====
-You *start the pipeline* from the *OpenShift Pipelines console* (a real button, with a `tkn`/`oc` alternative beside it). You *read each finding* in its native console — the *SonarQube dashboard*, the *TaskRun logs* — with a command-line alternative every time. And you *fix* each finding with a *real commit* to your `seed-appsec` branch from the terminal. Five gates, five fixes, one green run.
-
-One console is the exception: *RHACS Central* has its own user database and the workshop does not issue
-you an account there, so the RHACS screens are *shown by your instructor*. Everything RHACS finds is in
-your `image-scan` and `deployment-check` TaskRun logs, which you read yourself.
-=====
-
-[IMPORTANT]
-.This lab is build-bound — budget ~40–60 minutes of hands-on time
-====
-Every fix means a *re-run*, and from Exercise 3 on every re-run rebuilds the application from scratch:
-the unit tests and the image build run side by side and take about *two of the five minutes* a full run
-takes, and nothing is cached between runs. The later exercises are therefore *dominated by waiting for
-the pipeline*, not by the work you do — the fix itself is usually one command block. Each exercise's
-timing chip below covers both the reading and the re-run, with the re-run measured.
-
-Use the wait. While a run is in flight, read the next section, or open the previous gate's report in its
-console. Do not sit and watch the progress bar.
-====
+*If your terminal reconnects, re-run the first block of your current exercise*: it sets them again.
 endif::demo[]
 
 // ============================================================================
@@ -268,10 +266,22 @@ endif::demo[]
 // ============================================================================
 ifndef::demo[]
 
+// Each exercise opens the same way (the solution map appears once, at the top of the lab): a one-line
+// story beat, and "You'll end with" plus a picture of the result. Steps come next; the why follows as
+// a short *What just happened* and, where it runs long, a collapsible block.
+
 == 1. Meet the seeded app and start the capstone
 ⏱ *~4–6 min* · see the five flaws, then start the pipeline from the console and watch it fail fast (the run reaches the SAST gate in ~1–1.5 min)
 
-First, look at what your colleague shipped. Clone the `seed-appsec` branch and read the five regressions — each carries an "Intentional flaws — do not fix on this branch" marker:
+The old pipeline called this branch green because it never looked.
+Now let one look.
+
+*You'll end with:* a capstone run stopped at its first security gate, `sast-sonar`.
+
+.The capstone run, stopped at the SAST gate
+image::app-security-testing/app-security-testing-01-pipeline-red-run.png["The OpenShift Pipelines console PipelineRun details page for the DevSecOps capstone run gauntlet-8vnwn in project user1-cicd, status Failed. In the graph, fetch-source shows a green checkmark at 1/1, sast-sonar is ringed red at 0/3, and every stage after it sits unrun: sca-trivy, then two parallel branches — build-image feeding image-scan, sign-check and image-report, and unit-test beside it — rejoining at deployment-check, then deploy, dast-zap and perf-k6. The Log snippet panel on the right reports the SonarQube quality gate FAILED and names the fix: remove the hardcoded credential, rule S2068, then re-run."]
+
+List the five seeded flaws (each is marked "Intentional flaws — do not fix on this branch"):
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -309,7 +319,21 @@ echo "--- DAST: no security headers ---";             grep -cE '^quarkus\.http\.
 0
 ----
 
-Now start the pipeline. Open the OpenShift Pipelines console and run the capstone against your seeded branch.
+.Five flaws, five layers, one gate each
+[cols="3,2,3"]
+|===
+|Flaw |Layer |Caught by
+
+|A hard-coded password |Source |SAST: SonarQube
+|`commons-collections` 3.2.1 |Dependencies |SCA: Trivy
+|`log4j-core` 2.14.1, added by the `Containerfile` |Image |Image scan: RHACS
+|A privileged Deployment running as root |Manifest |Config check: `roxctl`
+|No HTTP security headers |Running app |DAST: ZAP
+|===
+
+TIP: *Predict, then run:* the code compiles and its tests pass. Which stage stops the run?
+
+Start the pipeline on your seeded branch:
 
 // Grounded 2026-07-30 on OCP 4.22.5, signed in as an attendee (user1), viewport 1600x1000.
 // Actions menu item is exactly "Start" (also present: Start last run, Add Trigger, Remove Trigger,
@@ -321,21 +345,15 @@ Now start the pipeline. Open the OpenShift Pipelines console and run the capston
 Console::
 +
 --
-In the {ocp_console_url}[web console^], project `{user}-cicd`, go to *Pipelines* → *parasol-claims-devsecops* → *Actions* → *Start*.
-The *Parameters* section shows *five* fields — fill three and leave two at their pre-filled defaults:
-
-* *git-url* → `http://gitea.ogsr-gitea.svc:3000/{user}/parasol-claims.git`
-* *git-revision* → `seed-appsec`
-* *sonar-project-key* → `parasol-claims-{user}`
-* *image* → leave at its default (`image-registry.openshift-image-registry.svc:5000/$(context.pipelineRun.namespace)/parasol-claims:latest`)
-* *max-size-mb* → leave at its default (`500`)
-
-For *Workspaces*, *shared-workspace* defaults to *Empty Directory* — change it to *VolumeClaimTemplate*
-(the form creates a 1 Gi PVC automatically; no size entry needed). Leave *zap-work* and *k6-work* at
-their default *Empty Directory*. Then click *Start*.
-Watch the graph: `fetch-source` goes green, then `sast-sonar` turns *red* and the run stops.
-
-image::app-security-testing/app-security-testing-01-pipeline-red-run.png["The OpenShift Pipelines console PipelineRun details page for the DevSecOps capstone run gauntlet-8vnwn in project user1-cicd, status Failed. In the graph, fetch-source shows a green checkmark at 1/1, sast-sonar is ringed red at 0/3, and every stage after it sits unrun: sca-trivy, then two parallel branches — build-image feeding image-scan, sign-check and image-report, and unit-test beside it — rejoining at deployment-check, then deploy, dast-zap and perf-k6. The Log snippet panel on the right reports the SonarQube quality gate FAILED and names the fix: remove the hardcoded credential, rule S2068, then re-run."]
+. In the {ocp_console_url}[web console^], project `{user}-cicd`: *Pipelines* → *parasol-claims-devsecops* → *Actions* → *Start*.
+. *Parameters* has *five* fields: set three, keep two defaults.
+** *git-url* → `http://gitea.ogsr-gitea.svc:3000/{user}/parasol-claims.git`
+** *git-revision* → `seed-appsec`
+** *sonar-project-key* → `parasol-claims-{user}`
+** *image* → keep the default (`image-registry.openshift-image-registry.svc:5000/$(context.pipelineRun.namespace)/parasol-claims:latest`)
+** *max-size-mb* → keep the default (`500`)
+. *Workspaces*: set *shared-workspace* to *VolumeClaimTemplate* (the form creates a 1 Gi PVC). Keep *zap-work* and *k6-work* on *Empty Directory*.
+. Click *Start*: `fetch-source` goes green, then `sast-sonar` turns *red*.
 --
 CLI::
 +
@@ -366,38 +384,46 @@ Follow the run: `tkn pipelinerun logs -f -n $NS --last`.
 --
 ====
 
-The run *stops at `sast-sonar`* — the first security gate. That is the point: a green *build* is not a green *security* posture, and the pipeline now proves it.
+*What just happened:* a green *build* is not a green *security* posture.
 
 [.checkpoint]
-====
-✔ *Verify:* You saw the five seeded flaws in the source, started `parasol-claims-devsecops` against `seed-appsec`, and the run *failed at the `sast-sonar` stage* (not at build or test). The pipeline graph shows `fetch-source` green and `sast-sonar` red.
-====
+****
+✔ *Verify:* the run *failed at `sast-sonar`*, not at build or test, with `fetch-source` green.
+****
 
 == 2. Gate 1 — SAST: the hard-coded credential
 ⏱ *~6–8 min* · read the SonarQube finding, externalize the secret, watch the gate go green (the re-run reaches the next gate in ~1–1.5 min)
 
-SAST (Static Application Security Testing) analyzes the *source you wrote*. Read *why* it failed — in SonarQube's own dashboard, then confirm from the terminal.
+A password in source travels into every clone and every image.
+SAST (Static Application Security Testing) reads the *source you wrote*.
+
+*You'll end with:* the SonarQube quality gate *Passed*, and the run past `sast-sonar`.
+
+[mermaid]
+....
+include::example$diagrams/app-security-testing/06-sast-gate.mmd[]
+....
+
+Read why it failed:
 
 [tabs]
 ====
 Console::
 +
 --
-Open {sonarqube_url}[the SonarQube dashboard^] and select the *parasol-claims-{user}* project.
+. Open {sonarqube_url}[the SonarQube dashboard^] → *parasol-claims-{user}* (no sign-in needed). The quality gate reads *Failed*: *Vulnerabilities is greater than 0*.
+. *Issues* → the one issue tagged *Security*: rule *S2068 — "Credentials should not be hard-coded"*, on `PartnerGateway.java` line 18, flagging the `partnerApiPassword` literal.
 
-[NOTE]
-.Signing in is optional here
+.Signing in, and why there is no "Vulnerability" filter
+[%collapsible]
 =====
-The dashboard opens *read-only without signing in* — the quality gate, the failing condition and the
-S2068 issue are all visible anonymously, so you can go straight to reading the report.
-If you do want to sign in, use `{user}` and your workshop password: the workshop seeds one SonarQube
-account per attendee. It is a *local SonarQube account* that happens to share your workshop
-credentials — the two systems keep separate user databases, so changing one does not change the other.
+The dashboard opens *read-only without signing in*: the quality gate, the failing condition and the S2068 issue are all visible anonymously.
+If you do want to sign in, use `{user}` and your workshop password: the workshop seeds one SonarQube account per attendee.
+It is a *local SonarQube account* that happens to share your workshop credentials — the two systems keep separate user databases, so changing one does not change the other.
 The pipeline is separate again: it authenticates with its own CI token, never with your account.
-=====
 
-The quality gate shows *Failed*, with the failing condition *Vulnerabilities is greater than 0*.
-Open *Issues* — this build has no "Vulnerability" type chip (it facets by *Software Quality* instead: *Security* / *Reliability* / *Maintainability*) — and find the one issue tagged *Security*: click it to open the detail pane, which shows rule *S2068 — "Credentials should not be hard-coded"*, on `PartnerGateway.java` line 18, flagging the `partnerApiPassword` literal.
+This build of SonarQube has no "Vulnerability" type chip on *Issues*: it facets by *Software Quality* instead (*Security* / *Reliability* / *Maintainability*), which is why you look for the issue tagged *Security*.
+=====
 
 // THE BLANK LINE ABOVE THIS IS LOAD-BEARING: a block macro that touches the paragraph above it is
 // read as a continuation LINE of that paragraph, so AsciiDoc emits the `image::…[…]` source
@@ -470,11 +496,12 @@ QUALITY GATE STATUS: FAILED - View details on http://sonarqube.sonarqube.svc:900
    fix: resolve the new issues (e.g. remove the hardcoded credential — rule S2068), then re-run.
 ----
 
-NOTE: The URL in that log line is the *in-cluster* Service address (`sonarqube.sonarqube.svc:9000`) — it is what the pipeline task uses to reach SonarQube from inside the cluster, and it will not resolve in your browser. To open the report, use {sonarqube_url}[the SonarQube dashboard^] and select `parasol-claims-{user}` (the Console tab beside this one).
+NOTE: That *in-cluster* URL will not open in your browser; use the *Console* tab's SonarQube link.
 --
 ====
 
-The finding is exact: a password *compiled into the source*. The fix is the one Config, Secrets & Multi-Environment teaches — *externalize it to configuration*, so the value comes from a Secret or environment variable, never a literal. Apply the fix and commit it to `seed-appsec`:
+Fix it the Config, Secrets & Multi-Environment way: read the value from configuration (a Secret or environment variable), never a literal.
+Commit:
 
 [source,sh,role=execute]
 ----
@@ -503,11 +530,15 @@ git commit -am "fix(SAST): externalize the partner API credential (@ConfigProper
 git push origin seed-appsec
 ----
 
-Now *re-run* the pipeline (Pipelines console → the last run → *Actions* → *Rerun*, or `oc create` the PipelineRun again). SAST re-analyzes: with no literal secret, `vulnerabilities` drops to *0* and the quality gate passes — so the run advances to the *next* gate, `sca-trivy`, which now fails.
+Re-run: Pipelines console → the last run → *Actions* → *Rerun* (or `oc create` the PipelineRun again).
 
-[NOTE]
+*What just happened:* with no literal secret, `vulnerabilities` dropped to *0* and the quality gate passed; the run now fails at the next gate, `sca-trivy`.
+
+.A later run refuses to start with `exceeded quota … persistentvolumeclaims`?
+[%collapsible]
 ====
-Every run claims a *fresh* workspace PVC (from the PipelineRun's `volumeClaimTemplate`), and that PVC lives exactly as long as its PipelineRun does. You will re-run this pipeline several times on the way to green, and your namespace has a PVC quota — if a later run ever refuses to start with `exceeded quota … persistentvolumeclaims`, prune your oldest *finished* runs first (each one takes its PVC with it):
+Every run claims a *fresh* workspace PVC (from the PipelineRun's `volumeClaimTemplate`), and that PVC lives exactly as long as its PipelineRun does.
+You will re-run this pipeline several times on the way to green, and your namespace has a PVC quota, so prune your oldest *finished* runs first (each one takes its PVC with it):
 
 [source,sh,subs="attributes+"]
 ----
@@ -517,14 +548,24 @@ oc delete pipelinerun <an-old-finished-run> -n {user}-cicd
 ====
 
 [.checkpoint]
-====
-✔ *Verify:* The SonarQube quality gate for `parasol-claims-{user}` is now *Passed* (0 vulnerabilities). On the re-run, `sast-sonar` is *green* and the pipeline advanced — it now fails at `sca-trivy`.
-====
+****
+✔ *Verify:* SonarQube shows `parasol-claims-{user}` *Passed* (0 vulnerabilities), and the re-run fails at `sca-trivy`, not `sast-sonar`.
+****
 
 == 3. Gate 2 — SCA: the vulnerable dependency
 ⏱ *~6–10 min* · read the Trivy finding, drop the dependency, re-run — *the first re-run that builds the app* (~3.5 min)
 
-SCA (Software Composition Analysis) checks the *dependencies you pulled in*. Read the Trivy finding from the TaskRun log:
+Declaring a library ships its flaws, even in code you never call.
+SCA (Software Composition Analysis) checks the *dependencies you pulled in*.
+
+*You'll end with:* `commons-collections` gone from `pom.xml`, and the run past `sca-trivy`.
+
+[mermaid]
+....
+include::example$diagrams/app-security-testing/07-sca-scan.mmd[]
+....
+
+Read the Trivy finding:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -542,7 +583,10 @@ Total: 2 (HIGH: 1, CRITICAL: 1)
 ❌ SCA scan FAILED — a HIGH,CRITICAL dependency CVE was found.
 ----
 
-`commons-collections` 3.2.1 carries *CVE-2015-7501* — the infamous *InvokerTransformer* deserialization *RCE* (Remote Code Execution) gadget. Your code never calls it; it's a landmine you inherited by declaring the dependency. The fix is to *remove it*. Trivy also wrote a *CycloneDX SBOM* (`trivy-sbom.json`) into the run's workspace — the full bill of materials for the build. Drop the dependency and commit:
+*What just happened:* `commons-collections` 3.2.1 carries *CVE-2015-7501*, the *InvokerTransformer* deserialization RCE (Remote Code Execution) gadget.
+Trivy also wrote a *CycloneDX SBOM* (`trivy-sbom.json`), the build's full bill of materials, into the run's workspace.
+
+Remove the dependency and commit:
 
 [source,sh,role=execute]
 ----
@@ -554,35 +598,40 @@ git commit -am "fix(SCA): remove vulnerable commons-collections 3.2.1 (CVE-2015-
 git push origin seed-appsec
 ----
 
-*Re-run* the pipeline. SCA is now clean, the build proceeds — and fails at the *next* gate, `image-scan`.
+TIP: *Predict, then run:* log4shell appears nowhere in `pom.xml`. Will the rebuilt image pass `image-scan`?
+
+*Re-run*, the first re-run that builds the app. SCA passes and the image builds — then `image-scan` fails. Exercise 4 explains why.
 
 [.checkpoint]
-====
-✔ *Verify:* `pom.xml` no longer declares `commons-collections`. On the re-run, `sca-trivy` is *green*, the image builds, and the pipeline now fails at `image-scan` (RHACS).
-====
+****
+✔ *Verify:* `sca-trivy` is *green*, the image builds, and the run fails at `image-scan` (RHACS).
+****
 
 == 4. Gate 3 — Image scan: log4shell, and defense in depth
 ⏱ *~7–11 min* · read the image-scan finding, stop baking the flaw in, understand why a source scan missed it (the re-run is ~3.5–5 min)
 
-This is the module's key beat. The *image scan* (RHACS, shift-right) failed on *log4shell* — but your *SCA* scan (Trivy, shift-left) was *clean*. How? Because log4shell is *not in `pom.xml`*: the seeded `Containerfile` bakes a vulnerable `log4j-core` 2.14.1 jar *directly into the image* at build time. A source scan has nothing to find; the image scan inspects the *assembled image* and catches it. That gap is exactly why you scan at *both* layers.
+The module's key beat: SCA was clean, yet the image scan failed on *log4shell*.
 
-Read the finding in the TaskRun log — and watch your instructor open the same violation in the RHACS console:
+*You'll end with:* a log4shell-free image, the run past `image-scan`, and the reason a source scan could never catch this.
+
+[mermaid]
+....
+include::example$diagrams/app-security-testing/08-defense-in-depth.mmd[]
+....
+
+Read the finding:
 
 [tabs]
 ====
 Console::
 +
 --
-[NOTE]
-.Instructor-shown — your instructor drives this screen
-=====
-RHACS Central keeps its *own* user database, separate from OpenShift, and the workshop does not create
-an account there for you — Central's sign-in page offers only a username-and-password form, and it does
-not accept your OpenShift session. So this screen is *demonstrated*, not performed: your instructor
-opens it on the shared display while you read the same finding in the CLI tab beside this one. Nothing
-in the gauntlet depends on you reaching it.
-=====
+*Instructor-shown:* RHACS Central has no account for you, so your instructor opens this violation on the shared display.
+You lose nothing: the *CLI* tab has the same finding.
 
+.What your instructor shows, and why you can't sign in
+[%collapsible]
+=====
 Your instructor opens {acs_console_url}[the RHACS console^] → *Violations* and finds the `parasol-claims` image violation for policy *"Block Log4Shell (CVE-2021-44228) at build"*, severity *Critical*, then opens it to show the CVE, the component (`log4j-core` 2.14.1), and the image digest.
 // media-pass: screenshot app-security-testing-04-rhacs-log4shell-violation.png — the RHACS console
 // -> Violations: the parasol-claims image violation for the Block Log4Shell (CVE-2021-44228)
@@ -608,6 +657,9 @@ Your instructor opens {acs_console_url}[the RHACS console^] → *Violations* and
 //     ConsolePlugin proxies with authorization "UserToken" to the stackrox sensor-proxy Service, i.e. it
 //     forwards the same OpenShift token to the same Central that just rejected one.
 // The workshop issues no RHACS Central account to attendees, so this screen cannot be an attendee step.
+
+RHACS Central keeps its user database separate from OpenShift: its sign-in page offers only a username-and-password form, and it does not accept your OpenShift session.
+=====
 --
 CLI::
 +
@@ -633,7 +685,10 @@ ERROR: failed policies found: 1 policies violated that are failing the check
 --
 ====
 
-Now *stop baking it in* — remove the seeded `Containerfile` step — and commit:
+*What just happened:* log4shell is *not in `pom.xml`*: the seeded `Containerfile` bakes `log4j-core` 2.14.1 *into the image* at build time.
+Only a scan of the *assembled image* can see it.
+
+Remove the seeded `Containerfile` step and commit:
 
 [source,sh,role=execute]
 ----
@@ -645,23 +700,37 @@ git commit -am "fix(image): stop baking log4j-core 2.14.1 into the image"
 git push origin seed-appsec
 ----
 
-*Re-run.* The rebuilt image has no log4shell, RHACS passes, and the pipeline fails at the *next* gate, `deployment-check`.
+*Re-run.* RHACS passes, and the run fails at the next gate, `deployment-check`.
 
-[NOTE]
-.Why this beats "just run a dependency scanner"
-====
-If you *only* ran SCA on the source, this vulnerable image would have shipped — the flaw was invisible there. If you *only* scanned the image, you'd miss things a source scan catches cheaply (a declared-but-transitive CVE, before you ever build). *Defense in depth* is running both, so a blind spot in one layer is covered by the next. Same idea, applied again in Trusted Software Supply Chain: the image is also *signed and attested*, so it must be both *scanned clean* and *provably yours*.
-====
+[cols="2,5"]
+|===
+|If you scan only… |You miss
+
+|The source (SCA) |Anything added at build time: this vulnerable image would have shipped
+|The image |What a source scan catches cheaply, such as a declared-but-transitive CVE, before you ever build
+|===
+
+*Defense in depth* is running both.
+Trusted Software Supply Chain adds one more layer: the image is *signed and attested*, so it must be scanned clean *and* provably yours.
 
 [.checkpoint]
-====
-✔ *Verify:* The `Containerfile` no longer copies `log4j-core` 2.14.1. On the re-run, `image-scan` is *green*, and you can explain why Trivy (source) was clean while RHACS (image) caught it — defense in depth. The pipeline now fails at `deployment-check`.
-====
+****
+✔ *Verify:* `image-scan` is *green*, the run fails at `deployment-check`, and you can say why Trivy (source) was clean while RHACS (image) caught log4shell.
+****
 
 == 5. Gate 4 — Config check: the insecure Deployment
 ⏱ *~6–9 min* · read the roxctl violations, restore the hardened manifest, re-run (this re-run also deploys and then runs DAST, ~3.5–4.5 min)
 
-Config security checks the *manifest you're about to apply*, before it reaches the cluster. The seeded `deploy/parasol-claims-deployment.yaml` runs *privileged*, as *root*, adds *SYS_ADMIN* and *NET_ADMIN*, and sets *no resource limits*. RHACS `roxctl deployment check` flagged every one. Read the finding:
+"You ship your configuration, not just your code": the seeded manifest asks for far more power than a claims service needs.
+
+*You'll end with:* the hardened manifest committed, the app deployed with its Route, and the run past `deployment-check`.
+
+[mermaid]
+....
+include::example$diagrams/app-security-testing/04-config-gate.mmd[]
+....
+
+Read what RHACS `roxctl deployment check` found, before the manifest reached the cluster:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -681,13 +750,27 @@ oc get taskrun -n $NS -l tekton.dev/pipelineTask=deployment-check --sort-by=.met
 ❌ deployment check FAILED — 5 MEDIUM+ deploy-policy violation(s).
 ----
 
-"You ship your configuration, not just your code." The fix is to *restore the hardened manifest* — least-privilege securityContext (non-root, drop `ALL` capabilities, no privilege escalation, read-only root filesystem), real resource requests and limits, and no auto-mounted service-account token:
+*What just happened:* the check read the manifest you were about to apply. The fix changes:
+
+[cols="2,3,3"]
+|===
+| |Seeded |Hardened
+
+|Privilege |`privileged: true`, escalation allowed |`allowPrivilegeEscalation: false`
+|User |root (UID 0) |`runAsNonRoot: true`
+|Capabilities |adds `SYS_ADMIN`, `NET_ADMIN` |`drop: [ALL]`
+|Resources |none |requests and limits
+|Root filesystem |writable |read-only, `/tmp` on an `emptyDir`
+|Service-account token |mounted |not mounted
+|===
 
 // media-pass: screenshot app-security-testing-05-roxctl-deployment-check.png — the
 // deployment-check TaskRun log: the roxctl deployment check violations on the insecure manifest
 // (Privileged Container, CAP_SYS_ADMIN added, privilege escalation allowed, no CPU request /
 // memory limit) with the MEDIUM+ total. Notice "you ship your configuration, not just your code".
 // See media-manifest.md.
+
+Restore the hardened manifest and commit:
 
 [source,sh,role=execute]
 ----
@@ -725,17 +808,25 @@ git commit -am "fix(config): restore the hardened Deployment manifest"
 git push origin seed-appsec
 ----
 
-*Re-run.* The hardened manifest passes the check, the pipeline *deploys the image and creates the Route for you* (no manual `oc expose`) — and then hits the *final* gate, `dast-zap`.
+*Re-run.* The check passes, and the pipeline *deploys the image and creates the Route for you* (no manual `oc expose`), then hits the final gate, `dast-zap`.
 
 [.checkpoint]
-====
-✔ *Verify:* The hardened `deploy/parasol-claims-deployment.yaml` is committed. On the re-run, `deployment-check` is *green*, the `deploy` stage runs, and `parasol-claims` plus its Route now exist in `{user}-cicd` (`oc get route parasol-claims -n $NS`). The pipeline now fails at `dast-zap`.
-====
+****
+✔ *Verify:* `deployment-check` is *green*, `oc get route parasol-claims -n $NS` finds the Route, and the run fails at `dast-zap`.
+****
 
 == 6. Gate 5 — DAST: the missing security headers
 ⏱ *~8–10 min* · read the ZAP finding, add the headers, and watch the whole run go green (a complete run is ~5 min)
 
-DAST (Dynamic Application Security Testing) exercises the *running* app — something you can only do *after* deploy. The `zap-baseline` stage ran a ZAP (Zed Attack Proxy) scan against the live service and found it never sets its HTTP security headers, so a browser is free to MIME-sniff it, frame it, and leak its URLs. Read the finding:
+Some flaws exist only when the app answers a request.
+DAST (Dynamic Application Security Testing) exercises the *running* app, so it runs after deploy.
+
+*You'll end with:* every stage green, and the app serving its security headers.
+
+.Every gate green
+image::app-security-testing/app-security-testing-02-pipeline-green-run.png["The same OpenShift Pipelines console PipelineRun details page for a fully green run, gauntlet-429l5 in project user1-cicd, status Succeeded. Every stage in the graph is green-ticked — fetch-source, sast-sonar now at 3/3, sca-trivy, then build-image with image-scan, sign-check and image-report on one branch and unit-test at 2/2 on the parallel branch beside it, rejoining at deployment-check, then deploy, dast-zap and perf-k6 — where the earlier run stopped red at sast-sonar. The details panel shows a duration of 5 minutes 28 seconds."]
+
+Read the ZAP (Zed Attack Proxy) finding:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -753,12 +844,20 @@ FAIL-NEW: 0   WARN-NEW: 2   INFO: 0   IGNORE: 0   PASS: 59
 ❌ DAST FAILED — ZAP reported a gating alert on the running app.
 ----
 
-The `dast-zap` stage runs with `FAIL_ON_WARN=true`, so *warnings* fail the build — and because it is `FAIL_ON_WARN`, **a single remaining warning keeps the gate shut**, no matter how many you have cleared. Every one of these is a missing HTTP response header. The fix is to *set them* in Quarkus configuration — one line per header, applied to every response. Append them to `application.properties` and commit:
+*What just happened:* `dast-zap` scanned the live app and found no HTTP security headers, so a browser may MIME-sniff it, frame it, and leak its URLs.
+With `FAIL_ON_WARN=true`, *a single remaining warning keeps the gate shut*.
+
+[mermaid]
+....
+include::example$diagrams/app-security-testing/09-dast-scan.mmd[]
+....
 
 // media-pass: screenshot app-security-testing-06-zap-baseline-summary.png — the dast-zap TaskRun
 // ZAP baseline WARN/FAIL summary against the running Route: the missing security headers
 // (Content-Security-Policy, X-Content-Type-Options, anti-clickjacking). Notice DAST only sees this
 // once the app is deployed and answering requests. See media-manifest.md.
+
+Add the headers to Quarkus configuration, one line each, and commit:
 
 [source,sh,role=execute]
 ----
@@ -781,17 +880,18 @@ git push origin seed-appsec
 
 TIP: That last push is the one that prompts. Enter your Gitea username (`{user}`) and the workshop password when git asks — `credential.helper store` from exercise 1 means it only asks once.
 
-*Re-run one final time.* The rebuilt app sets its headers, ZAP finds nothing to warn about, and — for the first time — *every gate is green*: SAST, SCA, unit test, build, image scan, sign, config check, deploy, DAST. The scanned, signed image is deployed with its Route.
+*Re-run one final time.* For the first time, *every gate is green*: SAST, SCA, unit test, build, image scan, sign, config check, deploy, DAST.
 
-image::app-security-testing/app-security-testing-02-pipeline-green-run.png["The same OpenShift Pipelines console PipelineRun details page for a fully green run, gauntlet-429l5 in project user1-cicd, status Succeeded. Every stage in the graph is green-ticked — fetch-source, sast-sonar now at 3/3, sca-trivy, then build-image with image-scan, sign-check and image-report on one branch and unit-test at 2/2 on the parallel branch beside it, rejoining at deployment-check, then deploy, dast-zap and perf-k6 — where the earlier run stopped red at sast-sonar. The details panel shows a duration of 5 minutes 28 seconds."]
-
-The graph doesn't stop at `dast-zap`, though: one more stage runs after it, `perf-k6`.
+.And `perf-k6`, the stage after `dast-zap`? A performance gate that passes without a fix
+[%collapsible]
+====
 It isn't a security check — it's a *performance* gate, a short k6 load test (10 virtual users for 15 seconds) against the same running Service, exercising `/api/claims` and the health endpoint and failing the build if p95 latency exceeds 800ms or the error rate exceeds 1%.
 It sits alongside the security gates because the same discipline applies to speed as to safety: a change can pass every security check and still make the app too slow or too flaky under load, and this gate catches that before it ships.
 The seeded app has no performance regression, so `perf-k6` passes without a fix — watch for it going green after `dast-zap`, and read the p95 and error-rate numbers in its *TaskRun log*, which is where the summary is printed.
+====
 
-[NOTE]
-.Where the HTML reports go — and why you read the logs instead
+.Where are the ZAP and k6 HTML reports, and the SBOM?
+[%collapsible]
 ====
 The ZAP and k6 stages each write a self-contained *HTML report*, and the SCA stage writes a *CycloneDX
 SBOM*, into their pipeline *workspaces*. Those workspaces live and die with the run: they are scratch
@@ -811,49 +911,46 @@ for your own platform — see the wrap-up.
 // ZAP flagged is now set — the DAST gate is green. See media-manifest.md.
 
 [.checkpoint]
-====
-✔ *Verify:* `application.properties` now sets the `quarkus.http.header.*` values. On the final re-run, the *entire pipeline Succeeded* — every security gate green — and the app's Route serves the headers (`curl -sI https://$(oc get route parasol-claims -n $NS -o jsonpath='{.spec.host}') | grep -iE 'content-security|x-content-type'`). You drove five gates from red to green with five real commits.
-====
+****
+✔ *Verify:* the run *Succeeded*, and the Route serves the headers: `curl -sI https://$(oc get route parasol-claims -n $NS -o jsonpath='{.spec.host}') | grep -iE 'content-security|x-content-type'`.
+****
 
 == 7. Read the whole green run — where every finding lives
 ⏱ *~5–8 min* · *instructor-led walkthrough* — tour the consoles so a red build is never a mystery again
 
-The point of the gauntlet was not just to make it green — it was to know *where each finding lives*, so
-that the next red build is a five-minute diagnosis instead of an afternoon.
+The next red build should be a five-minute diagnosis, not an afternoon: know *where each finding lives*.
 
-This closing beat is a *guided walkthrough your instructor drives*, with you following along on your own
-run where you can. It is deliberately not a hands-on exercise: two of the surfaces worth showing sit
-behind an account the workshop does not issue you (RHACS Central), and the tour is far more useful
-narrated once than reproduced six times in parallel.
+*You'll end with:* for each gate, the tool that caught its flaw and where you read it.
 
-Follow along as your instructor opens each surface, and note *which* of them you could reach on your
-own during the lab:
+.Five gates, five tools, on both sides of the build
+image::app-security-testing/app-security-testing-01-five-pillars.svg["The five security gates across one pipeline, left to right. A shift-left group holds the source, SAST with SonarQube for secrets and injection, SCA with Trivy for dependency CVEs, and a config check with RHACS roxctl on the manifest; a shift-right group holds the RHACS image scan and the ZAP scan of the running app. The chain runs source to SAST to SCA, then builds the image into the image scan, then the config check, then deploys into DAST."]
+
+Your instructor drives this tour; follow on your own run where you can:
 
 [cols="2,3,1",options="header"]
 |===
 | Gate | Where the finding lives | You reached it?
 
-| SAST | {sonarqube_url}[SonarQube^] → `parasol-claims-{user}` → quality gate *Passed* | Yes — the dashboard is readable without signing in
-| SCA | Pipelines console → the green run → `sca-trivy` TaskRun log → *0 findings* | Yes
-| Image scan | {acs_console_url}[RHACS^] → *Violations* → no `parasol-claims` log4shell violation on the new image | No — instructor-shown; your `image-scan` TaskRun log carries the same verdict
-| Config check | Pipelines console → `deployment-check` TaskRun log → *0 MEDIUM+ violations* | Yes
-| DAST | Pipelines console → `dast-zap` TaskRun log → *no gating alerts* | Yes
-| The whole run | Pipelines console → *PipelineRuns* in `{user}-cicd` — the full red-then-green history of every run you started | Yes
+| SAST | {sonarqube_url}[SonarQube^] → `parasol-claims-{user}` → quality gate *Passed* | Yes, no sign-in needed
+| SCA | `sca-trivy` TaskRun log of the green run → *0 findings* | Yes
+| Image scan | {acs_console_url}[RHACS^] → *Violations* → no `parasol-claims` log4shell violation on the new image | No: instructor-shown; same verdict in your `image-scan` TaskRun log
+| Config check | `deployment-check` TaskRun log → *0 MEDIUM+ violations* | Yes
+| DAST | `dast-zap` TaskRun log → *no gating alerts* | Yes
+| The whole run | Pipelines console → *PipelineRuns* in `{user}-cicd`: your red-then-green history | Yes
 |===
+
+.Why this closing beat is instructor-led
+[%collapsible]
+====
+It is deliberately not a hands-on exercise: two of the surfaces worth showing sit behind an account the workshop does not issue you (RHACS Central), and the tour is far more useful narrated once than reproduced six times in parallel.
+====
 
 [NOTE]
 .The question worth taking away
 ====
-Notice how much of that tour ran through *TaskRun logs*. Logs are the lowest common denominator: always
-there, always readable, and useless six months from now when someone asks "when did this CVE first
-appear in our builds?" A production platform answers that from a *durable* store — archived runs,
-published SBOMs, a vulnerability-management dashboard with history — not from logs that age out with
-their PipelineRuns.
-
-This cluster has one piece of that already: *Tekton Results* is running, and it has been quietly
-archiving every run you started — including the failed ones — into a database that outlives the
-PipelineRun objects themselves. Ask your instructor how your organization would answer that question
-today. That gap, not the green graph, is usually the real finding.
+"When did this CVE first appear in our builds?" TaskRun logs age out with their PipelineRuns and cannot answer that; a *durable* store can: archived runs, published SBOMs, a vulnerability dashboard with history.
+This cluster already runs one piece, *Tekton Results*, which has archived every run you started, failed ones included.
+Ask your instructor how your organization would answer today: that gap, not the green graph, is usually the real finding.
 ====
 
 // GROUNDED 2026-07-31 (cluster 2) — Exercise 7 was re-scoped to an instructor-led walkthrough. The
@@ -896,11 +993,8 @@ today. That gap, not the green graph, is usually the real finding.
 // Demotion rests on (1) and (3) only.
 
 [.checkpoint]
-====
-✔ *Verify:* You can name, for each of the five gates, *which* tool found it and *where* you would go to
-read it — and you can point at your own PipelineRun history and walk someone through the red-to-green
-sequence you just drove. That fluency — "a red gate means *this*, and I read it *here*" — is the
-takeaway.
-====
+****
+✔ *Verify:* for each gate you can name its tool and where its finding lives, and walk someone through your own red-to-green run history.
+****
 
 endif::demo[]
