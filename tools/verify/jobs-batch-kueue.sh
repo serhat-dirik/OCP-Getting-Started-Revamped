@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Verify jobs-batch-kueue — Jobs, Batch & Queued Workloads.
-#   Entry: {user}-batch exists (labeled for Kueue), holds the seeded claims-data PVC, a LocalQueue
+#   Entry: {user}-batch exists (labeled for Kueue), holds the claims-data dataset ConfigMap, a LocalQueue
 #          (user-queue) bound to the per-user ClusterQueue, and MaaS batch-inference credentials;
 #          entry marker + quota present — AND, in --entry-only mode only, that the lab has NOT
 #          already been run here: no attendee-created Job, no nightly-statement CronJob, no admitted
@@ -9,7 +9,7 @@
 #   End:   the attendee ran the lab — at least one Job has Completed, the nightly-statement CronJob
 #          exists, and a Kueue Workload carries Admitted=True (admission control was exercised).
 # Runnable as the ATTENDEE: every check reads namespace-scoped objects the attendee can see
-# (Jobs/CronJobs/PVC/Secret/ConfigMap via namespace admin; LocalQueues + Workloads via the
+# (Jobs/CronJobs/Secret/ConfigMap via namespace admin; LocalQueues + Workloads via the
 # kueue-batch-user-role bound in the entry state). The cluster-scoped ClusterQueue is NOT readable
 # by attendees, so that check AUTO-SKIPS unless the caller has cluster read (admin/CI), mirroring
 # the devspaces-inner-loop DevWorkspace pattern. See tools/verify/README.md.
@@ -30,12 +30,6 @@ ns_kueue_managed() {
   [[ "$OC_OUT" == "true" ]]
 }
 
-# A PVC exists and is Bound.
-pvc_bound() {
-  oc_read get pvc "$1" -n "$NS" -o jsonpath='{.status.phase}' || return 1
-  [[ "$OC_OUT" == "Bound" ]]
-}
-
 # The LocalQueue exists and reports Active=True (its ClusterQueue accepts it).
 # A missing kueue CRD ("the server doesn't have a resource type") is the server's own answer, so an
 # uninstalled Kueue still fails loudly rather than skipping.
@@ -45,84 +39,25 @@ localqueue_active() {
   [[ "$OC_OUT" == "True" ]]
 }
 
-# The dataset seed succeeded. ABSENCE IS NOT SUCCESS. This check used to `return 0` when the Job was
-# missing, calling that "ran and was cleaned up" — which made a Sync hook that NEVER FIRED
-# indistinguishable from one that completed, and the companion PVC-Bound check cannot cover the gap
-# because an EMPTY volume Binds exactly as well as a seeded one.
-# The Job is annotated `argocd.argoproj.io/hook-delete-policy: BeforeHookCreation`
-# (gitops/entry-states/jobs-batch-kueue/templates/claims-data.yaml): Argo deletes it only when it is
-# about to create the NEXT one, so a successful seed LEAVES THE JOB BEHIND. Verified on-cluster
-# 2026-08-01 — the namespaces whose entry state had synced still carried
-# claims-data-seed-jobs-batch-kueue-<user> with Complete=True; the ones it had never synced into
-# carried no Job at all. So absence means "never seeded", and it must fail.
-# 0 = seeded · 1 = Job present but not Complete · 2 = Job ABSENT · 3 = namespace missing · 4 = the API
-# could not be asked. State 4 is NEW and it is why this function reads the rc rather than a bare
-# `|| return`: its caller drives a `case`, so `check` never sees an oc invocation here and could not
-# classify anything on its own. Without 4 an unreachable cluster fell through to 3 and told the
-# attendee their namespace does not exist — a false ❌ with a hint that sends them to re-run `ws start`.
-seed_state() {
-  local job="claims-data-seed-jobs-batch-kueue-${USER_NAME}" rc=0
-  oc_read get ns "$NS" -o name || rc=$?
-  if (( rc == 2 )); then return 4; fi
-  if (( rc != 0 )); then return 3; fi
-  rc=0; oc_read get job "$job" -n "$NS" -o name || rc=$?
-  if (( rc == 2 )); then return 4; fi
-  if (( rc != 0 )); then return 2; fi
-  rc=0; oc_read get job "$job" -n "$NS" -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' || rc=$?
-  if (( rc == 2 )); then return 4; fi
-  if (( rc != 0 )); then return 1; fi
-  [[ "$OC_OUT" == *True* ]] || return 1
-  return 0
-}
-
-# WHAT THE SEED ACTUALLY WROTE — not "did the Job that was supposed to write it finish".
-#
-# `Complete=True` above and "the dataset exists" are DIFFERENT CLAIMS, and the check used to make
-# the second one out of the first. A Job can reach Complete having written nothing — a changed base
-# image, an empty source, an error swallowed inside the container — and the attendee then starts the
-# lab against an empty world with a ✅ telling them it is ready. A Bound PVC cannot close the gap
-# either: an empty volume Binds exactly as well as a seeded one.
-#
-# So the seed counts the rows it wrote and patches that count into the entry marker as `seededRows`
-# (gitops/entry-states/jobs-batch-kueue/templates/claims-data.yaml, chart 0.1.8+). The number is
-# DERIVED from the artifact — `wc -l` of the file it just wrote to the PVC — never a constant
-# restated here, so a seed that grows or shrinks the dataset keeps passing without this script
-# having to learn its size. Proven on-cluster 2026-08-01 (user5, cluster-s7hkp): the marker read
-# 200 and an independent pod mounting claims-data counted 200 data rows in /data/claims.csv.
-#
-# The MARKER is the durable record on purpose. This used to be a best-effort `oc logs … | grep
-# '^seeded '`, printed as INFO and asserted on by nothing, because a completed Job keeps its
-# Complete condition long after its pod's logs are garbage-collected — so the log went silent
-# exactly on the namespaces old enough that you most want to know. The marker outlives the pod.
-#
-# Sets SEEDED_ROWS for the caller's message.
-# 0 = a real, non-zero count is recorded · 1 = recorded but zero or non-numeric (the seed ran and
-# produced nothing usable) · 2 = the KEY is absent from a marker that does exist — an entry state
-# materialized by a pre-0.1.8 seed · 3 = the marker ConfigMap itself is not there · 4 = the API
-# could not be asked.
-SEEDED_ROWS=""
-seeded_rows_state() {
-  local rc=0
-  oc_read get cm ws-entry-jobs-batch-kueue -n "$NS" -o jsonpath='{.data.seededRows}' || rc=$?
-  if (( rc == 2 )); then return 4; fi
-  if (( rc != 0 )); then return 3; fi   # NotFound on the ConfigMap; the marker check above owns that ❌
-  SEEDED_ROWS="$OC_OUT"
-  # rc 0 with an empty string is the API's real answer that the KEY is absent — a pre-0.1.8 marker,
-  # not a missing dataset. Kept distinct from state 1 because the two deserve opposite verdicts.
-  [[ -n "$SEEDED_ROWS" ]] || return 2
-  [[ "$SEEDED_ROWS" =~ ^[0-9]+$ ]] || return 1
-  # >= 1, never == 200: "the seed wrote something" is the assertion, and the size of the dataset
-  # belongs to the seed. Pinning the number here would put the checker back in the business of
-  # restating a constant, which is the whole defect this predicate exists to remove.
-  (( SEEDED_ROWS >= 1 ))
+# The dataset holds claim rows. It is chart-rendered (ConfigMap claims-data, key claims.csv, from the
+# chart's files/claims.csv), so this reads the DATA itself rather than a proxy for it. Chart 0.1.11
+# replaced a seeded PVC with that ConfigMap, and three checks went with the PVC — Bound, seed Job
+# Complete, the seed's row-count marker — which existed only because a volume's contents cannot be
+# read through the API. >= 1, never == 200: the size belongs to the chart file, not to this script.
+dataset_rows() {
+  local rows
+  oc_read get cm claims-data -n "$NS" -o jsonpath='{.data.claims\.csv}' || return 1
+  rows="$(printf '%s\n' "$OC_OUT" | sed 1d | grep -c . || true)"
+  (( rows >= 1 ))
 }
 
 # An ATTENDEE-created Job has Completed (end state).
 #
 # This used to scan every Job in the namespace and pass if ANY had Complete=True. It could not fail:
-# `ws start` itself materializes two Jobs that complete — claims-data-seed-… and maas-copy-… — so the
+# `ws start` itself materialized two Jobs that complete — claims-data-seed-… and maas-copy-… — so the
 # check went green on a namespace where the attendee had done nothing, while the very Job its own hint
-# names ("run the monthly-statement Job") did not exist. Measured on a live cluster 2026-07-29:
+# names ("run the monthly-statement Job") did not exist. (The seed Job went away with the seeded PVC at
+# chart 0.1.11; maas-copy-… remains.) Measured on a live cluster 2026-07-29:
 #
 #   claims-data-seed-jobs-batch-kueue-user1 -> Complete=True     <- ws start artifact
 #   maas-copy-jobs-batch-kueue-user1        -> Complete=True     <- ws start artifact
@@ -157,8 +92,8 @@ any_workload_admitted() {
 # WHY THESE EXIST. `ws prep` reads `<script> --entry-only`'s rc as the boolean "is this world already
 # prepared?" (tools/ws/ws cmd_prep). Until these three predicates existed there was no entry branch
 # at all — --entry-only ran the shared block above and stopped — so it graded ONLY what a COMPLETED
-# lab still satisfies: the namespace, its Kueue label, the quota, the LocalQueue, the PVC, the seed,
-# the MaaS credentials. A namespace holding a finished lab returned rc 0, prep printed "already
+# lab still satisfies: the namespace, its Kueue label, the quota, the LocalQueue, the dataset, the
+# MaaS credentials. A namespace holding a finished lab returned rc 0, prep printed "already
 # prepared — nothing to do", DID NOT PURGE, and the attendee started exercise 1 on top of the
 # previous pass's Jobs and CronJob. Because this lab's objects use FIXED names, that is a COLLISION
 # and not merely residue: `oc apply` onto an existing Job whose pod template differs is rejected
@@ -178,7 +113,7 @@ any_workload_admitted() {
 # failed, or one still running, is not a completed lab and is not a clean slate either, and it is the
 # exact object that will collide on the next pass. It cannot false-red a correct entry state: the
 # selector is the SAME `!workshop.redhat.com/owner` discriminator the end check uses, so the entry
-# state's own two hook Jobs (claims-data-seed-…, maas-copy-…) are excluded by the API server, and any
+# state's own hook Job (maas-copy-…) is excluded by the API server, and any
 # future entry-state Job is excluded the moment it carries the owner label — nothing here restates a
 # name.
 #
@@ -233,48 +168,8 @@ check "entry marker ws-entry-jobs-batch-kueue present"               oc get cm w
 check "workshop quota present in ${NS}"                 oc get resourcequota workshop-quota -n "$NS" || hint "entry app not synced — ws reset jobs-batch-kueue --user ${USER_NAME}"
 check "namespace opted into Kueue (kueue.openshift.io/managed=true)" ns_kueue_managed                || hint "without this label Kueue ignores labeled Jobs — ws reset jobs-batch-kueue --user ${USER_NAME}"
 check "LocalQueue user-queue is Active (bound to ${CQ})" localqueue_active                            || hint "LocalQueue missing/inactive — check the workshop layer created ${CQ}: ws reset jobs-batch-kueue --user ${USER_NAME}"
-check "claims-data PVC is Bound"                        pvc_bound claims-data                        || hint "dataset PVC not bound — needs an RWX StorageClass; check: oc get pvc claims-data -n ${NS}"
-# This check now claims ONLY what a Job condition can support: the seed hook ran to completion. The
-# dataset's own existence is asserted by the seededRows check below, which reads a number the seed
-# derived from the file it wrote. Two claims, two checks — conflating them was the defect.
-SEED_DESC="claims-data seed Job Completed (the seed hook ran)"
-seed_rc=0; seed_state || seed_rc=$?
-case "$seed_rc" in
-  0) check "$SEED_DESC" true ;;
-  1) check "$SEED_DESC" false \
-       || hint "the seed Job exists but has not Completed — read it, then re-materialize: oc describe job/claims-data-seed-jobs-batch-kueue-${USER_NAME} -n ${NS}; ws reset jobs-batch-kueue --user ${USER_NAME}" ;;
-  2) check "$SEED_DESC" false \
-       || hint "there is NO claims-data seed Job in ${NS} — the Sync hook never ran, so claims-data is an empty volume (a Bound PVC says nothing about its contents) and every lab Job that reads /data/claims.csv will fail. A successful seed leaves its Job behind, so this is not cleanup: ws reset jobs-batch-kueue --user ${USER_NAME}" ;;
-  4) warn "$SEED_DESC — the cluster API did not answer"
-     hint "not your lab, and not graded: the cluster could not be asked whether the seed Job ran. Re-run the same ws verify in a moment; if it keeps happening, check your session with 'oc whoami' and tell your instructor" ;;
-  *) check "$SEED_DESC" false \
-       || hint "namespace ${NS} does not exist — ws prep jobs-batch-kueue (or ws start jobs-batch-kueue --user ${USER_NAME})" ;;
-esac
-# THE DATASET ITSELF — graded, and on a number the seed derived from the file it wrote (see
-# seeded_rows_state). Runs unconditionally, NOT gated on seed_rc: the marker is durable and the Job
-# is not, so a namespace whose seed Job was somehow removed can still prove its data was seeded.
-ROWS_DESC="claims-data holds a seeded dataset (row count recorded by the seed itself)"
-rows_rc=0; seeded_rows_state || rows_rc=$?
-case "$rows_rc" in
-  0) check "${ROWS_DESC} — marker records ${SEEDED_ROWS} rows" true ;;
-  1) check "$ROWS_DESC" false \
-       || hint "the seed recorded '${SEEDED_ROWS}' rows — it completed WITHOUT writing a usable dataset, so every lab Job that reads /data/claims.csv will find nothing. A green seed Job does not contradict this: reaching Complete and writing data are different things. Re-materialize: ws reset jobs-batch-kueue --user ${USER_NAME}" ;;
-  # DELIBERATE ⚠, not ❌. This namespace was materialized by a seed that predates the row-count
-  # record, so there is genuinely nothing here to check — the dataset may be perfectly fine. Failing
-  # it would red-flag healthy pre-existing worlds (measured: user1 and user7 on cluster-s7hkp,
-  # 2026-08-01, both correctly seeded, both on markers without the key) and send an attendee to a
-  # `ws reset` that destroys the lab they are in the middle of. The precedent in this suite is
-  # seed_image_intact, which PASSES on an older marker for the same reason — but a silent pass is
-  # the trust bug this whole change is about, so this says out loud that it checked nothing: warn()
-  # counts a skip, verify_summary then prints "did NOT fully verify", and CI (VERIFY_STRICT=1)
-  # exits 3 rather than a clean 0.
-  2) warn "$ROWS_DESC — this entry state predates the seed's row-count record"
-     hint "not your lab, and not graded: your namespace was materialized before the seed began recording what it wrote, so this check has nothing to read. The seed Job check above still applies. For a real verdict on the data, re-materialize when you are between exercises: ws reset jobs-batch-kueue --user ${USER_NAME}" ;;
-  3) check "$ROWS_DESC" false \
-       || hint "the entry marker ConfigMap is missing entirely, so nothing recorded what was seeded — see the marker check above: ws prep jobs-batch-kueue (or ws start jobs-batch-kueue --user ${USER_NAME})" ;;
-  *) warn "$ROWS_DESC — the cluster API did not answer"
-     hint "not your lab, and not graded: the cluster could not be asked what the seed recorded. Re-run the same ws verify in a moment; if it keeps happening, check your session with 'oc whoami' and tell your instructor" ;;
-esac
+check "dataset ConfigMap claims-data holds claim rows (/data/claims.csv in every lab Job)" dataset_rows \
+  || hint "actually broken, not a step you skipped: the dataset ConfigMap is missing or holds no claim rows, so every lab Job's Pods sit in ContainerCreating (or read nothing). It is part of your entry state, so re-materialize: ws reset jobs-batch-kueue --user ${USER_NAME}"
 check "MaaS credentials present (secret maas-credentials)" oc get secret maas-credentials -n "$NS"    || hint "the copy Job didn't run — ws reset jobs-batch-kueue --user ${USER_NAME} (check maas-copy-jobs-batch-kueue-${USER_NAME})"
 check "MaaS config carries the resolved model (configmap maas-config)" cm_key_set "$NS" maas-config model || hint "the MaaS copy hook did not fill maas-config — ws reset jobs-batch-kueue --user ${USER_NAME}"
 # PRESENCE IS NOT PROOF: the check above says the Secret exists, not that its key works. The entry hook
@@ -347,7 +242,7 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
   # unchecked clean slate costs `ws prep` its purge — and why, in THIS module, that costs the
   # attendee their very first `oc apply` to an immutable-name collision.
   info "entry state — these checks assert a CLEAN SLATE: they fail when the lab has already been run here, which is what tells 'ws prep' to purge and re-materialize"
-  check "no attendee-created Job yet (you create the first in exercise 1)"     no_attendee_jobs                       || hint "this is LEFTOVER from an earlier run, not a broken environment — the entry state's own seed/copy Jobs are excluded by label, so what is here is yours from last time. The lab's Job names are fixed, so re-applying over it fails on an immutable pod template. Clear it: ws reset jobs-batch-kueue --user ${USER_NAME}"
+  check "no attendee-created Job yet (you create the first in exercise 1)"     no_attendee_jobs                       || hint "this is LEFTOVER from an earlier run, not a broken environment — the entry state's own copy Job is excluded by label, so what is here is yours from last time. The lab's Job names are fixed, so re-applying over it fails on an immutable pod template. Clear it: ws reset jobs-batch-kueue --user ${USER_NAME}"
   check "no nightly-statement CronJob yet (you create it in exercise 4)"       obj_absent cronjob nightly-statement "$NS" || hint "this is LEFTOVER from an earlier run (or from adm solve) — the entry state ships no CronJob. Clear it: ws reset jobs-batch-kueue --user ${USER_NAME}"
   check "no admitted Kueue Workload yet (exercises 5/6 submit the first)"      no_workload_admitted                   || hint "this is LEFTOVER from an earlier run — a Workload reaches Admitted only after a Job is submitted through LocalQueue user-queue, which the entry state never does. Clear it: ws reset jobs-batch-kueue --user ${USER_NAME}"
 else

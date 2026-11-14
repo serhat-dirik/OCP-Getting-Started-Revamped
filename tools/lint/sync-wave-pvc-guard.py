@@ -64,17 +64,17 @@ safety is a property of the deployer's cluster and not of the manifest.
 HOOKS ARE PART OF THE ORDER, NOT A SEPARATE WORLD. Argo orders a sync by (phase, wave), and a
 resource annotated `argocd.argoproj.io/hook: Sync` sits on the SAME wave line as the non-hook
 resources in the sync phase — Sync hooks run "at the same time as the application of the manifests",
-and hooks are wave-ordered along with everything else. `jobs-batch-kueue` is exactly that shape — a
-plain wave-0 PVC consumed by a `hook: Sync` Job at wave 1 — so a guard that ignored hooks would
-compare the wrong things. A `PreSync` consumer of a `Sync` PVC is the same deadlock reached through
-the phase axis instead of the wave axis, which is why the comparison key is the pair and not the
-wave alone.
+and hooks are wave-ordered along with everything else. `jobs-batch-kueue` had exactly that shape
+until chart 0.1.11 (2026-11-14) — a plain wave-0 PVC consumed by a `hook: Sync` Job at wave 1 — and a
+guard that ignored hooks would compare the wrong things on the next chart built that way. A
+`PreSync` consumer of a `Sync` PVC is the same deadlock reached through the phase axis instead of
+the wave axis, which is why the comparison key is the pair and not the wave alone.
 
 That phase/wave model is Argo's DOCUMENTED ordering, not something measured here; the workshop's
 clusters run OpenShift GitOps 1.21.3 (read off cluster-m24jn 2026-08-15). It is not load-bearing for
-any finding on today's tree — the one hook pairing in the tree is judged safe by binding mode
-whichever way the phases are modelled — so if a future finding turns on it, measure the ordering on
-a cluster before believing this paragraph.
+any finding on today's tree — no hook in the tree consumes a PVC (`--list-claims` prints every
+pairing) — so if a future finding turns on it, measure the ordering on a cluster before believing
+this paragraph.
 
 WHAT IS AND IS NOT AN ARGO-CREATED PVC:
   * Top-level `kind: PersistentVolumeClaim` documents — yes. These are what Argo applies and waits
@@ -215,8 +215,9 @@ BINDING_MODES: dict[str, str] = {
     "ocs-external-storagecluster-ceph-rbd": WAIT_FOR_FIRST_CONSUMER,
     # ODF's Immediate-binding RBD variant, shipped alongside the default.
     "ocs-external-storagecluster-ceph-rbd-immediate": IMMEDIATE,
-    # The RWX class jobs-batch-kueue's claims-data names (`datasetStorageClass`). CephFS binds
-    # Immediately, which is why that chart's wave-0 PVC / wave-1 Sync-hook Job pairing works.
+    # ODF's RWX CephFS class. No Argo-created PVC in the tree names it since jobs-batch-kueue's
+    # dataset became a ConfigMap (chart 0.1.11, 2026-11-14); the canary fixture uses it as its
+    # named Immediate class (`immediateClass`).
     "ocs-external-storagecluster-cephfs": IMMEDIATE,
     # Object-bucket class; no PVC in this tree uses it. Listed because it is on the cluster and the
     # next person reading `oc get sc` will wonder why it is missing.
@@ -831,8 +832,8 @@ def self_test(root: pathlib.Path) -> int:  # noqa: C901 - one assertion per dete
         HOOK_ANNOTATION: "Sync", WAVE_ANNOTATION: "1"}}}
     if order_key(hook_sync, "unit") != (PHASE_RANK["Sync"], 1):
         failures.append("a `hook: Sync` object was not placed on the Sync phase's wave line. That "
-                        "is jobs-batch-kueue's real shape; getting it wrong compares the wrong "
-                        "things on a live chart.")
+                        "was jobs-batch-kueue's shape until chart 0.1.11; getting it wrong compares "
+                        "the wrong things on the next chart built that way.")
     presync = {"kind": "Job", "metadata": {"name": "j", "annotations": {HOOK_ANNOTATION: "PreSync",
                                                                        WAVE_ANNOTATION: "99"}}}
     if not order_key(presync, "unit") < order_key(absent, "unit"):
@@ -875,7 +876,8 @@ def self_test(root: pathlib.Path) -> int:  # noqa: C901 - one assertion per dete
                             "for '', static provisioning) — neither of which can bind SOONER than "
                             "the default, so both have to be judged as lazily-binding.")
     if binding_mode("ocs-external-storagecluster-cephfs") != IMMEDIATE:
-        failures.append("BINDING_MODES lost the Immediate CephFS class jobs-batch-kueue names.")
+        failures.append("BINDING_MODES lost the Immediate CephFS class the canary fixture names "
+                        "(immediateClass).")
     if binding_mode("ocs-external-storagecluster-ceph-rbd") != WAIT_FOR_FIRST_CONSUMER:
         failures.append("BINDING_MODES lost the cluster's DEFAULT class, which is the one that "
                         "deadlocked.")

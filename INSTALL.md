@@ -21,7 +21,7 @@ repo. `tools/ws/adm` is the operator CLI; attendees only get `ws` inside their c
 | OpenShift | 4.20 or newer (verified on 4.22) |
 | Cluster | Dedicated and fresh: the install changes cluster-wide settings ([§6](#6-dedicated-cluster)) |
 | Access | `cluster-admin` |
-| Storage | A default StorageClass. Some labs need RWX. |
+| Storage | A default StorageClass. ReadWriteOnce is enough: no lab needs RWX, and the storage lab skips its RWX probe on a cluster without one. |
 | Nodes | `linux/amd64`. See [Node count](#node-count). |
 | Network | Outbound access to the Red Hat and Quay registries |
 | Model endpoint (optional) | An OpenAI-compatible chat-completions endpoint and key: Red Hat MaaS, vLLM, or a public provider. No GPU on your cluster. Without it, OpenShift Lightspeed and M06's AI batch-inference step are unavailable. |

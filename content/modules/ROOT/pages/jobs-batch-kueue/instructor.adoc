@@ -77,19 +77,19 @@ adm start jobs-batch-kueue --user user1
 ws verify jobs-batch-kueue --user user1 --entry-only
 ----
 +
-Expect `✅ all 10 checks passed` when run as admin.
-Run the identical command as an attendee and the cluster-scoped ClusterQueue check cannot be read, so the summary instead reads `⚠ 9 passed · 1 SKIPPED (not graded) — this run did NOT fully verify the lab` — not a failure, and the LocalQueue Active check (which the attendee *can* read) already asserts the same underlying health from inside their own namespace.
-The checks cover the namespace + Kueue opt-in label, the LocalQueue Active, the `claims-data` PVC Bound, the seed Job, and the MaaS secret + ConfigMap.
+Expect `✅ all 12 checks passed` when run as admin.
+Run the identical command as an attendee and the cluster-scoped ClusterQueue check cannot be read, so the summary instead reads `⚠ 11 passed · 1 SKIPPED (not graded) — this run did NOT fully verify the lab` — not a failure, and the LocalQueue Active check (which the attendee *can* read) already asserts the same underlying health from inside their own namespace.
+The checks cover the namespace + Kueue opt-in label, the LocalQueue Active, the `claims-data` dataset ConfigMap (it must hold claim rows), the MaaS secret + ConfigMap, and the clean slate (no Job, CronJob or admitted Workload from an earlier run).
 
-. *The dataset seeded and the queue is wired.*
+. *The dataset is there and the queue is wired.*
 +
 [source,sh,role=execute]
 ----
 oc -n user1-batch get localqueue user-queue
-oc -n user1-batch get pvc claims-data
+oc -n user1-batch get cm claims-data
 ----
 +
-Expect the LocalQueue pointing at `cq-user1`, and the PVC `Bound` with access mode `RWX` (it is CephFS, *not* the default block class — see Watchouts).
+Expect the LocalQueue pointing at `cq-user1`, and the ConfigMap with `DATA 1` (its one key is `claims.csv` — see Watchouts).
 
 . *MaaS egress works from a Pod (the batch-inference exercise depends on it).*
 The entry state copies a bearer token into `user1-batch/maas-credentials`.
@@ -185,13 +185,12 @@ If you re-architect to a shared queue for a smaller event, understand you are re
 Without it, labelled Jobs run *unmanaged* — no Workload, no admission, no preemption — and the whole exercise silently does nothing.
 The entry state sets it on `{user}-batch`; if an attendee wanders into another namespace, Jobs there won't queue.
 This is the number-one "it's broken."
-* *The dataset PVC is `ReadWriteMany`, not the default class.*
-`claims-data` is CephFS (RWX) on purpose: the statement Job (parallelism 3) and inference Job (parallelism 2) mount it from Pods the scheduler *spreads across nodes*.
-The default block class (RWO) would `Multi-Attach`-fail those parallel Pods.
-On a cluster without an RWX class, the parallel exercises need a different dataset strategy (a per-Pod copy, or a ConfigMap for the tiny dataset) — flag it before teaching.
+* *The dataset is a ConfigMap, so it needs no storage.*
+`claims-data` holds the 200-row `claims.csv` (about 8 KiB) and every lab Job mounts it read-only at `/data`, so the parallel Pods of the statement and inference Jobs read it on any node, whatever StorageClass the cluster has.
+Two consequences are worth knowing: a Job that tries to *write* under `/data` fails with `Read-only file system` (the inference Job prints its verdicts to its log for that reason), and a dataset over 1 MiB would need ReadWriteMany storage or object storage instead.
 * *The MaaS token is short-lived.*
 It is copied from the platform at `adm start` time; on a long-running event it can rotate and start returning `401`.
-Re-run `ws reset jobs-batch-kueue --user <u>` to re-copy, or let exercise 6 degrade (the Job writes `unknown` rather than crashing).
+Re-run `ws reset jobs-batch-kueue --user <u>` to re-copy, or let exercise 6 degrade (the Job prints `unknown` rather than crashing).
 Never print the token.
 * *`temperature 0` + `/no_think`.*
 The exercise uses a "thinking" model; the `/no_think` switch in the prompt is what yields a direct one-word answer instead of chain-of-thought, and `temperature 0` makes the batch reproducible.

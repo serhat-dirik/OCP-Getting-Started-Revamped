@@ -88,21 +88,14 @@ oc -n $NS apply -f <corrected-file>.yaml
 This is the platform nudging you to keep batch definitions in files and Git, not in live hand-edits.
 (The `jobTemplate` of a `CronJob` *can* be edited — the next scheduled run picks up the change — but each individual Job it spawns is still immutable.)
 
-== Parallel Job Pods stick in `ContainerCreating` with a `Multi-Attach` error
+== A Job that writes under `/data` fails with `Read-only file system`
 
-Symptom:: A Job with `parallelism > 1` has some Pods `Running` and others stuck `ContainerCreating`; `oc describe pod` shows `Multi-Attach error for volume ... Volume is already used by pod(s) on another node`.
-Cause:: The shared dataset volume is `ReadWriteOnce` (a block class), which can attach to only *one node* at a time.
-When the scheduler spreads parallel Pods across nodes, Pods on the other nodes cannot attach.
-Fix:: A dataset read by many Pods at once must be `ReadWriteMany`.
-In this module `claims-data` is CephFS (RWX) for exactly this reason — confirm it:
-+
-[source,sh,role=execute]
-----
-oc -n $NS get pvc claims-data -o custom-columns='NAME:.metadata.name,MODE:.spec.accessModes[0],SC:.spec.storageClassName'
-----
-+
-Expect `ReadWriteMany`.
-If you build your own parallel-read dataset, request an RWX class, or give each Pod its own copy, or (for a tiny dataset) mount a ConfigMap instead of a PVC.
+Symptom:: A Job you wrote yourself mounts `claims-data` at `/data` and tries to save a file there; its Pods fail, and the log reads `Read-only file system`.
+Cause:: `claims-data` is a ConfigMap, and Kubernetes mounts ConfigMap volumes read-only.
+It is the lab's input, never its output.
+Fix:: Print results to the Pod log, as the inference Job in exercise 6 does, and read them back with `oc -n $NS logs -l job-name=<job>`.
+For scratch files inside one Pod, mount an `emptyDir` volume next to the dataset.
+Output that has to outlive the Pod belongs on a PersistentVolumeClaim or in object storage.
 
 == The batch-inference Job returns HTTP 401 or times out
 
@@ -124,23 +117,22 @@ oc -n $NS get cm maas-config -o jsonpath='endpoint={.data.endpoint}{"\n"}'
 oc -n $NS get secret maas-credentials -o jsonpath='token bytes: {.data.GENAI_API_KEY}' | wc -c
 ----
 +
-The Job is written to *degrade*, not crash — it writes `unknown` for a failed call and still completes, so a rotated token does not break the rest of the lab.
+The Job is written to *degrade*, not crash — it prints `unknown` for a failed call and still completes, so a rotated token does not break the rest of the lab.
 The model is a "thinking" model; the prompt's `/no_think` switch and `temperature 0` are required for a clean one-word verdict — if you swapped models and see chain-of-thought text, that switch is why.
 
-== The `claims-data` dataset is empty (seed did not run)
+== Lab Job Pods stick in `ContainerCreating` (`configmap "claims-data" not found`)
 
-Symptom:: A Job reads `/data/claims.csv` and finds nothing; `wc -l` returns `0`.
-Cause:: The seed hook Job (`claims-data-seed-jobs-batch-kueue-{user}`) did not complete — usually the PVC failed to bind (no RWX class) or the hook errored.
-Fix:: Check the seed Job and the PVC, then re-materialize if needed:
+Symptom:: A lab Job's Pods stay `ContainerCreating`, and `oc -n $NS describe pod <pod>` shows a `FailedMount` event that reads `configmap "claims-data" not found`.
+Cause:: The dataset ConfigMap is part of your entry state and is missing: deleted by hand, or the entry state has not finished materializing.
+Fix:: Check for it, then re-materialize your environment:
 +
-[source,sh,role=execute,subs="attributes+"]
+[source,sh,role=execute]
 ----
-oc -n $NS get job claims-data-seed-jobs-batch-kueue-{user}
-oc -n $NS get pvc claims-data
+oc -n $NS get cm claims-data
+ws prep jobs-batch-kueue --yes
 ----
 +
-If the seed Job is `Failed` or the PVC is `Pending`, `ws reset jobs-batch-kueue --user {user}` re-runs the seed against a fresh PVC.
-A `Pending` PVC almost always means no `ReadWriteMany` StorageClass is available on this cluster.
+The stuck Pods start on their own once the ConfigMap exists, so a Job you already applied does not need re-creating.
 
 == A CronJob never fires (or fires late and then skips)
 
