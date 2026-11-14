@@ -295,22 +295,34 @@ endif::demo[]
 
 // ============================================================================
 // WORKSHOP FLAVOR — hands-on exercise groups
+// Each exercise opens the same way (the solution map appears once, at the top of the lab): a short
+// story beat, and "You'll end with" plus a picture of the result. Steps come next; the why follows
+// as a short *What just happened* and, where it runs long, a collapsible block.
 // ============================================================================
 
 ifndef::demo[]
 
 == Exercise 1 — Find out where your password comes from
 
-The claims service is up. Confirm it, then work backwards to the credential.
+Parasol's security review asks where the claims database password lives. Trace it back from the app.
+
+*You'll end with:* the chain from your app back to the vault.
+
+[mermaid]
+....
+include::example$diagrams/platform-guardrails/07-trace-backwards.mmd[]
+....
+
+Confirm the app is up:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
 oc get deploy -n {user}-dev
 ----
 
-Three deployments, all ready: `openbao`, `claims-db`, `parasol-claims`.
+Expect three, all ready: `openbao`, `claims-db`, `parasol-claims`.
 
-Now ask which keys the app's Secret carries. Ask for the *key names* — never the values:
+List the app Secret's *key names*, never its values:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -325,9 +337,8 @@ POSTGRESQL_PASSWORD:  7 bytes
 
 [WARNING]
 ====
-Do not reach for `-o jsonpath='{.data}'` here.
-`.data` is a map of key to base64 *value*, so that command prints the secret material itself — to your screen, to your scrollback, and to anyone watching.
-Base64 is encoding, not encryption.
+Do not run `-o jsonpath='{.data}'` here: `.data` holds base64 *values*, and base64 is encoding, not encryption.
+The secret would reach your screen, your scrollback and anyone watching.
 ====
 
 Who owns it?
@@ -341,8 +352,6 @@ oc get secret claims-creds -n {user}-dev -o jsonpath='{.metadata.ownerReferences
 ExternalSecret/claims-creds
 ....
 
-That ownerReference is the whole design in one line. The Secret is not a thing anyone maintains — it is derived, and the thing it is derived from lives outside the cluster's manifests entirely.
-
 Read the mapping that produces it:
 
 [source,sh,role=execute,subs="attributes+"]
@@ -355,13 +364,20 @@ oc get externalsecret claims-creds -n {user}-dev -o jsonpath='{.spec.refreshInte
 claims-db/password
 ....
 
-Fifteen seconds is how often the operator re-checks. `claims-db/password` is *a reference*, not a secret — it is safe to review, diff and publish, which is exactly why it can live in Git when the value cannot.
+*What just happened:* the Secret is *derived*, re-synced every 15 s. `claims-db/password` is a *reference*, not a secret, so it can live in Git.
+
+.Why that ownerReference is the whole design in one line
+[%collapsible]
+====
+The Secret is not a thing anyone maintains. The operator creates it, owns it, and keeps it equal to a value that lives outside the cluster's manifests entirely.
+Delete it and it comes back; edit it by hand and the next refresh overwrites the edit.
+
+The reference is safe to review, diff and publish, which is exactly why it can live in Git when the value cannot.
+====
 
 === Now go looking for the password in Git
 
-Your terminal starts in an empty home directory; the workshop repository is cloned at `/showroom/repo`.
-Search it for a Secret manifest called `claims-creds`.
-`grep -x` matches whole lines only, so `kind: SecretStore` and `kind: ExternalSecret` do not count as a `kind: Secret`:
+Search the workshop repository for a `Secret` named `claims-creds`:
 
 [source,sh,role=execute]
 ----
@@ -369,12 +385,19 @@ cd /showroom/repo
 grep -rl "name: claims-creds" --include="*.yaml" . | xargs grep -lx "kind: Secret" | sort
 ----
 
-You will find two, and *neither* is the one your app is using:
+Two, and *neither* is the one your app uses:
 
 ....
 ./gitops/entry-states/config-multienv/templates/solve-endstate.yaml
 ./gitops/promotion/claims-config-template/base/claims-creds-secret.yaml
 ....
+
+.Why `cd /showroom/repo`, and why `grep -x`?
+[%collapsible]
+====
+Your terminal starts in an empty home directory; the workshop repository is cloned at `/showroom/repo`.
+`grep -x` matches whole lines only, so `kind: SecretStore` and `kind: ExternalSecret` do not count as a `kind: Secret`.
+====
 
 Open the second:
 
@@ -395,9 +418,7 @@ stringData:
   POSTGRESQL_PASSWORD: parasol
 ....
 
-Both files belong to other modules, and both carry the same plaintext value. They are the pattern this module replaces: a password sitting in a repository in plain text, reviewable by anyone with read access, permanent in the history.
-
-Now look at what *this* module's chart creates. List every `Secret` and `ExternalSecret` in it, with the name of each:
+Now list what *this* module's chart ships:
 
 [source,sh,role=execute]
 ----
@@ -415,11 +436,49 @@ secret-store.yaml-72-metadata:
 secret-store.yaml-73-  name: claims-creds
 ....
 
-The chart has one Secret, `openbao-token`, which is the vault's *own* access token. The object it names `claims-creds` is an `ExternalSecret`: the mapping you read above, which says where the value lives and never what it is. No file in the chart holds your application's password. That absence is the lesson, and you just checked it yourself rather than taking anyone's word for it.
+*What just happened:*
+
+[cols="3,3,4",options="header"]
+|===
+| Where | Kind | Holds the app's password?
+
+| Two files from *other* modules
+| `Secret` `claims-creds`
+| Yes, in plain text: what this module replaces
+
+| This chart's `openbao.yaml`
+| `Secret` `openbao-token`
+| No: the vault's *own* access token
+
+| This chart's `secret-store.yaml`
+| `ExternalSecret` `claims-creds`
+| No: only where the value lives
+|===
+
+.Why the first row is the problem
+[%collapsible]
+====
+A password sitting in a repository in plain text is reviewable by anyone with read access and permanent in the history.
+No file in this chart holds your application's password, and you checked that yourself rather than taking anyone's word for it.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* the Secret's owner is `ExternalSecret/claims-creds`, and the chart's only `kind: Secret` is `openbao-token`.
+****
 
 == Exercise 2 — Rotate it, and prove the rotation lands
 
-Record what the Secret holds now. Hash it, so the value never reaches your screen:
+Parasol's auditors want proof that rotating a credential is one write, not a project.
+
+*You'll end with:* the vault at version 2, and the Secret following it with no redeploy.
+
+[mermaid]
+....
+include::example$diagrams/platform-guardrails/06-rotation-follows.mmd[]
+....
+
+Hash the current value, so it never reaches your screen:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -432,31 +491,29 @@ oc exec -n {user}-dev deploy/openbao -- bao kv metadata get -mount=parasol -form
 {"current_version":1}
 ....
 
-Version 1 — the vault has been written once, when this environment was built.
+Version 1: written once, at setup.
 
-Now rotate. The block writes `rotated-by-me`, which always hashes to `8c12416d2611`; any other value works and gives a different hash:
+Rotate it. `rotated-by-me` always hashes to `8c12416d2611`; any other value works too:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
 oc exec -n {user}-dev deploy/openbao -- bao kv put -mount=parasol claims-db password=rotated-by-me
 ----
 
-Watch the Kubernetes Secret follow. Run this a few times over the next twenty seconds:
+*Predict, then run:* will your first read show the new hash? Repeat for twenty seconds:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
 oc get secret claims-creds -n {user}-dev -o jsonpath='{.data.POSTGRESQL_PASSWORD}' | sha256sum | cut -c1-12
 ----
 
-The hash changes within one refresh interval of the write. How long you wait depends on where in the operator's fifteen-second cycle your write lands: under 3 s on one measured run, 15 s on another. The slower one:
+Measured: under 3 s on one run, 15 s on another. The slower one:
 
 ....
 t+3s    690c7bf39c96
 t+9s    690c7bf39c96
 t+15s   8c12416d2611
 ....
-
-Nobody edited a manifest. Nobody redeployed. The `refreshInterval` you read in exercise 1 is exactly the window you just watched.
 
 Confirm the vault agrees:
 
@@ -469,20 +526,46 @@ oc exec -n {user}-dev deploy/openbao -- bao kv metadata get -mount=parasol -form
 {"current_version":2}
 ....
 
-[NOTE]
+*What just happened:* no manifest edit, no redeploy. The window was exercise 1's 15 s `refreshInterval`.
+
+Your *running* app did not notice: it read the password as an environment variable at start.
+
+.Environment variable or mounted volume?
+[%collapsible]
 ====
-Your *running* app did not notice, and that is not a bug — it is the distinction worth taking away.
-`POSTGRESQL_PASSWORD` reaches the container as an environment variable, and environment is read once, at container start.
-The Secret changed; the process did not.
-A Secret mounted as a *volume* is updated in place by the kubelet, and an application that re-reads the file would pick this up without a restart.
-Neither is wrong. They are different, and the difference is invisible until the day you rotate.
+That is not a bug; it is the distinction worth taking away.
+
+[cols="2,5",options="header"]
+|===
+| The Pod reads the Secret as… | When the Secret changes
+
+| An environment variable (this app)
+| Nothing, until the container restarts: environment is read once, at container start
+
+| A mounted volume
+| The kubelet updates the file in place; an app that re-reads it picks up the value with no restart
+|===
+
+Neither is wrong; the difference is invisible until the day you rotate.
 ====
+
+[.checkpoint]
+****
+✔ *Verify:* a new Secret hash (`8c12416d2611` for `rotated-by-me`) and vault `{"current_version":2}`.
+****
 
 == Exercise 3 — Read the rule that is governing you
 
-Everything so far was about a value. This is about a shape.
+So far, a value; now, a shape: one of Parasol's platform rules governs *you*.
 
-There is a `ValidatingAdmissionPolicy` on this cluster that constrains what *you* are allowed to create. Read its rules:
+*You'll end with:* the eight rules, their CEL, and the condition that applies them to you.
+
+[mermaid]
+....
+include::example$diagrams/platform-guardrails/08-policy-decides.mmd[]
+....
+
+Read its rules:
 
 [source,sh,role=execute]
 ----
@@ -500,16 +583,33 @@ oc get validatingadmissionpolicy ogsr-attendee-entry-app-guard -o jsonpath='{ran
 - attendees may only start a plain sync of revision main and may not write Application status
 ....
 
-Eight rules. Now read the expressions that enforce them:
+Now the expressions that enforce them:
 
 [source,sh,role=execute]
 ----
 oc get validatingadmissionpolicy ogsr-attendee-entry-app-guard -o jsonpath='{range .spec.validations[*]}{.expression}{"\n"}{end}'
 ----
 
-These are CEL. Most are one short line; rule 6 is long because it lists every Helm field it forbids. Two things in them are worth noticing: `request.userInfo.username` — the policy is written once and evaluates differently for every attendee — and `has(object.spec.project)`, which guards a field access, because an expression that errors is an expression that cannot decide.
+That is CEL.
 
-Read the condition that decides whether the policy applies at all:
+.Two CEL fragments worth a second look
+[%collapsible]
+====
+Most rules are one short line; rule 6 is long because it lists every Helm field it forbids.
+
+[cols="2,5",options="header"]
+|===
+| Fragment | Why it matters
+
+| `request.userInfo.username`
+| The policy is written once and evaluates differently for every attendee
+
+| `has(object.spec.project)`
+| It guards a field access, because an expression that errors is an expression that cannot decide
+|===
+====
+
+Which requests does it apply to at all?
 
 [source,sh,role=execute]
 ----
@@ -520,11 +620,25 @@ oc get validatingadmissionpolicy ogsr-attendee-entry-app-guard -o jsonpath='{.sp
 'workshop-attendees' in request.userInfo.groups
 ....
 
-That is why the platform team can create whatever they need on this cluster while you cannot. Same policy, different identity.
+*What just happened:* the rules apply only to `workshop-attendees`, so the platform team is unaffected. Same policy, different identity.
+
+[.checkpoint]
+****
+✔ *Verify:* eight messages, and the match condition `'workshop-attendees' in request.userInfo.groups`.
+****
 
 == Exercise 4 — Predict, then break it
 
-Read the eight rules again and *predict* before you run anything: how many of them does this Application break, and which one will the refusal name?
+Parasol's platform team wants proof the rules hold. Break them on purpose.
+
+*You'll end with:* three different answers from the API server, and nothing created.
+
+[mermaid]
+....
+include::example$diagrams/platform-guardrails/09-three-answers.mmd[]
+....
+
+*Predict:* how many of the eight rules does this break, and which will the refusal name?
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -551,9 +665,15 @@ oc create -f /tmp/try-1.yaml
 Error from server (Forbidden): error when creating "/tmp/try-1.yaml": applications.argoproj.io "not-the-right-name" is forbidden: ValidatingAdmissionPolicy 'ogsr-attendee-entry-app-guard' with binding 'ogsr-attendee-entry-app-guard' denied request: attendees may only use their own 'entries-<username>' AppProject
 ....
 
-It breaks *five* of the eight: the project (rule 1), the name (3), the repository (5), the missing Helm parameters (6) and the destination namespace (7). The refusal named only rule 1. A policy reports the first validation that evaluates false, in declaration order. It is not a report card.
+*What just happened:* five rules broken, one named: the first that fails, in declaration order. A refusal is not a report card.
 
-To break exactly *one* rule, start from an Application that satisfies all eight: your own entry Application, the one `ws prep` created for this module. Save a copy of it, change only the source path, and submit that:
+.Which five?
+[%collapsible]
+====
+The project (rule 1), the name (3), the repository (5), the missing Helm parameters (6) and the destination namespace (7).
+====
+
+Now break exactly *one*: copy your own `ws prep` Application, which passes all eight, and change only its source path:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -567,7 +687,9 @@ jq '.spec.source.path = "apps/parasol-claims"' /tmp/mine.json | oc create -f -
 Error from server (Forbidden): error when creating "STDIN": applications.argoproj.io "entry-platform-guardrails-{user}" is forbidden: ValidatingAdmissionPolicy 'ogsr-attendee-entry-app-guard' with binding 'ogsr-attendee-entry-app-guard' denied request: attendees may only source Applications from gitops/entry-states/
 ....
 
-Rule 4, named precisely. To prove the path was the *only* thing wrong, submit the unchanged copy. `--dry-run=server` runs every admission check for real and then stores nothing. The block saves the copy again first, so it also works in a fresh terminal:
+Rule 4, named precisely.
+
+*Predict, then run:* the *unchanged* copy, through `--dry-run=server` (every admission check, nothing stored). `Forbidden` again?
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -581,9 +703,15 @@ oc create --dry-run=server -f /tmp/mine.json
 Error from server (AlreadyExists): error when creating "/tmp/mine.json": applications.argoproj.io "entry-platform-guardrails-{user}" already exists
 ....
 
-`AlreadyExists`, not `Forbidden`. All eight rules admitted the copy, and the request got as far as storage, where the name is already taken by the original. One field changed, one rule refused it.
+*What just happened:* all eight rules admitted the copy; storage refused the duplicate name. One field changed, one rule refused it.
 
-Now confirm what a refusal at admission actually costs:
+.Why the block saves the copy again
+[%collapsible]
+====
+A terminal pod restart empties `/tmp`, so the block saves the copy again first; it also works in a fresh terminal.
+====
+
+What did the refusals cost?
 
 [source,sh,role=execute]
 ----
@@ -594,15 +722,21 @@ oc get application not-the-right-name -n openshift-gitops
 Error from server (NotFound): applications.argoproj.io "not-the-right-name" not found
 ....
 
-Nothing was created. Nothing partially applied. Nothing to clean up. That is the argument for putting the rule at admission rather than in a controller that finds the bad object later and tries to undo it.
+*What just happened:* nothing created, nothing to clean up: the case for admission over a controller that finds bad objects later and must undo them.
 
-[NOTE]
+.Why you do not write a policy here
+[%collapsible]
 ====
 You cannot create a policy of your own here, and the reason is the module's own subject matter.
 `ValidatingAdmissionPolicy` is cluster-scoped, and `oc apply --dry-run=server` is authorized as a real `create` — so "just validating" a cluster-scoped policy still requires cluster-scoped write.
 Granting every attendee that permission, in order to practise guardrails, would remove the guardrail.
 In an organisation this is the same shape: you author the policy, and it reaches the cluster through review and GitOps, not because you had permission to apply it by hand.
 ====
+
+[.checkpoint]
+****
+✔ *Verify:* `Forbidden` naming rules 1 and 4, `AlreadyExists` for the unchanged copy, `NotFound` for `not-the-right-name`.
+****
 
 === Check your work
 
@@ -611,6 +745,12 @@ In an organisation this is the same shape: you author the policy, and it reaches
 ws verify platform-guardrails
 ----
 
-The rotation you performed in exercise 2 is exactly what this grades — it checks that the vault's version counter has moved past 1 and that the Kubernetes Secret still equals what the vault holds *right now*. It deliberately does not check *which* password you chose; grading your own choice of value would print a ❌ over correct work.
+It grades exercise 2: the vault's version is past 1, and the Secret matches the vault *right now*.
+
+.Why not check which password you chose?
+[%collapsible]
+====
+The check deliberately ignores *which* value you wrote. Grading your own choice of value would print a ❌ over correct work.
+====
 
 endif::[]
