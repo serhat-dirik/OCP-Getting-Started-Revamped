@@ -1190,7 +1190,7 @@ wait_healthy() {  # appname [timeout_s] [require_sync]
     sync_ok="true"; [[ "$require_sync" == "true" && "$sync" != "Synced" ]] && sync_ok="false"
     if [[ "$health" == "Healthy" && "$sync_ok" == "true" ]]; then
       if [[ "$phase" == "Succeeded" ]]; then
-        ok "entry state ready (${sync}/Healthy)"
+        ok "${app} ready (${sync}/Healthy)"
         return 0
       fi
       # Empty phase can be a transient window BETWEEN hook retries (M10 G1 flag #3: a failing
@@ -1198,7 +1198,7 @@ wait_healthy() {  # appname [timeout_s] [require_sync]
       if [[ -z "$phase" ]]; then
         empty_ok=$((empty_ok+1))
         if (( empty_ok >= 3 )); then
-          ok "entry state ready (${sync}/Healthy)"
+          ok "${app} ready (${sync}/Healthy)"
           return 0
         fi
       else
@@ -1219,7 +1219,7 @@ wait_healthy() {  # appname [timeout_s] [require_sync]
     if [[ "$phase" == "Failed" || "$phase" == "Error" ]]; then
       fail_ok=$((fail_ok+1))
       if (( fail_ok >= 3 )); then
-        err "entry state sync ${phase} for ${app} — this will not become Healthy by waiting."
+        err "${app} sync ${phase} — this will not become Healthy by waiting."
         echo "   inspect: oc describe application ${app} -n ${ARGO_NS}"
         echo "   a common cause is a dependency still starting (e.g. the RHACS scanner) — retry once it is up."
         return 1
@@ -1229,7 +1229,7 @@ wait_healthy() {  # appname [timeout_s] [require_sync]
     fi
     sleep 5
   done
-  err "entry state not ready after ${timeout}s (health=${health:-?} sync=${sync:-?} op=${phase:-?})"
+  err "${app} not ready after ${timeout}s (health=${health:-?} sync=${sync:-?} op=${phase:-?})"
   echo "   inspect: oc describe application ${app} -n ${ARGO_NS}"
   return 1
 }
@@ -1885,8 +1885,18 @@ cmd_smoke() {
 cmd_reset() {
   local module user="$1"; module="$2"
   need_oc
-  local app; app="$(app_name "$module" "$user")"
   info "resetting ${module} for ${user} (purge + delete + re-materialize)…"
+  reset_purge "$user" "$module"
+  # --no-gc: everything gc_conflicts would do has just been done by reset_purge, once. Without this the
+  # whole purge/evict/delete sequence runs a second time (U8-F-05).
+  cmd_start "$user" "$module" --no-gc
+}
+
+# cmd_reset's purge half, shared with cmd_solve: empty this module's namespaces, evict conflicting
+# modules and delete this module's entry app, so the next materialize starts from nothing.
+reset_purge() {  # user module
+  local module user="$1"; module="$2"
+  local app; app="$(app_name "$module" "$user")"
 
   # ONE purge pass. Prep used to purge every namespace TWICE, re-purge the RBAC twice and delete
   # this module's Application twice, because cmd_start -> gc_conflicts repeated everything
@@ -1938,9 +1948,6 @@ cmd_reset() {
   else
     info "no existing entry app — clean start"
   fi
-  # --no-gc: everything gc_conflicts would do has just been done above, once. Without this the
-  # whole purge/evict/delete sequence runs a second time (U8-F-05).
-  cmd_start "$user" "$module" --no-gc
 }
 
 cmd_solve() {  # instructor: materialize the module END state (entry chart with solve=true)
@@ -1949,7 +1956,14 @@ cmd_solve() {  # instructor: materialize the module END state (entry chart with 
   require_entry_dir "$module"
   grep -q '^solve:' "${ENTRY_DIR}/${module}/values.yaml" 2>/dev/null \
     || die "${module}'s chart defines no solve state (values.yaml lacks 'solve:')"
-  gc_conflicts "$user" "$module"
+  # PURGE THIS MODULE'S OWN NAMESPACES TOO, not only the conflicting modules'. On a namespace where
+  # the lab was partly done, the attendee's hand edits survive the solve apply (client-side apply
+  # leaves fields it never set), Argo reports the object OutOfSync for good, and the Synced wait
+  # below ran out its whole budget and printed ❌ on a correct end state. Measured 2026-11-14:
+  # `adm solve platform-orientation --user user28` after `oc set resources` on parasol-web sat
+  # 300 s and failed; the same solve on an untouched user finished Synced. solve is the finished
+  # lab from a clean start, so whatever was there is discarded — as reset does.
+  reset_purge "$user" "$module"
 
   # ENTRY FIRST, then solve. Found 2026-07-31 by running `ws solve serverless-zero-to-hero` against a
   # namespace that had never been started: it produced a ksvc stuck Ready=False / RevisionMissing and
@@ -4605,6 +4619,14 @@ cmd_status() {  # SA everyday cohort-health dashboard. READ-ONLY. [--user U] sco
   local who server
   who="$(oc whoami 2>/dev/null || true)"
   server="$(oc whoami --show-server 2>/dev/null || true)"
+  # Every row below reads cluster-scoped or ogsr-* objects. Run as an attendee, each read comes back
+  # Forbidden and the rows printed "absent" / "install incomplete" / "is the workshop layer
+  # installed?" on a healthy cluster (user28 in the cockpit, 2026-11-14). Attempt one real
+  # admin-only read and stop with the actual reason instead.
+  local probe
+  if ! probe="$(oc get namespace ogsr-system -o name 2>&1)" && grep -qi forbidden <<<"$probe"; then
+    die "${WS_CMD} status needs cluster-admin — you are signed in as ${who:-?}. Run it from the SA kubeconfig; an attendee checks a module with: ws verify <module>"
+  fi
   echo "${WS_CMD} status — workshop cohort health   (cluster: ${server:-?} as ${who:-?})"
   echo
 
