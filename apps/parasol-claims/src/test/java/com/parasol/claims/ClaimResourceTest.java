@@ -302,7 +302,7 @@ class ClaimResourceTest {
                 .body("claimNumber", is("CLM-1001"));
     }
 
-    /** The observability-health-scale N+1 endpoint returns the seeded timeline, oldest event first. */
+    /** The observability-metrics-traces N+1 endpoint returns the seeded timeline, oldest event first. */
     @Test
     void historyReturnsSeededTimeline() {
         given()

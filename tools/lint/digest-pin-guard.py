@@ -83,7 +83,7 @@ DELIBERATELY OUT OF SCOPE, so nobody reads a green tick as more than it is:
 
 TIER 3 AND THE CARVE-OUT IT REPLACES.
 
-The old note here said `content/**` was out of scope entirely, and named observability-health-scale's
+The old note here said `content/**` was out of scope entirely, and named observability-metrics-traces's
 hand-typed `claims-burst` as "a real finding awaiting its module owner". It waited 32 days. The sweep
 that repinned 44 sibling `ose-cli:latest` references walked straight past it, because the sweep read
 manifests and this one was a command an attendee TYPES; the module's own troubleshooting page already
@@ -102,7 +102,7 @@ design of this tier. Content legitimately contains image references a linter mus
      `ubi9/openjdk-17@sha256:...`, which a naive check reports as a MALFORMED digest — the worse of
      this file's two findings, raised against a line nobody may edit.
   3. A dated `//` provenance comment recording what a command looked like on the day it was
-     measured (`observability-health-scale/lab.adoc`, the 2026-07-31 as-run record that still names
+     measured (`observability-metrics-traces/lab.adoc`, the 2026-07-31 as-run record that still names
      `ose-cli:latest` on purpose), plus prose that names an old tag precisely in order to warn about
      it. "Fixing" either would make it claim a run that never happened.
 
@@ -831,7 +831,7 @@ def self_test() -> int:
              "// GROUNDING 2026-07-31: driven with the exact command AS IT THEN STOOD —\n"
              f"// `oc -n user3-dev run claims-burst --image={floating_ref} --restart=Never`.\n", 0,
              "a dated // provenance comment was flagged. That is "
-             "observability-health-scale/lab.adoc:666, deliberately left as-run; 'fixing' it makes "
+             "observability-metrics-traces/lab.adoc:666, deliberately left as-run; 'fixing' it makes "
              "it claim a measurement that never took place"),
             ("kind3-prose.adoc",
              anchor_block +

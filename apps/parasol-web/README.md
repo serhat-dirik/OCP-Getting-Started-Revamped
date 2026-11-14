@@ -108,4 +108,4 @@ None. This service is deliberately simple and correct.
 
 The workshop's deliberate faults live elsewhere: a seeded vulnerable dependency on a
 `parasol-claims` branch (*Trusted Software Supply Chain*) and an N+1 query endpoint on
-`parasol-claims` (*Observability, Health & Scale*).
+`parasol-claims` (*Observability: Metrics, Alerts, Dashboards & Traces*).

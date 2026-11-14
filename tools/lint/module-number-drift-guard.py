@@ -147,7 +147,7 @@ def report(bad_range: list, bad_witness: list) -> int:
     for path, lineno, got, slug, want, body in bad_witness:
         got_s = "/".join(f"M{g:02d}" for g in got)
         # Do NOT say "the number is wrong" — it may not be. A line can legitimately reference TWO
-        # modules, e.g. "(curriculum: M04, observability-health-scale)", where M04 is config-multienv
+        # modules, e.g. "(curriculum: M04, observability-metrics-traces)", where M04 is config-multienv
         # and both halves are correct. What is actually wrong is the MIXED notation: half named,
         # half numbered, so a reader cannot tell whether the number is a second module or a stale
         # copy of the first. Naming both resolves it and cannot rot at the next reorder.

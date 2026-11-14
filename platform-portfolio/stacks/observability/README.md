@@ -1,6 +1,6 @@
 # stack: observability
 
-The platform prerequisite for **M13 — Observability, Health & Scale**. Installs shared, cluster-wide
+The platform prerequisite for **M08 — Observability: Metrics, Alerts, Dashboards & Traces**. Installs shared, cluster-wide
 observability infrastructure as an Argo CD app-of-apps. Everything here is a **single shared install** —
 never per-user; per-user isolation is done with namespaced `ServiceMonitor`/`PrometheusRule` and RBAC
 (the M13 entry state's job, below).
@@ -50,7 +50,7 @@ stays low by construction — the shared-cluster-safe default.
 ## The M13 entry-state seam (NOT installed here)
 
 This stack is workshop-agnostic. The **per-user** wiring is the M13 entry state's job
-(`gitops/entry-states/observability-health-scale/`, built separately) and layers on top of this shared infra:
+(`gitops/entry-states/observability-metrics-traces/`, built separately) and layers on top of this shared infra:
 
 - Flip OTLP export on `parasol-claims`: `QUARKUS_OTEL_SDK_DISABLED=false` and
   `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.ogsr-observability-workshop.svc.cluster.local:4317`.

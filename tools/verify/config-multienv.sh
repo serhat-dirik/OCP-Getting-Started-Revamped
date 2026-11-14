@@ -58,7 +58,7 @@ deploy_absent() {
 # before the promotion beat passed every entry check, so `ws prep`'s fast path returned "already
 # prepared — nothing to do" WITHOUT purging and the next pass hard-failed on its own commands.
 # Same class as the serverless-zero-to-hero orphan-revision defect measured 2026-07-31; the fix is the
-# same shape observability-health-scale/networking-dev-devops already use (assert the clean slate you claim).
+# same shape observability-metrics-traces/networking-dev-devops already use (assert the clean slate you claim).
 obj_absent() {
   oc_present get ns "$3" -o name || return 1
   oc_absent  get "$1" "$2" -n "$3" -o name

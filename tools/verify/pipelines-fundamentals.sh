@@ -160,7 +160,7 @@ check "curated library task image-size-report reachable"  oc get tasks.tekton.de
 # The Task existing is not the outcome: lab.adoc's step has the ATTENDEE run this exact `oc get`
 # cross-namespace, which only works through the per-user parasol-tasks-readers RoleBinding. Read as
 # admin it is green even with that binding gone. Impersonate where we can; the attendee's own run is
-# already the attendee answer (same idiom as observability-health-scale).
+# already the attendee answer (same idiom as observability-metrics-traces).
 check "attendee can read the curated task library (parasol-tasks-readers)" attendee_reads_task_library || hint "the graded cross-namespace read in the lab returns Forbidden — the ${USER_NAME} parasol-tasks-readers RoleBinding in ogsr-parasol-tasks is missing; sync workshop-config"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then

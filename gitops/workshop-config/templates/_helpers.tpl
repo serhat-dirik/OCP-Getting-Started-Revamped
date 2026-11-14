@@ -78,7 +78,7 @@ Why each one is on it (kind list from that same render, 2026-08-01):
 {{/*
 workshop-config.moduleEnabled — is module <slug> part of THIS delivery?
 
-Call: include "workshop-config.moduleEnabled" (dict "root" $ "slug" "observability-health-scale")
+Call: include "workshop-config.moduleEnabled" (dict "root" $ "slug" "observability-metrics-traces")
 Returns the string "true" when the module is enabled and the EMPTY string when it is not, so the
 result is directly usable as a template condition:
 
@@ -98,7 +98,7 @@ un-appliable object fails the ENTIRE workshop-config app: no cockpits, no attend
 Gitea seeding. A documented input produced a broken install.
 
 Measured before the fix (`helm template gitops/workshop-config --set userCount=2
---set modulesDisabledCSV=observability-health-scale`): the tempo-jaegerui-viewer Role and RoleBinding
+--set modulesDisabledCSV=observability-metrics-traces`): the tempo-jaegerui-viewer Role and RoleBinding
 still rendered into ogsr-observability-workshop, a namespace only the `observability` stack creates
 and which that very input tells the installer not to install.
 

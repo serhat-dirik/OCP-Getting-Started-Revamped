@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify observability-health-scale — Observability: Metrics, Alerts, Dashboards & Traces.
+# Verify observability-metrics-traces — Observability: Metrics, Alerts, Dashboards & Traces.
 #   Entry: {user}-dev has the INSTRUMENTED claims app (OTLP export ON → the shared collector) + an
 #          ephemeral claims-db + a load generator, plus a per-user ServiceMonitor; /q/metrics exposes
 #          the golden signals and the custom claims_created_total. The alert rule the lab builds
@@ -221,17 +221,17 @@ perses_dashboard_panels_at_least() {
 }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
-check "namespace ${NS} exists"                            oc get ns "$NS"                               || hint "run: ws prep observability-health-scale (or ws start observability-health-scale --user ${USER_NAME})"
-check "entry marker ws-entry-observability-health-scale present"                 oc get cm ws-entry-observability-health-scale -n "$NS"               || hint "entry app not synced — ws prep observability-health-scale (or ws start observability-health-scale --user ${USER_NAME})"
+check "namespace ${NS} exists"                            oc get ns "$NS"                               || hint "run: ws prep observability-metrics-traces (or ws start observability-metrics-traces --user ${USER_NAME})"
+check "entry marker ws-entry-observability-metrics-traces present"                 oc get cm ws-entry-observability-metrics-traces -n "$NS"               || hint "entry app not synced — ws prep observability-metrics-traces (or ws start observability-metrics-traces --user ${USER_NAME})"
 check "workshop quota present in ${NS}"                   oc get resourcequota workshop-quota -n "$NS"  || hint "workshop layer not applied — run bootstrap/install.sh"
 check "claims-db deployment has >=1 ready replica"        deploy_ready claims-db "$NS"                  || hint "wait for rollout: oc rollout status deploy/claims-db -n ${NS}"
 check "parasol-claims deployment has >=1 ready replica"   deploy_ready parasol-claims "$NS"             || hint "wait for rollout: oc rollout status deploy/parasol-claims -n ${NS}"
 check "claims Route answers 200 (/q/health/ready)"        route_ready_200                               || hint "claims app not ready — check: oc get pods -n ${NS}"
-check "parasol-claims has OpenTelemetry export ON"        claims_otel_enabled                           || hint "OTLP disabled — entry sets QUARKUS_OTEL_SDK_DISABLED=false; ws reset observability-health-scale --user ${USER_NAME}"
-check "parasol-claims exports OTLP to shared collector"   claims_otel_endpoint                          || hint "OTEL endpoint unset — should point at otel-collector.ogsr-observability-workshop; ws reset observability-health-scale"
-check "ServiceMonitor parasol-claims present"             oc get servicemonitor parasol-claims -n "$NS" || hint "per-user metrics wiring missing — ws reset observability-health-scale --user ${USER_NAME}"
-check "ServiceMonitor scrapes every 10s (alert-beat determinism)" servicemonitor_scrape_10s          || hint "entry ships a 10s scrape so the Ex4 alert fires deterministically; a 30s interval re-introduces the flake — ws reset observability-health-scale --user ${USER_NAME}"
-check "load generator claims-load has >=1 ready replica"  deploy_ready claims-load "$NS"                || hint "load generator missing — ws reset observability-health-scale --user ${USER_NAME}"
+check "parasol-claims has OpenTelemetry export ON"        claims_otel_enabled                           || hint "OTLP disabled — entry sets QUARKUS_OTEL_SDK_DISABLED=false; ws reset observability-metrics-traces --user ${USER_NAME}"
+check "parasol-claims exports OTLP to shared collector"   claims_otel_endpoint                          || hint "OTEL endpoint unset — should point at otel-collector.ogsr-observability-workshop; ws reset observability-metrics-traces"
+check "ServiceMonitor parasol-claims present"             oc get servicemonitor parasol-claims -n "$NS" || hint "per-user metrics wiring missing — ws reset observability-metrics-traces --user ${USER_NAME}"
+check "ServiceMonitor scrapes every 10s (alert-beat determinism)" servicemonitor_scrape_10s          || hint "entry ships a 10s scrape so the Ex4 alert fires deterministically; a 30s interval re-introduces the flake — ws reset observability-metrics-traces --user ${USER_NAME}"
+check "load generator claims-load has >=1 ready replica"  deploy_ready claims-load "$NS"                || hint "load generator missing — ws reset observability-metrics-traces --user ${USER_NAME}"
 check "/q/metrics exposes http_server_requests (golden signals)" metrics_expose http_server_requests_seconds || hint "metrics endpoint not answering — check: oc get pods -n ${NS}"
 check "/q/metrics exposes claims_created_total (custom metric)"  metrics_expose claims_created_total         || hint "custom counter absent — the load generator POSTs claims to register it; check: oc logs deploy/claims-load -n ${NS}"
 check "attendee can read alerting rules in ${NS} (tenancy RBAC)" attendee_reads_namespaced_rules            || hint "the project-scoped Alerting rules page would be EMPTY — the workshop layer's ${USER_NAME}-monitoring-edit RoleBinding is missing; run bootstrap/install.sh"
@@ -242,14 +242,14 @@ check "attendee can read alerting rules in ${NS} (tenancy RBAC)" attendee_reads_
 tenancy_rules_fetch
 if [[ "$TENANCY_STATE" == "unreachable" ]]; then
   warn "project-scoped Alerting rules endpoint unreachable from here — attendee-visibility check"
-  hint "run it where the attendee is — from the cockpit terminal: ws verify observability-health-scale (thanos-querier:9093 is in-cluster only, it has no Route, so an off-cluster run cannot answer this)"
+  hint "run it where the attendee is — from the cockpit terminal: ws verify observability-metrics-traces (thanos-querier:9093 is in-cluster only, it has no Route, so an off-cluster run cannot answer this)"
 else
   check "project-scoped Alerting rules endpoint answers for ${NS}"  tenancy_endpoint_ok                     || hint "UWM tenancy rules API rejected this identity (401/403) — the attendee's Alerting rules page would be empty; check the monitoring-edit RoleBinding and that enableUserWorkload is true"
 fi
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: the alert rule the lab builds does NOT exist yet ---------------------------
-  check "no PrometheusRule yet (alert beat not started)"            no_rule_yet  || hint "entry state has no alert rule — ws reset observability-health-scale --user ${USER_NAME}"
+  check "no PrometheusRule yet (alert beat not started)"            no_rule_yet  || hint "entry state has no alert rule — ws reset observability-metrics-traces --user ${USER_NAME}"
 else
   # --- end state: the lab's outcomes exist (alert + dashboard) ---------------------------------
   info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"

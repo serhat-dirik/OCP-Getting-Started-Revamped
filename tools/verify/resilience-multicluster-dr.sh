@@ -101,7 +101,7 @@ ns_discovery_labeled() {
 }
 
 # A site's claims service is RESILIENT: the Deployment is present with >=2 desired replicas, a PDB, and an
-# HPA (the observability-health-scale/deployment-targets-scheduling primitives the in-site resiliency beat leans on): $1=namespace.
+# HPA (the health-resources-autoscaling/deployment-targets-scheduling primitives the in-site resiliency beat leans on): $1=namespace.
 site_resilient() {
   local ns="$1"
   oc_present get deploy parasol-claims -n "$ns" -o name || return 1

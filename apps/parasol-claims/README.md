@@ -158,8 +158,8 @@ its compact, un-prettified format stay covered by `RootResourceSiteTest`.
   `quarkus-oidc` and `quarkus-oidc-client` (tenant disabled by default — see below).
 - A **CycloneDX SBOM** is emitted on every build.
 - Health, metrics, tracing and externalized configuration are **on by default**. They are
-  curriculum for *Config, Secrets & Multi-Environment* and *Observability, Health & Scale*, not
-  optional extras.
+  curriculum for *Config, Secrets & Multi-Environment*, *Health, Resources & Autoscaling* and
+  *Observability: Metrics, Alerts, Dashboards & Traces*, not optional extras.
 
 ## Logging — structured on request, and never a credential
 
@@ -285,8 +285,8 @@ oc start-build parasol-claims -n ogsr-parasol-images --follow
 Three deliberate teaching devices: two always-on faults and one break-fix toggle that ships
 green.
 
-1. **N+1 query on `GET /api/claims/{claimNumber}/history`** — for *Observability, Health &
-   Scale*. The endpoint fetches the claim's event IDs in one query, then loads each event by
+1. **N+1 query on `GET /api/claims/{claimNumber}/history`** — for *Observability: Metrics,
+   Alerts, Dashboards & Traces*. The endpoint fetches the claim's event IDs in one query, then loads each event by
    primary key in a loop: `1 + N` SELECTs, one JDBC span per event in the trace. `CLM-1001` has
    five events, so six queries. The one-line fix is that module's payoff — do **not** optimize
    it here.

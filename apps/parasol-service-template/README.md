@@ -12,7 +12,7 @@ everything the workshop expects.
 
 - **Quarkus 3.33 LTS**, **Java 21** (`maven.compiler.release=21`), `fast-jar`.
 - Health probes (`/q/health/*`), Prometheus metrics (`/q/metrics`), and
-  OpenTelemetry — **on by default** (exporter off until *Observability, Health & Scale*).
+  OpenTelemetry — **on by default** (exporter off until *Observability: Metrics, Alerts, Dashboards & Traces*).
 - A UBI9 multi-stage `Containerfile` (`ubi9/openjdk-21:1.24`), non-root USER 185.
 - A Dev Spaces `devfile.yaml` pinned to **JDK 21**.
 - A Backstage `catalog-info.yaml` (auto-registered), an `openshift/buildconfig.yaml`,

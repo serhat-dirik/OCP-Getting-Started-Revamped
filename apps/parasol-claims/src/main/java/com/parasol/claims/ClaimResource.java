@@ -114,7 +114,7 @@ public class ClaimResource {
     private static final int DEFAULT_PAGE_SIZE = 20;
     private static final int MAX_PAGE_SIZE = 100;
 
-    /** Micrometer registry for the custom business metric (curriculum: observability-health-scale). */
+    /** Micrometer registry for the custom business metric (curriculum: observability-metrics-traces). */
     @Inject
     MeterRegistry registry;
 
@@ -159,7 +159,7 @@ public class ClaimResource {
     /**
      * A claim's audit timeline.
      *
-     * <p><strong>Deliberate N+1 query pattern (curriculum: observability-health-scale).</strong>
+     * <p><strong>Deliberate N+1 query pattern (curriculum: observability-metrics-traces).</strong>
      * This method first runs ONE query to fetch the ids of the claim's events, then loads each
      * event individually by primary key in a loop — so a claim with N events costs
      * {@code 1 + N} SELECTs. Every {@code findById} shows as its own JDBC span in the
@@ -236,7 +236,7 @@ public class ClaimResource {
         claim.adjuster = isBlank(input.adjuster()) ? UNASSIGNED : input.adjuster();
         claim.status = "Submitted";
         claim.persist();
-        // Custom business metric (curriculum: observability-health-scale). Micrometer
+        // Custom business metric (curriculum: observability-metrics-traces). Micrometer
         // appends _total to counters, so this is scraped at /q/metrics as claims_created_total.
         registry.counter("claims_created").increment();
         // A business event, at INFO: state changed and the record now exists. Fields, not a

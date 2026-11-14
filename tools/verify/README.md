@@ -68,7 +68,7 @@ rather than reading the route cross-namespace, and so on). The two bullets below
   an RBAC denial. Shared, correct implementations of the common predicates — `deploy_ready`,
   `deploy_ready_min`, `cm_key_set` — live in `_lib.sh`; do not copy them back into a module.
 - **Prove the ATTENDEE-visible state, not the admin-visible one.** An object existing is not proof the
-  attendee's page, UI or API call works — `observability-health-scale` shipped a green
+  attendee's page, UI or API call works — `observability-metrics-traces` shipped a green
   `oc get prometheusrule` while the attendee's Alerting rules page was empty (403 on the backing API).
   Where a check backs an attendee-facing claim, assert it as the attendee: `oc auth can-i` with literal
   `--as=<user> --as-group=workshop-attendees` when the caller can impersonate (admin/CI) and plain

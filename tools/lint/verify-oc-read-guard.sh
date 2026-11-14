@@ -258,7 +258,7 @@ ok()   { echo "✅ $*"; }
 #
 # ── 2026-08-01, SEVENTH PASS: 33 → 14 ─────────────────────────────────────────────────────────────
 # Seven more rows reach ZERO and are DELETED (an absent file defaults to baseline 0, so deleting the
-# row is what protects it): securing-apps-keycloak (5), build-deliver (4), observability-health-scale
+# row is what protects it): securing-apps-keycloak (5), build-deliver (4), observability-metrics-traces
 # (2), trusted-supply-chain (2), developer-hub-golden-paths (1), devspaces-inner-loop (1),
 # pipelines-fundamentals (1). platform-orientation falls 5 → 2 and KEEPS its row. No file's count rose.
 #

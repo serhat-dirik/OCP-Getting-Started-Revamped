@@ -13,7 +13,7 @@ Two templates in gitops/workshop-config rendered namespaced resources into exact
 
   * templates/tempo-jaegerui-access.yaml had NO enable guard at all — a Role and a RoleBinding always
     landed in ogsr-observability-workshop, which only the `observability` stack creates, and only
-    observability-health-scale requires that stack;
+    observability-metrics-traces requires that stack;
   * templates/sonarqube-user-seed.yaml HAD a `.Values.sonarqube.enabled` guard, and nothing in the
     repo ever set that value — not bootstrap/install.sh's helm.parameters, not helm/bootstrap — so a
     ServiceAccount, Role, RoleBinding and Job always landed in `sonarqube`, created only by the
@@ -21,7 +21,7 @@ Two templates in gitops/workshop-config rendered namespaced resources into exact
 
 An Argo CD Application is all-or-nothing at sync, so ONE un-appliable object fails the WHOLE
 workshop-config app: no cockpits, no attendee namespaces, no Gitea seeding. `modules_disabled:
-[observability-health-scale]` — printed as an example in vars.example.yaml — produced a broken
+[observability-metrics-traces]` — printed as an example in vars.example.yaml — produced a broken
 install. That is why it was a SEV1 and not a cosmetic finding.
 
 The second bullet is the reason this guard checks BEHAVIOUR rather than looking for `if` statements:
@@ -518,7 +518,7 @@ def _mutate_drop_tempo_guard(chart: Path) -> None:
     path = chart / "templates" / "tempo-jaegerui-access.yaml"
     text = path.read_text()
     guard = ('{{- if include "workshop-config.moduleEnabled" '
-             '(dict "root" $ "slug" "observability-health-scale") }}\n')
+             '(dict "root" $ "slug" "observability-metrics-traces") }}\n')
     if guard not in text or not text.rstrip().endswith("{{- end }}"):
         raise Uninspectable(
             "self-test cannot plant the tempo canary — tempo-jaegerui-access.yaml no longer has "

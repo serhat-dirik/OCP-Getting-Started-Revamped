@@ -54,7 +54,7 @@ cluster log aggregation as **concept-level prose only**. That is not a gap waiti
   stack? That's what I came for."* — is that the tier is downstream of what the application emits, and a
   collector cannot name a field nobody wrote. The instructor guide tells the deliverer, in as many words,
   not to take that question into a terminal.
-- `content/modules/ROOT/pages/observability-health-scale/wrapup.adoc` makes the matching deferral from the
+- `content/modules/ROOT/pages/observability-metrics-traces/wrapup.adoc` makes the matching deferral from the
   other side.
 
 **The chronology matters.** This component predates the ruling. Its own inline comments and the stack

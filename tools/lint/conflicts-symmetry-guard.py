@@ -11,7 +11,7 @@ It failed the first time it was tested. `application-logging` landed on 2026-08-
 `adm start <any of the 18>` over a materialized `application-logging` does not garbage-collect it,
 so a dormant `entry-application-logging-<user>` Application is left behind owning a Deployment in
 the namespace the new module is about to use. That is the same shape as the G4 SEV2 that
-`observability-health-scale` hit on 2026-07-12 — found then by an attendee, not by CI.
+`observability-metrics-traces` hit on 2026-07-12 — found then by an attendee, not by CI.
 
 Adding a module to the catalogue is exactly when this breaks, and exactly when nobody is looking
 at the other 18 files.
