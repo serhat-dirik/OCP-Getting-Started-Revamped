@@ -1256,11 +1256,14 @@ cmd_list() {
   heal_if_behind   # a just-published module should list here without a pod restart (mirror-clone only)
   require_modules_yaml
   echo "Modules (number = catalog position; entry state keyed by slug):"
-  local i=0 slug title
+  local i=0 slug title off
+  off="$(disabled_csv)"   # read once, not per row
   while IFS=$'\t' read -r slug title; do
     [[ -n "$slug" ]] || continue
     i=$((i+1))
-    if [[ -d "${ENTRY_DIR}/${slug}" ]]; then
+    if [[ "$off" == *",${slug},"* ]]; then
+      printf "  %2d  %-34s %s  (not in this delivery)\n" "$i" "$slug" "${title:-—}"
+    elif [[ -d "${ENTRY_DIR}/${slug}" ]]; then
       printf "  %2d  %-34s %s\n" "$i" "$slug" "${title:-—}"
     else
       printf "  %2d  %-34s %s  (no entry state yet)\n" "$i" "$slug" "${title:-—}"
@@ -3875,6 +3878,23 @@ live_user_count() {  # → workshop-config Application's LIVE userCount helm par
     -o jsonpath='{.spec.source.helm.parameters[?(@.name=="userCount")].value}' 2>/dev/null || true
 }
 
+module_disabled() {  # slug → rc 0 when this delivery's install left the module out. The install
+  # (bootstrap/install.sh and helm/bootstrap alike) passes the disabled slugs to workshop-config as the
+  # comma-joined helm parameter modulesDisabledCSV, and attendees may read that Application. Until
+  # 2026-11-14 only the cockpit nav honoured it: `ws prep` still built a disabled module and, when the
+  # install had skipped its platform stack or the cluster could not host it, waited out the whole sync
+  # budget. FAIL-OPEN on purpose: an unreadable or absent workshop-config (pre-install, a bare chart
+  # run) blocks nothing — this saves a wait, it is not an authorization boundary.
+  local csv; csv="$(disabled_csv)"
+  [[ "$csv" == *",${1},"* ]]
+}
+disabled_csv() {  # → ",slug1,slug2," (delimited both ends for an exact-token match), or "," if none/unreadable
+  local csv
+  csv="$(oc get application workshop-config -n "$ARGO_NS" \
+    -o jsonpath='{.spec.source.helm.parameters[?(@.name=="modulesDisabledCSV")].value}' 2>/dev/null || true)"
+  echo ",${csv// /},"
+}
+
 cmd_passwd() {  # SA/admin: rotate the shared workshop login password for the whole cohort. The password
   # lives in ONE place, the workshop-user-creds secret (Gitea ns, key 'password'); every account that uses
   # it is re-seeded from there by workshop-config's Sync hooks: cluster-idp-users (the cluster sign-in, in
@@ -6118,6 +6138,13 @@ main() {
   esac
   case "$cmd" in
     prep|start|verify|smoke|reset|solve)      module="$(module_arg "$module")" || exit $?;;
+  esac
+  # Refuse BEFORE anything is created — see module_disabled. verify stays allowed: it only reads.
+  case "$cmd" in
+    prep|start|smoke|reset|solve)
+      if module_disabled "$module"; then
+        die "${module} is not part of this workshop delivery — the install left it out, so it cannot be set up here. See the modules you can run: ${WS_CMD} list"
+      fi;;
   esac
   case "$cmd" in
     list)        cmd_list;;
