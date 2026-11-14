@@ -24,17 +24,17 @@ include::partial$prep-before-you-teach.adoc[]
 
 == Timing
 
-Total core (exercises 1–6): *~40 min*; with ~15 min of concept up front that's ~55 min, and the optional advanced-gateway encore adds ~8 min.
+Total core (exercises 1–6): *~45 min*; with ~15 min of concept up front that's ~60 min, and the optional advanced-gateway encore adds ~8 min.
 
 [cols="1,4,1,2",options="header"]
 |===
 | # | Exercise group | Attendee time | Measured core
 
-| 1 | Enroll the app into the mesh | ~7 min | 3 injected rollouts *~30–40 s each* (cache-warm node); the namespace-label `Forbidden` is instant; the rest is reading the native-sidecar structure
-| 2 | Prove mutual TLS (STRICT) | ~7 min | `PeerAuthentication` apply + *~5 s* proxy pickup; the curl block/allow and the SPIFFE cert read are instant
-| 3 | See the mesh in Kiali | ~7 min | traffic generation *~45 s* (paced to outlast the 30 s metrics scrape); the rest is opening Kiali and orienting on the graph
-| 4 | Shift traffic between versions | ~7 min | v2 rollout *~30–40 s*; the 200-request measurement loop *6.1 s*; `istioctl` reads instant
-| 5 | Resilience: faults, timeouts, breaker | ~7 min | the faulted call *5.0 s* (the injected delay); `istioctl` cluster read instant
+| 1 | Enroll the app into the mesh | ~8 min | 3 injected rollouts *~30–40 s each* (cache-warm node; *32 s* for all three on 2026-11-14); the namespace-label `Forbidden` is instant; the rest is reading the native-sidecar structure and the *Service Mesh* → *Workloads* list
+| 2 | Prove mutual TLS (STRICT) | ~7 min | `PeerAuthentication` apply + *~5 s* proxy pickup; the curl block/allow and the SPIFFE cert read are instant; the *Overview* lock is a glance
+| 3 | See the mesh in the console | ~7 min | traffic generation *~45 s* (measured *47 s*, paced to outlast the 30 s metrics scrape); the rest is opening *Service Mesh* → *Traffic Graph* and orienting on it
+| 4 | Shift traffic between versions | ~9 min | v2 rollout *~30–40 s*; the 200-request measurement loop *6.1 s*; the paced split loop *52 s*; the subset-typo break and fix *~10 s* of commands plus the *Istio Config* read
+| 5 | Resilience: faults, timeouts, breaker | ~8 min | the faulted call *5.0 s* (the injected delay); the paced slow loop *50 s*; `istioctl` cluster read instant
 | 6 | Secure with AuthorizationPolicy | ~5 min | policy apply + *~5 s* pickup; the three curls instant
 | 7 | Advanced gateways `[OPTIONAL ENCORE]` | ~8 min | gateway rollout *~30–40 s*; the raw-TCP and rate-limit tests instant
 |===
@@ -44,7 +44,8 @@ Total core (exercises 1–6): *~40 min*; with ~15 min of concept up front that's
 ====
 On the build cluster (OCP 4.21.22, Kubernetes 1.34) on 2026-07-13, every exercise was performed as `user4` against the live OpenShift Service Mesh 3.3.5 control plane and timed.
 The `oc` commands themselves are fast: applying a mesh custom resource is instant; a proxy picks up a new policy in about 5 seconds; a 200-request in-pod loop runs in *6.1 s*; the injected 5-second fault call takes *5.0 s* on the nose.
-The real time-sink is the *rollouts*: each enrolled tier restarts to gain its sidecar (*~30–40 s* on a cache-warm node), and exercises 1, 4, and 7 each roll at least one Deployment. Budget for the rollouts and for *reading* — the SPIFFE identity, the Kiali graph, the telemetry split — not for command latency.
+The real time-sink is the *rollouts*: each enrolled tier restarts to gain its sidecar (*~30–40 s* on a cache-warm node), and exercises 1, 4, and 7 each roll at least one Deployment. Budget for the rollouts and for *reading* — the SPIFFE identity, the console's *Service Mesh* views, the telemetry split — not for command latency.
+On 2026-11-14 exercises 1–6 were re-run as `user11` in the real attendee terminal with the console's *Service Mesh* section installed: the three paced graph loops are *47 s*, *52 s* and *50 s*, and they are the only new waits.
 ====
 
 == How to know the room can move on
@@ -90,15 +91,17 @@ oc auth can-i get imagestreams --subresource=layers -n ogsr-parasol-images \
 +
 Expect `yes` — the grant *ships* in workshop-config (`gitops/workshop-config/templates/parasol-images-pull.yaml` includes the `"mesh"` suffix in the `workshop-image-pullers` RoleBinding); this check verifies the layer is actually synced on *this* cluster. If it prints `no`, sync the workshop-config Argo application — until it lands, an enrollment rollout that schedules a pod onto a node without the image cached fails `ImagePullBackOff` (`authentication required`). Two trip-wires when running the check: it must use `--subresource=layers` (the slash form `can-i get imagestreams/layers` parses as TYPE/NAME and prints `no` for every SA, always), and impersonating an SA drops group memberships — this particular grant covers the `system:serviceaccounts:user4-mesh` group, which plain `--as` *does* carry, so the form above is reliable.
 
-. *Kiali is reachable at its route.*
+. *Kiali is in the console, and reachable at its route.*
 +
 [source,sh,role=execute]
 ----
+oc get consoles.operator.openshift.io cluster -o jsonpath='{.spec.plugins}' | grep -o ossmconsole
+oc get deploy ossmconsole -n istio-system -o jsonpath='ossmconsole ready={.status.readyReplicas}{"\n"}'
 oc get route kiali -n istio-system -o jsonpath='https://{.spec.host}{"\n"}'
 oc logs -n istio-system deploy/kiali --since=10m | grep -c 'Prometheus unreachable'
 ----
 +
-Expect `\https://kiali-istio-system.{cluster_domain}` and `0`. Attendees open Kiali in exercise 3 through the cluster's single sign-in; Kiali scopes visible namespaces to their OpenShift RBAC, so `user4` sees `user4-mesh`. A non-zero count means Kiali cannot reach the cluster's Thanos querier, and every graph will be empty: check `oc get kiali kiali -n istio-system -o jsonpath='{.spec.external_services.prometheus.url}'` and that user-workload monitoring is enabled.
+Expect `ossmconsole`, `ossmconsole ready=1`, `\https://kiali-istio-system.{cluster_domain}` and `0`. The first two mean the console's *Service Mesh* section (Overview, Traffic Graph, Workloads, Istio Config, and a *Service Mesh* tab on Deployments) is there; every Kiali moment in the lab uses it, and the route is the fallback. Both call Kiali with the signed-in user's token, so `user4` sees `user4-mesh` only. If `ossmconsole` is missing, the `kiali` component of the mesh stack (`platform-portfolio/stacks/mesh`) has not synced its `OSSMConsole`; a browser that was open before the plugin was enabled needs a reload to show the section. A non-zero count means Kiali cannot reach the cluster's Thanos querier, and every graph will be empty: check `oc get kiali kiali -n istio-system -o jsonpath='{.spec.external_services.prometheus.url}'` and that user-workload monitoring is enabled.
 
 . *`istioctl` downloads into the attendee terminal (grounding commands).*
 +
@@ -118,7 +121,7 @@ This is the only pre-flight instrument that runs *as the attendee*, in the real 
 The demo flavor renders a four-beat Say/Show/Do arc: *enroll + graph* (4 min), *weighted shift + read the split* (4 min), *fault + resilience* (3 min), *authorization lockdown + live 403* (4 min).
 
 * *Run it from the entry state, not `adm solve`.* The story is *building* the mesh live — enrolling naked services and watching the graph appear. `adm solve service-mesh-advanced-gateways --user user4` renders the finished end state (meshed app, v2, the routing/resilience/authz resources); use it to *pre-stage* or to show the destination, never as the demo's start.
-* *Pre-open Kiali* (`\https://kiali-istio-system.{cluster_domain}`, `user4-mesh` selected, *Last 5m*) on a second screen; the cluster's single sign-in opens it without a prompt in a browser already signed in to the cockpit. The graph is the visual for beats 1–2 — enroll, generate traffic, and watch the nodes and the `claims → fraud` padlock appear. Kiali draws rates from a 30-second scrape, so the beat-1 traffic runs about 45 seconds; talk over it.
+* *Pre-open the graph* (console → *Service Mesh* → *Traffic Graph*, `user4-mesh` selected, *Versioned app graph*, *Last 5m*, *Display* → *Security*) on a second screen; the route `\https://kiali-istio-system.{cluster_domain}` is the fallback. The graph is the visual for beats 1–2 — enroll, generate traffic, and watch the nodes and the `claims → fraud` padlock appear. Kiali draws rates from a 30-second scrape, so the beat-1 traffic runs about 45 seconds; talk over it.
 * *Land the 403 (beat 4).* Say "the web tier is a perfectly healthy pod, one identity away from allowed — watch it get refused" while the `403 RBAC: access denied` is on screen. That denial *is* "identity, not location."
 * *The encore is optional.* If the room is engaged and time allows, the raw-TCP gateway + `429` rate limit is a strong closer; otherwise stop at beat 4 and point to the workshop lab's exercise 7.
 
@@ -146,6 +149,9 @@ No — it's correct Istio behavior and a genuinely useful thing to know. Istio a
 *5. "Why read mesh telemetry for the 90/10 split instead of just counting the responses?"*::
 Because fraud v1 and v2 run the *same image* in this lab (v2 carries a `version` label and a `FRAUD_VERSION` marker but no distinct build yet), so their HTTP bodies are byte-identical — you can't tell them apart by reading the response. The *routing* is completely real, so you read the split from the mesh's own `istio_requests_total` metric broken down by `destination_version` (which is also what colors Kiali's versioned graph): ~185 to v1 and ~15 to v2 over 200 requests. When a genuinely distinct v2 image ships, you can count responses too; the routing you configured is unchanged.
 
+*6. "The call took 5 seconds, so why does the graph edge to fraud say a few milliseconds?"*::
+Because the graph's response-time label reads the *receiving* proxy, and fraud answered in milliseconds: the five seconds were spent in the *caller's* proxy, where the fault is injected. That is why exercise 5 sends attendees to `parasol-claims` → *Service Mesh* → *Outbound Metrics* (about 5 s on the average line, measured from claims' side) and then to fraud's *Inbound Metrics* (milliseconds). Turn it into the point: in a real outage the caller is the one holding the thread, so look at the caller's outbound latency.
+
 == Watchouts
 
 * *Verify the `{user}-mesh` image-pull grant is synced — and use `--subresource` to check it.*
@@ -159,7 +165,7 @@ The rate-limit `EnvoyFilter` patches Envoy's config directly; its `typed_config`
 * *A terminal reconnect drops the shell shortcuts — the first block of each exercise restores them.*
 A page reload, or `adm git-refresh --restart-terminals`, gives the attendee a fresh shell without `$NS`, `$CLAIMS`, `$WEB` or exercise 4's `fraud_split` helper. Exercises 2 to 7 each open with a block that re-derives them from the cluster (the claims and web pods are the *newest* ones, never `{.items[0]}`, which right after exercise 1's rollouts can be a pod still shutting down), and the lab says so near the top. Tell-tale signs: `error: pod, type/name or --filename must be specified`, `bash: CLAIMS: is empty - run the first block of this exercise again`, or `fraud_split: command not found` — send them back to the exercise's first block.
 * *Kiali needs traffic *and* a moment.*
-The Kiali graph draws from recent telemetry; if an attendee opens it before generating traffic (or picks too-narrow a time range), it looks empty. Generate the traffic first (exercise 3 does), then select a recent range. The `istioctl` grounding in the lab confirms traffic flowed regardless of what the console shows.
+The *Traffic Graph* draws *rates* from a 30-second scrape; if an attendee opens it before generating traffic, or after a burst that finished inside one scrape, it looks empty. Every graph moment in the lab is preceded by a paced loop of about 45–50 seconds for exactly this reason (exercises 3, 4 and 5); wait half a minute after it, then refresh. The split in exercise 4 reads on *Last 1m*: on *Last 5m* the earlier 200-request burst counts for v1 but not for v2's brand-new series, and the percentages lean toward v1 (measured 96.7/3.3 on *Last 5m* against 92.8/7.2 on *Last 1m*). The `istioctl` and `pilot-agent` grounding in the lab confirms traffic flowed regardless of what the console shows.
 
 == Provenance
 

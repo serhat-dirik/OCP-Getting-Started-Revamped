@@ -26,6 +26,20 @@ include::partial$version-attributes.adoc[]
 // token returned the web/claims/fraud(-v2) nodes and their edges (claims->fraud mTLS) once user-workload
 // monitoring scraped the proxies (platform-portfolio/components/kiali/monitoring.yaml + the entry state's
 // istio-proxies-monitor). Kiali draws RATES from a 30s scrape, so the graph traffic is paced to ~45s.
+// 2026-11-14: the Kiali views moved INTO the OpenShift console (OSSM Console plugin "ossmconsole", nav
+// section "Service Mesh": Overview, Traffic Graph, Mesh, Namespaces, Applications, Services, Workloads,
+// Istio Config, plus a "Service Mesh" tab on Deployment/Service/Istio-object pages; it calls Kiali with
+// the signed-in user's token). Re-run as user11 in the attendee terminal; every console view described
+// below was proved by calling the SAME Kiali API with user11's own token at that point in the lab:
+// ex1 workloads istioSidecar true for web/claims/fraud, false for claims-db/demo-client/partner-tcp-backend;
+// ex2 /tls status MTLS_ENABLED under STRICT, UNSET after the revert; ex3 graph unknown->web (no mTLS),
+// claims->fraud mTLS 100, claims->claims-db tcp; ex4 Last 1m traffic distribution v1 92.8 / v2 7.2 after the
+// paced loop (Last 5m read 96.7/3.3: the burst counts for v1 but not for v2's brand-new series); ex4 subset
+// typo -> KIA1107 "Subset not found" warning at spec/http[1]/route[1]/destination, 2 of 30 calls 503;
+// ex5 claims Outbound request_duration avg 5050 ms (reporter=source) vs fraud Inbound avg 6.7 ms — the
+// graph's edge response-time label reads the destination side, so it stayed at ~5 ms. ws verify 15/15.
+// UI labels are bundle-grounded (the plugin's locale + chunks); the screens themselves await capture
+// (SCREENSHOT TODO comments) because the capture browser had no signed-in console session.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -66,7 +80,7 @@ client version: 1.28.6
 .Console or CLI, and what to do after a reconnect
 ====
 Steps that apply a mesh resource have two tabs, kept in sync across the page: *Console* uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`), *CLI* uses `oc` in the *Terminal* tab.
-Kiali (its own product console) and driving traffic (`oc exec` from inside a meshed pod) are single-path.
+The mesh views (the console's *Service Mesh* section, Kiali built into the console) and driving traffic (`oc exec` from inside a meshed pod) are single-path.
 
 Exercises 2 to 7 each start with a block that sets their shortcuts (`$NS`, `$CLAIMS`, `$WEB`). *If your terminal reconnects, run that exercise's first block again.*
 ====
@@ -92,9 +106,9 @@ ws prep service-mesh-advanced-gateways
 
 That leaves the Parasol claims application running in `{user}-mesh` *un-meshed*: no proxies, no mutual TLS, no traffic control. The mesh is built during the demo, so this starts from the entry state rather than from a finished one — and the same command is how to reset between runs.
 
-Open the *Kiali* console at `\https://kiali-istio-system.{cluster_domain}` on a second screen ahead of the session, with the `{user}-mesh` namespace selected and the graph on *Last 5m*. Kiali uses the cluster's single sign-in: in a browser already signed in to the cockpit it opens straight away, with no second sign-in and no permissions prompt. Keep the cockpit terminal beside it.
+Open the {ocp_console_url}[OpenShift web console^] at *Service Mesh* → *Traffic Graph* on a second screen ahead of the session, with the `{user}-mesh` namespace selected, the *Versioned app graph*, *Last 5m*, and *Display* → *Security* ticked. That section is Kiali built into the console, so there is no second sign-in. Keep the cockpit terminal beside it. Kiali's own page, `\https://kiali-istio-system.{cluster_domain}`, shows the same graph if the console section is missing.
 
-NOTE: *An empty graph, or a missing edge.* Kiali draws a request *rate* from metrics that are scraped every 30 seconds, which is why step 1's traffic runs for about 45 seconds: a shorter burst can start and end between two scrapes and draw nothing. This sample application makes no downstream calls of its own, so both hops are driven by hand — a loop that did not run is an edge that is not there. Re-run the traffic block, wait half a minute, and refresh on *Last 5m*. If Kiali will not load at all, the proxies' own telemetry is the authoritative "traffic flowed" signal and it is one line in the terminal already on screen: `oc exec $CLAIMS -c istio-proxy -n $NS -- pilot-agent request GET 'stats?filter=istio_requests_total' | grep -c parasol-fraud`. A non-zero count is the claims proxy reporting its own calls to fraud — the same measurement the picture would have drawn, and the measurement step 2 reads for its numbers.
+NOTE: *An empty graph, or a missing edge.* Kiali draws a request *rate* from metrics that are scraped every 30 seconds, which is why step 1's traffic runs for about 45 seconds: a shorter burst can start and end between two scrapes and draw nothing. This sample application makes no downstream calls of its own, so both hops are driven by hand — a loop that did not run is an edge that is not there. Re-run the traffic block, wait half a minute, and refresh on *Last 5m*. If the graph will not load at all, the proxies' own telemetry is the authoritative "traffic flowed" signal and it is one line in the terminal already on screen: `oc exec $CLAIMS -c istio-proxy -n $NS -- pilot-agent request GET 'stats?filter=istio_requests_total' | grep -c parasol-fraud`. A non-zero count is the claims proxy reporting its own calls to fraud — the same measurement the picture would have drawn, and the measurement step 2 reads for its numbers.
 
 NOTE: *A split that is not exactly ninety and ten.* Over a hundred requests the split is statistical, so a delta of `v1=86 v2=14` is the same result: read it before describing it, and describe the shape rather than the figures. A delta of `v1=100 v2=0` is a different thing and worth catching — the mesh routes only to *healthy* endpoints, so it means `parasol-fraud-v2` is not Ready. The `oc rollout status` in that step is the guard; if it timed out, wait for v2 and re-run the request loop and the two `split` reads rather than re-applying the routing, which is not what is wrong. The before/after pair is also what makes step 2 repeatable: `istio_requests_total` is a counter, so a single absolute read would include every request the demo has already sent to fraud.
 
@@ -161,7 +175,7 @@ CLAIMS=$(oc get pod -n $NS -l app=parasol-claims --sort-by=.metadata.creationTim
   wait ); echo "traffic sent"
 ----
 
-*On screen* — Kiali, the `{user}-mesh` namespace on *Last 5m*: an *unknown* source (the un-meshed `demo-client`) calling web, and `claims → fraud` with a mutual-TLS padlock — the one edge with a proxy at both ends.
+*On screen* — *Service Mesh* → *Traffic Graph*, the `{user}-mesh` namespace on *Last 5m*: an *unknown* source (the un-meshed `demo-client`) calling web, and `claims → fraud` with a mutual-TLS padlock — the one edge with a proxy at both ends.
 
 *What just happened*
 
@@ -385,7 +399,7 @@ endif::demo[]
 ifndef::demo[]
 
 == 1. Enroll the app into the mesh
-⏱ *~7 min* · add the injection label, watch the native sidecar appear
+⏱ *~8 min* · add the injection label, watch the native sidecar appear
 
 Parasol's security review wants every claims call encrypted and measured, with no code change.
 First, a proxy beside each service.
@@ -536,9 +550,14 @@ istio-proxy restartPolicy=Always
 The proxy starts *first*, so no app traffic escapes unproxied, then runs for the whole life of the pod and stops *after* the app.
 ====
 
+*See it in the console:* in the {ocp_console_url}[OpenShift web console^], open *Service Mesh* → *Workloads* with `{user}-mesh` selected.
+Web, claims and fraud carry no warning; `claims-db`, `demo-client` and `partner-tcp-backend` are flagged *Missing Sidecar*, the three you left out on purpose.
+
+// SCREENSHOT TODO: service-mesh-advanced-gateways-07-ossmc-workloads-sidecars.png — Console → Service Mesh → Workloads, {user}-mesh selected, right after the enrollment: parasol-web, parasol-claims, parasol-fraud with no warning; claims-db, demo-client, partner-tcp-backend flagged "Missing Sidecar".
+
 [.checkpoint]
 ****
-✔ *Verify:* Istio `{istio_version}` is `Healthy`; web, claims and fraud list `istio-proxy` (`restartPolicy=Always`), while `demo-client` and `claims-db` show `<none>`. The namespace label was `Forbidden`.
+✔ *Verify:* Istio `{istio_version}` is `Healthy`; web, claims and fraud list `istio-proxy` (`restartPolicy=Always`), while `demo-client` and `claims-db` show `<none>`, and *Service Mesh* → *Workloads* flags only those left out as *Missing Sidecar*. The namespace label was `Forbidden`.
 ****
 
 == 2. Prove mutual TLS with a STRICT policy
@@ -653,6 +672,10 @@ oc exec $CLAIMS -c parasol-claims -n $NS -- curl -s -m5 -o /dev/null -w "claims 
 claims -> fraud (meshed): HTTP 200
 ----
 
+*See it in the console:* *Service Mesh* → *Overview*. The `{user}-mesh` card now shows a lock, *mTLS is enabled for this namespace* on hover. Kiali read it from your `PeerAuthentication`, and the lock goes away again after the revert below.
+
+// SCREENSHOT TODO: service-mesh-advanced-gateways-08-ossmc-overview-mtls.png — Console → Service Mesh → Overview while STRICT is applied: the {user}-mesh namespace card with its mTLS lock icon, tooltip "mTLS is enabled for this namespace".
+
 Now read the identity behind the encryption: a *SPIFFE* URI on the claims sidecar's certificate.
 
 [source,sh,role=execute]
@@ -694,15 +717,15 @@ demo-client -> web after revert: HTTP 200
 
 [.checkpoint]
 ****
-✔ *Verify:* under STRICT, `demo-client` got `Connection reset` while `claims -> fraud` got `200`; the certificate read `sa/parasol-claims`; after the revert, `demo-client` gets `200` again.
+✔ *Verify:* under STRICT, `demo-client` got `Connection reset` while `claims -> fraud` got `200`, and the *Overview* card showed the mTLS lock; the certificate read `sa/parasol-claims`; after the revert, `demo-client` gets `200` again.
 ****
 
-== 3. See the mesh in Kiali
+== 3. See the mesh in the console
 ⏱ *~7 min* · turn live traffic into a service graph — the picture `oc get` can't give you
 
 At 2 a.m., the on-call engineer needs one picture: who calls whom, and is it healthy?
 
-*You'll end with:* Kiali's Traffic Graph of `{user}-mesh`, a request rate on every edge and a padlock on `claims → fraud`.
+*You'll end with:* the console's *Service Mesh* → *Traffic Graph* of `{user}-mesh`, a request rate on every edge and a padlock on `claims → fraud`.
 
 [mermaid]
 ....
@@ -751,18 +774,9 @@ The bare `istioctl version` also reports the *control-plane* and *data-plane* bu
 `--remote=false` prints the client you just installed; the per-pod `istioctl proxy-config` reads later in the lab are how you inspect what the data plane is actually running.
 ====
 
-Open Kiali at `\https://kiali-istio-system.{cluster_domain}` in a new tab.
-It uses the cluster's single sign-in, so a browser already signed in to the workshop goes straight in, and it shows only what your permissions allow: *your* `{user}-mesh`.
-
-include::partial$idp-choice.adoc[]
-
-// [UNVERIFIABLE-PERMANENT] the Kiali Traffic Graph SCREEN (labels, menu names) — automated passes do not
-// type passwords. Everything under it IS verified (2026-11-12, user4, Kiali 2.33.1): sign-in goes
-// Kiali -> OpenShift OAuth (oauthclient kiali-istio-system, grantMethod auto) -> the cluster's one
-// Keycloak sign-in, and GET /api/namespaces/graph?namespaces=user4-mesh&graphType=versionedApp with
-// user4's own token returned nodes parasol-web/claims/fraud/fraud-v2 + claims-db + unknown, edges
-// unknown->web (no mTLS), claims->fraud and claims->fraud-v2 (isMTLS 100), claims->claims-db (tcp).
-In the *Traffic Graph*, select `{user}-mesh` and *Last 5m*:
+Open the {ocp_console_url}[OpenShift web console^] → *Service Mesh* → *Traffic Graph*.
+That section is Kiali, the mesh's console, built into OpenShift's: no second sign-in, and it shows only what your permissions allow, *your* `{user}-mesh`.
+Select the `{user}-mesh` namespace, *Last 5m* and the *Versioned app graph*, and tick *Display* → *Security* for the padlocks:
 
 [cols="1,4",options="header"]
 |===
@@ -778,15 +792,14 @@ In the *Traffic Graph*, select `{user}-mesh` and *Last 5m*:
 | On `claims → fraud`, where both ends have a proxy; none into web, because `demo-client` calls in plaintext
 
 | *Health*
-| Green now; red when a path fails (exercises 5 and 6)
+| Green now; a path that returns errors turns red
 |===
 
-// media-pass: screenshot service-mesh-advanced-gateways-01-kiali-graph-mtls.png — Kiali Traffic
-// Graph, {user}-mesh, after the traffic above: nodes parasol-web/parasol-claims/parasol-fraud with
-// traffic-driven edges. Circle: an edge's mutual-TLS padlock icon + the request-rate label. Alt: "The
-// Kiali Traffic Graph for the mesh namespace showing parasol-web, parasol-claims, and parasol-fraud
-// connected by edges carrying mutual-TLS padlock icons and request rates." THE MARQUEE — capture
-// after driving the traffic above. See media-manifest.md.
+The padlock is there even though STRICT is reverted: meshed workloads always talk mutual TLS to each other. STRICT is what makes the *plaintext* caller fail.
+
+// SCREENSHOT TODO: service-mesh-advanced-gateways-09-ossmc-graph-mtls.png — Console → Service Mesh → Traffic Graph, {user}-mesh, Versioned app graph, Last 5m, Display → Security on, right after the traffic above: unknown → parasol-web (no padlock), parasol-claims → parasol-fraud with a padlock and a request rate, a TCP edge parasol-claims → claims-db. THE MARQUEE.
+
+NOTE: No *Service Mesh* entry in the console's left navigation? Kiali also has its own page, `\https://kiali-istio-system.{cluster_domain}`, with the same graph; it opens with the same workshop sign-in.
 
 .What's real here, and what you're driving by hand
 [%collapsible]
@@ -797,11 +810,11 @@ The one thing that's manual is the *traffic itself*: the sample app doesn't auto
 
 [.checkpoint]
 ****
-✔ *Verify:* the count printed `1`, and Kiali shows web, claims and fraud with rates, a padlock on `claims → fraud`, and green health.
+✔ *Verify:* the count printed `1`, and *Service Mesh* → *Traffic Graph* shows web, claims and fraud with rates, a padlock on `claims → fraud`, and green health.
 ****
 
 == 4. Shift traffic between service versions
-⏱ *~7 min* · a weighted canary and a header route — with two custom resources
+⏱ *~9 min* · a weighted canary and a header route — with two custom resources
 
 Parasol wants fraud-scoring *v2* out carefully: 10% of traffic first, and a way for *test users* to reach it on purpose.
 
@@ -1008,13 +1021,6 @@ after:  v1=234 v2=12
 
 *What just happened:* roughly: read the *delta*, about 185 to v1 and 15 to v2 (this run: 188 and 12). Weights are statistical, and you measured them from `istio_requests_total`.
 
-// media-pass: screenshot service-mesh-advanced-gateways-02-kiali-versioned-split.png — Kiali Traffic
-// Graph with versioned app grouping, after this traffic: parasol-fraud split into v1 and v2
-// workloads. Circle: the 90% vs 10% edge thickness/percentages to v1 vs v2. Alt: "The Kiali Traffic
-// Graph with versioned grouping showing parasol-fraud split into v1 and v2 workloads, with edge
-// weights reflecting a 90/10 traffic split." Capture with the graph's versioned-app grouping toggled
-// on, after driving the 200-request split above. See media-manifest.md.
-
 .Why read telemetry instead of "counting the responses"?
 [%collapsible]
 ====
@@ -1045,13 +1051,68 @@ verdict: v1 unchanged, all +30 on v2 — the header route is deterministic
 
 *What just happened:* v1 didn't move. The header route overrides the weights, deterministically.
 
+*Watch the split in the console.* Those loops finished inside one 30-second scrape, too fast for a graph that draws *rates*, so pace about 50 seconds of untagged traffic:
+
+[source,sh,role=execute]
+----
+# ~2 requests a second for ~50s, so the 30s scrape sees the split as a rate
+oc exec $CLAIMS -c parasol-claims -n $NS -- sh -c 'for i in $(seq 1 100); do curl -s -o /dev/null http://parasol-fraud:8080/api/fraud/score/CLM-$i; sleep 0.5; done'; echo "split traffic sent"
+----
+
+Then *Service Mesh* → *Traffic Graph*, `{user}-mesh`, *Versioned app graph*, *Last 1m*, and tick *Display* → *Traffic Distribution*.
+`parasol-fraud` now draws as two versions, and the edges from claims read roughly *90%* to v1 and *10%* to v2 (this build's run: 92.8 and 7.2).
+
+*Last 1m*, not *Last 5m*: the longer window still holds the 200-request burst, where v1's share counts but v2's doesn't (its counter was brand new), so the percentages lean toward v1.
+
+// SCREENSHOT TODO: service-mesh-advanced-gateways-10-ossmc-graph-split.png — Console → Service Mesh → Traffic Graph, {user}-mesh, Versioned app graph, Last 1m, Display → Traffic Distribution on, right after the paced loop: parasol-claims → parasol-fraud v1 (~90%) and → parasol-fraud v2 (~10%).
+
+*Predict, then run:* a typo in a subset name. Point the 10% route at `v3`, a subset no `DestinationRule` defines, then call fraud 30 times. Will the API server stop you?
+
+[source,sh,role=execute]
+----
+oc patch virtualservice parasol-fraud -n $NS --type=json \
+  -p '[{"op":"replace","path":"/spec/http/1/route/1/destination/subset","value":"v3"}]'
+sleep 3
+oc exec $CLAIMS -c parasol-claims -n $NS -- sh -c 'for i in $(seq 1 30); do curl -s -o /dev/null -w "%{http_code} " http://parasol-fraud:8080/api/fraud/score/CLM-$i; done; echo'
+----
+
+.Expected output (accepted without complaint; about one call in ten now fails — which ones is random)
+[source,texinfo]
+----
+virtualservice.networking.istio.io/parasol-fraud patched
+200 200 200 200 200 200 200 200 503 200 200 200 200 200 200 200 200 200 503 200 200 200 200 200 200 200 200 200 200 200
+----
+
+*What just happened:* nothing stopped it. The API server checks a resource's schema, not whether the subset it names exists.
+Open *Service Mesh* → *Istio Config* with `{user}-mesh` selected: the `parasol-fraud` VirtualService carries a warning, and opening it marks the route with *KIA1107 Subset not found*.
+Kiali validates the mesh configuration as a whole, the cross-references a single `oc apply` can't see.
+
+// SCREENSHOT TODO: service-mesh-advanced-gateways-11-ossmc-istio-config-validation.png — Console → Service Mesh → Istio Config, {user}-mesh, while the v3 typo is in place: the parasol-fraud VirtualService row with its warning icon, or the object opened with the KIA1107 "Subset not found" marker on spec.http[1].route[1].destination.
+
+Fix it, and the warning clears:
+
+[source,sh,role=execute]
+----
+oc patch virtualservice parasol-fraud -n $NS --type=json \
+  -p '[{"op":"replace","path":"/spec/http/1/route/1/destination/subset","value":"v2"}]'
+sleep 3
+oc exec $CLAIMS -c parasol-claims -n $NS -- sh -c 'for i in $(seq 1 30); do curl -s -o /dev/null -w "%{http_code} " http://parasol-fraud:8080/api/fraud/score/CLM-$i; done; echo'
+----
+
+.Expected output (every call served again)
+[source,texinfo]
+----
+virtualservice.networking.istio.io/parasol-fraud patched
+200 200 200 200 200 200 200 200 200 200 200 200 200 200 200 200 200 200 200 200 200 200 200 200 200 200 200 200 200 200
+----
+
 [.checkpoint]
 ****
-✔ *Verify:* the claims proxy shows the `x-parasol-test` match and weights 90/10; 200 requests split roughly 185/15; the verdict read `v1 unchanged, all +30 on v2`.
+✔ *Verify:* the claims proxy shows the `x-parasol-test` match and weights 90/10; 200 requests split roughly 185/15; the verdict read `v1 unchanged, all +30 on v2`; the graph drew about 90/10 on *Last 1m*; the `v3` typo was flagged *KIA1107* and fixed.
 ****
 
 == 5. Add resilience: faults, timeouts, and a circuit breaker
-⏱ *~7 min* · make a slow dependency fail fast instead of hanging the caller
+⏱ *~8 min* · make a slow dependency fail fast instead of hanging the caller
 
 A slow fraud service is how one dependency becomes a site-wide outage.
 Simulate it, then put the defenses in place.
@@ -1189,6 +1250,20 @@ faulted: HTTP 200 in 5.016459s
 Istio injects faults in a filter *ahead of* the router, so the route's `timeout` and `retries` don't apply to them.
 That hang is the cascading-failure trigger: the moment a caller's threads pile up.
 
+*Find the hotspot in the console.* With the fault still on, send one call a second for about 45 seconds:
+
+[source,sh,role=execute]
+----
+# one call a second for ~45s, each held 5s by the fault: long enough for the 30s scrape to see it
+oc exec $CLAIMS -c parasol-claims -n $NS -- sh -c 'for i in $(seq 1 45); do curl -s -m8 -o /dev/null http://parasol-fraud:8080/api/fraud/score/CLM-$i & sleep 1; done; wait'; echo "slow traffic sent"
+----
+
+Open *Workloads* → *Deployments* → `parasol-claims` → the *Service Mesh* tab → *Outbound Metrics*: the *Request duration* to `parasol-fraud` climbs to about *5 s* on the average line.
+Now `parasol-fraud` → *Service Mesh* → *Inbound Metrics*: still milliseconds.
+The wait lives in the *caller's* proxy, where the fault is injected, and that is where a real slow dependency hurts too: the caller is the one holding a thread.
+
+// SCREENSHOT TODO: service-mesh-advanced-gateways-12-ossmc-claims-outbound-latency.png — Console → Workloads → Deployments → parasol-claims → Service Mesh tab → Outbound Metrics, right after the slow loop: the Request duration chart to parasol-fraud with the average near 5 s.
+
 .Fault injection vs. the route timeout: the honest boundary
 [%collapsible]
 ====
@@ -1249,7 +1324,7 @@ restored: HTTP 200 in 0.010798s
 
 [.checkpoint]
 ****
-✔ *Verify:* the faulted call took about `5.0s`; the proxy shows `consecutive5xx: 3`, `baseEjectionTime: 30s`, `maxConnections: 10`; the restored call is fast again.
+✔ *Verify:* the faulted call took about `5.0s`, and claims' *Outbound Metrics* showed about 5 s while fraud's *Inbound Metrics* stayed in milliseconds; the proxy shows `consecutive5xx: 3`, `baseEjectionTime: 30s`, `maxConnections: 10`; the restored call is fast again.
 ****
 
 == 6. Secure the call path with an AuthorizationPolicy
