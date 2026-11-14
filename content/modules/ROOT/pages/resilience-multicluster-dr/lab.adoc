@@ -32,7 +32,10 @@ include::partial$prereq-ws-start.adoc[]
 .Highlighted: what you build in this module
 image::solution-map/resilience-multicluster-dr.svg["The Parasol solution map with this module's pieces highlighted: High availability, Site failover, Service mesh and parasol-claims.",width=900]
 
-Set the shortcuts you'll reuse throughout the lab — your three namespaces: the client, and the two simulated sites:
+You are the platform engineer keeping Parasol's claims service up when a *whole site* goes down.
+You prove it survives a pod loss, fail an entire site over on the mesh, then, as a flagged `[ADD-ON]`, link two sites with Red Hat Service Interconnect.
+
+Set the shortcuts for your three namespaces:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -42,23 +45,36 @@ SITEB={user}-site-b
 echo "client: $CLIENT   ·   primary site: $SITEA   ·   secondary site: $SITEB"
 ----
 
-You are the platform engineer responsible for Parasol's claims service *staying up when a whole site goes down*.
-Your world is already stood up across *three* namespaces — a single-cluster *simulation* of a multi-site deployment, all enrolled in the shared OpenShift Service Mesh:
+Your world is already running: one cluster *simulating* three sites, all in the shared OpenShift Service Mesh.
 
-* `{user}-site-a` — the claims service, *SITE=A*, running *resiliently* (three replicas, a `PodDisruptionBudget`, spread across nodes, a `HorizontalPodAutoscaler`). This is your *primary* site.
-* `{user}-site-b` — the *same* claims service, *SITE=B*. Your *secondary* site.
-* `{user}-client` — an external *client* that calls the claims service through a *stable endpoint* (a mesh ingress gateway) once a second and logs *which site served it*, plus the gateway itself.
+[cols="1,3",options="header"]
+|===
+| Namespace | What runs there
 
-In this lab you *prove* the service survives a pod loss (in-site resiliency), then *wire cross-site failover* on the mesh and *fail an entire site* — watching the client flip from A to B with *no dropped requests* — and finally, as a flagged `[ADD-ON]`, *link two sites over a Virtual Application Network* with Red Hat Service Interconnect.
+| `{user}-site-a`
+| The *primary* site: the claims service, `SITE=A`, with three replicas, a `PodDisruptionBudget`, spread across nodes, and a `HorizontalPodAutoscaler`
+
+| `{user}-site-b`
+| The *secondary* site: the same claims service, `SITE=B`
+
+| `{user}-client`
+| A client calling a *stable endpoint* (the mesh ingress gateway, also here) once a second, logging *which site served it*
+|===
 
 [TIP]
-.Two ways for the mesh custom-resource steps; the client log and curl reads are terminal-only
+.Console or CLI, and what stays terminal-only
 ====
-Where you apply a mesh custom resource you get two tabs: the *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`) to import YAML, and the *CLI* tab uses `oc` in the *Terminal* beside these instructions. Pick a path once — the tabs stay in sync across the page.
-Two things are terminal-only on purpose: *tailing the client's live log* (`oc logs -f`) and the *`curl`-style reads* from inside a pod — the console can't do those.
+Mesh custom-resource steps come in two tabs: *Console* imports YAML in the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`), *CLI* uses `oc` in the *Terminal*. Pick a path once; the tabs stay in sync.
+The live log tail (`oc logs -f`) and the `curl` reads from inside a pod are terminal-only.
+*If your terminal reconnects, run the exercise's first block again*: a fresh shell has no `$CLIENT`, `$SITEA` or `$SITEB`.
+====
+
+.Reading the sample output
+[%collapsible]
+====
 Namespaces in the output below render with *your* user (`{user}`). Everything else — pod names, IP addresses, node names, timestamps — comes from real captures on since-deleted clusters and *will* differ on yours: read the *shape*, not the exact values.
+
 Each exercise opens with a block that sets the shell shortcuts it uses, `$CLIENT`, `$SITEA` and `$SITEB`; for exercise 1 it is the block above.
-*If your terminal reconnects, run the exercise's first block again* — a fresh shell has none of those shortcuts.
 ====
 endif::demo[]
 
@@ -223,21 +239,32 @@ endif::demo[]
 
 // ============================================================================
 // WORKSHOP FLAVOR — hands-on exercise groups
+// Each exercise opens the same way (the solution map appears once, at the top of the lab): a one-line story beat, and
+// "You'll end with" plus a picture of the result. Steps come next; the why follows as a short
+// *What just happened* and, where it runs long, a collapsible block.
 // ============================================================================
 ifndef::demo[]
 
 == 1. Prove in-site resiliency — survive a pod loss
 ⏱ *~11 min* · meet the resilient claims service, kill a pod, then evict two under live traffic
 
-Before a service can fail *over* to another site, it has to be resilient *where it lives*. Meet the primary site's claims service — the Observability/Deployment Targets & Scheduling primitives, made concrete.
+Before Parasol can fail *over* to another site, the claims service must survive everyday failures *where it lives*: a crashed pod, a drained node.
+
+*You'll end with:* proof that site A shrugs off a killed pod and two evictions under live traffic, with `0 failed` requests.
+
+[mermaid]
+....
+include::example$diagrams/resilience-multicluster-dr/07-in-site-posture.mmd[]
+....
 
 [tabs]
 ====
 Console::
 +
 --
-In the {ocp_console_url}[OpenShift web console^] (project `{user}-site-a`), open *Workloads → Deployments*. You'll see `parasol-claims` at *3 of 3* pods. Open it and note its *Pods* land on *different nodes*. Under *Workloads*, the `parasol-claims` *HorizontalPodAutoscaler* and *PodDisruptionBudget* show the resilience policy.
-The *CLI* tab reads the same facts — use it to capture the exact fields.
+. In the {ocp_console_url}[OpenShift web console^], project `{user}-site-a`, open *Workloads → Deployments*: `parasol-claims` shows *3 of 3* pods.
+. Open it: its *Pods* land on *different nodes*.
+. Under *Workloads*, the `parasol-claims` *HorizontalPodAutoscaler* and *PodDisruptionBudget* hold the resilience policy.
 
 image::resilience-multicluster-dr/resilience-multicluster-dr-02-resilient-site.png["The OpenShift console Deployments list for the {user}-site-a project, with one row for parasol-claims: Status \"3 of 3 pods\", and labels app=parasol-claims, site=A, workshop.redhat.com/module=resilience-multicluster-dr, and workshop.redhat.com/owner=ogsr. Notice the Status column — 3 of 3 pods confirms every replica is up; this list view alone doesn't show the PodDisruptionBudget or HorizontalPodAutoscaler, which live on their own pages."]
 --
@@ -264,7 +291,26 @@ NAME                                                 REFERENCE                  
 horizontalpodautoscaler.autoscaling/parasol-claims   Deployment/parasol-claims   cpu: 4%/80%   3         6         3          11m
 ----
 
-Read that as a resilience posture: *three* replicas so losing one is a non-event; a `PodDisruptionBudget` that keeps *two* available during any voluntary disruption (`ALLOWED DISRUPTIONS: 1` — a node drain evicts *at most one* at a time); and a `HorizontalPodAutoscaler` holding the floor at three, bursting to six. Confirm the replicas are *spread across nodes*, so one node loss can't take them all:
+*What just happened:* one object per failure it absorbs:
+
+[cols="2,2,3",options="header"]
+|===
+| Object | Setting | What it buys
+
+| Deployment
+| *three* replicas
+| Losing one pod is a non-event
+
+| `PodDisruptionBudget`
+| min available *two*, `ALLOWED DISRUPTIONS: 1`
+| A node drain evicts *at most one* pod at a time
+
+| `HorizontalPodAutoscaler`
+| floor three, ceiling six
+| Bursts under load, never drops below three
+|===
+
+Confirm the replicas are *spread across nodes*, so one node loss can't take them all:
 
 [source,sh,role=execute]
 ----
@@ -280,7 +326,7 @@ parasol-claims-65d8cc85fd-v2wth   Running   control-plane-cluster-example-2
 parasol-claims-65d8cc85fd-z5r22   Running   control-plane-cluster-example-3
 ----
 
-Now *break it on purpose*. Kill one replica and watch the service never dip — the Deployment replaces the pod, and the PDB guarantees a quorum stays up throughout:
+Now *break it on purpose*: kill one replica.
 
 [source,sh,role=execute]
 ----
@@ -299,13 +345,25 @@ parasol-claims-65d8cc85fd-v2wth   2/2     Running    0          2m
 parasol-claims-65d8cc85fd-z5r22   2/2     Running    0          2m
 ----
 
-Each pod reads *`2/2`*, not `1/1`: it runs *two* containers — the claims app *and* its injected Istio sidecar (these pods are mesh members). The two survivors stay `2/2 Running` and never stop serving; the replacement (`2t2hf`) is created instantly but takes *a moment* to become Ready — re-run the `oc get pods` command and you'll watch it climb `0/2 Init:0/2` → `1/2` → `2/2 Running` over roughly ten to fifteen seconds. That brief not-yet-Ready window is exactly why you keep a *quorum*.
+*What just happened:* the two survivors never stopped serving while the Deployment created a replacement.
+Re-run `oc get pods` to watch it climb `0/2 Init:0/2` → `1/2` → `2/2 Running` in ten to fifteen seconds: that not-yet-Ready window is why you keep a *quorum*.
+
+.Why `2/2`, not `1/1`?
+[%collapsible]
+====
+Each pod runs *two* containers — the claims app *and* its injected Istio sidecar (these pods are mesh members). The replacement (`2t2hf` in the sample) is created instantly but is not Ready until both are up.
+====
 
 === Evict pods under live traffic
 
-A deleted pod is a crash. Maintenance works differently: a node drain asks the *Eviction API* to remove each pod, and the API checks the PodDisruptionBudget before it agrees. Send the same request for your own pods while callers are hitting the service, and watch what the callers see.
+A deleted pod is a crash. Maintenance is different: a node drain asks the *Eviction API*, which checks the PodDisruptionBudget first.
 
-In *Terminal 2* (the lower terminal), start a request loop. The client calls site A's claims service twice a second for three minutes and prints a running count of served and failed requests, plus the pod that answered:
+[mermaid]
+....
+include::example$diagrams/resilience-multicluster-dr/08-eviction-budget.mmd[]
+....
+
+In *Terminal 2* (the lower terminal), start a request loop: two calls a second for three minutes, counting served and failed, naming the pod that answered:
 
 [source,sh,role="execute send-to-tty-bottom",subs="attributes+"]
 ----
@@ -318,7 +376,9 @@ done
 echo "DONE: $ok served, $failed failed"'
 ----
 
-Back in *Terminal 1*, define an `evict` helper. It posts an `Eviction` for one pod, the same request `oc adm drain` sends. The block first waits until the replacement for the pod you killed above is Ready, so the budget has its one disruption of room again. Then it evicts two claims pods back to back:
+In *Terminal 1*, evict two claims pods back to back; the `evict` helper posts the same `Eviction` request as `oc adm drain`.
+
+*Predict, then run:* the budget has room for *one* disruption. What happens to the second eviction?
 
 [source,sh,role=execute]
 ----
@@ -343,8 +403,15 @@ NAME             MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
 parasol-claims   2               N/A               0                     4m41s
 ----
 
-The budget had room for one disruption, so the first eviction went through (`201`). Its replacement is still starting, so a second eviction would leave fewer than two Ready pods. The API answers `429 TooManyRequests` and `ALLOWED DISRUPTIONS` drops to `0`. A drain that gets this answer does not fail; it waits and retries. Do the same: wait for the budget to reopen, then retry the refused pod.
-The block defines `evict` again, and if `$P2` is gone (a reconnected terminal) it picks the oldest claims pod that is not already shutting down, so it also works in a fresh shell:
+*What just happened:* the first eviction went through (`201`). With its replacement still starting, a second would leave fewer than two Ready pods, so the API refused it (`429 TooManyRequests`) and `ALLOWED DISRUPTIONS` dropped to `0`.
+
+.What the block waited for first
+[%collapsible]
+====
+Before evicting anything, the block waits until the replacement for the pod you killed above is Ready, so the budget has its one disruption of room again. Without that wait, evicting within about ten seconds of the kill gets the `429` on the *first* eviction.
+====
+
+A drain that gets a `429` waits and retries. Do the same:
 
 [source,sh,role=execute]
 ----
@@ -374,9 +441,15 @@ NAME                                                 REFERENCE                  
 horizontalpodautoscaler.autoscaling/parasol-claims   Deployment/parasol-claims   cpu: 3%/80%   3         6         3          4m57s
 ----
 
-An eviction removes a pod but leaves the Deployment's desired count at three, the floor the autoscaler holds. The ReplicaSet creates a replacement at once, which is why the count comes back by itself.
+*What just happened:* an eviction leaves the desired count at three, the autoscaler's floor, so the ReplicaSet replaced each pod by itself.
 
-Now read *Terminal 2*. The evicted pods drop out of the answers, the replacements join, and the `failed` count never moves:
+.How the retry block survives a reconnect
+[%collapsible]
+====
+The block defines `evict` again, and if `$P2` is gone (a reconnected terminal) it picks the oldest claims pod that is not already shutting down, so it also works in a fresh shell.
+====
+
+Now read *Terminal 2*: evicted pods drop out, replacements join, and `failed` never moves:
 
 .Expected output (an excerpt of the loop; the pod names and counts will differ)
 [source,texinfo]
@@ -394,17 +467,22 @@ Now read *Terminal 2*. The evicted pods drop out of the answers, the replacement
 DONE: 345 served, 0 failed
 ----
 
-The loop stops by itself after three minutes; press `Ctrl-C` in Terminal 2 to stop it sooner. Two pods evicted under load, and no caller saw a failure. *That* is what replicas, a PDB, and spread buy you: a node drain is a non-event. What they *cannot* do is survive the loss of the *whole site*, and that is the next exercise.
+The loop stops itself after three minutes (`Ctrl-C` stops it sooner).
+Replicas, a PDB and spread make a node drain a non-event; they *cannot* survive losing the *whole site*. That is next.
 
 [.checkpoint]
 ****
-✔ *Verify:* You found the resilient primary claims service — `parasol-claims` at *3/3* with a `PodDisruptionBudget` (min available 2), a `HorizontalPodAutoscaler` (floor 3, ceiling 6), and replicas *spread across three nodes*. You *killed a pod* and watched a replacement appear in seconds. Then, with a request loop running, you *evicted two pods* through the Eviction API: the first was admitted, the second refused with `429` until a replacement was Ready, and the loop finished with `0 failed`. In-site resiliency, proven.
+✔ *Verify:* `oc get deploy,pdb,hpa -n $SITEA` shows *3/3*, PDB min `2`, HPA `3`–`6`, on three nodes; the killed pod came back, the second eviction got `429`, and Terminal 2 ended `0 failed`.
 ****
 
 == 2. Cross-site failover with Service Mesh — fail an entire site
 ⏱ *~13 min* · wire a stable endpoint that fails over from the primary site to the secondary automatically
 
-This is the module's centerpiece. You'll put a *stable endpoint* in front of both sites, teach the mesh to prefer the primary and *fail over to the secondary automatically*, then *fail the whole primary site* and watch the client keep working.
+A data center loses power and takes every replica with it. Parasol's claims service must keep answering from the other site, with no client reconfigured.
+
+*You'll end with:* the client log flipping from `served-by-site=A` to `served-by-site=B`, every line still `HTTP 200`, while the whole primary site is down, and back when it recovers.
+
+image::resilience-multicluster-dr/resilience-multicluster-dr-01-failover-log-flip.png["A terminal tailing the claims-client log, with the oc scale --replicas=0 command on site A visible above it. Nine consecutive lines read HTTP 200 served-by-site=A, then every following line reads HTTP 200 served-by-site=B. Notice that every response on both sides of the flip is still HTTP 200 — the whole primary site went away and no request was dropped."]
 
 Set this exercise's shortcuts first (re-run this block after a reconnect):
 
@@ -416,7 +494,7 @@ SITEB={user}-site-b
 echo "client: $CLIENT   ·   primary site: $SITEA   ·   secondary site: $SITEB"
 ----
 
-First, meet the client and prove the problem. The client calls a *stable endpoint* (`claims-stable`, the mesh ingress gateway) once a second and logs which site answered. Tail its log:
+Read the client's log; it calls the *stable endpoint* `claims-stable`, the mesh ingress gateway:
 
 [source,sh,role=execute]
 ----
@@ -431,13 +509,34 @@ oc logs deploy/claims-client -n $CLIENT --tail=3
 10:22:16  HTTP 404  served-by-site=none
 ----
 
-The gateway is up, but it has *no route* — it doesn't yet know about your two sites. That's what you wire now, with three mesh resources in the client namespace:
+*What just happened:* the gateway is up but has *no route* to your two sites. Wire it with three mesh resources in the client namespace:
 
-* a *ServiceEntry* that declares one logical claims host whose two endpoints are site A and site B, each tagged with its *locality*;
-* a *DestinationRule* that turns on *locality-aware load balancing* (prefer the primary) and *outlier detection* (eject a failing site);
-* a *VirtualService* on the gateway that routes the stable endpoint to that host, with *retries* that may move to the other site (`retryRemoteLocalities: true`), so failover drops no requests.
+[mermaid]
+....
+include::example$diagrams/resilience-multicluster-dr/09-failover-resources.mmd[]
+....
 
-All three carry `exportTo: ["."]`, and that one field is load-bearing. It scopes a mesh resource to *its own namespace*; leave it out and Istio defaults to `+exportTo: ["*"]+`, publishing the resource *mesh-wide*. `claims.parasol.internal` is deliberately a single, stable, global service name — that is the lesson — but on this shared control plane *every* attendee declares that same host, so un-scoped definitions get merged and your gateway could resolve to *someone else's* sites. `["."]` keeps your logical claims host yours. The same discipline applies in production: on a shared mesh, export only what other namespaces genuinely need to reach.
+[cols="2,5",options="header"]
+|===
+| Resource | Its job
+
+| *ServiceEntry* `claims-global`
+| One logical claims host; its endpoints are site A and site B, each tagged with its *locality*
+
+| *DestinationRule* `claims-global`
+| *Locality-aware load balancing* (prefer the primary) and *outlier detection* (eject a failing site)
+
+| *VirtualService* `claims-edge`
+| Routes the gateway to that host, with *retries* that may move to the other site (`retryRemoteLocalities: true`), so failover drops no requests
+|===
+
+All three carry `exportTo: ["."]`, keeping them in your namespace on this shared mesh.
+
+.Why `exportTo: ["."]` is load-bearing
+[%collapsible]
+====
+It scopes a mesh resource to *its own namespace*; leave it out and Istio defaults to `+exportTo: ["*"]+`, publishing the resource *mesh-wide*. `claims.parasol.internal` is deliberately a single, stable, global service name — that is the lesson — but on this shared control plane *every* attendee declares that same host, so un-scoped definitions get merged and your gateway could resolve to *someone else's* sites. `["."]` keeps your logical claims host yours. The same discipline applies in production: on a shared mesh, export only what other namespaces genuinely need to reach.
+====
 
 // Grounded 2026-07-29 on OCP 4.22.5, signed in as an attendee (user1), viewport 1600x1000:
 //   · the masthead button is labelled "Quick create" (exact aria-label) and renders as a ⊕ icon,
@@ -537,7 +636,7 @@ destinationrule.networking.istio.io/claims-global created
 virtualservice.networking.istio.io/claims-edge created
 ----
 
-Give the mesh a few seconds to program the gateway, then look at the client log again — it now serves *site A*, the primary:
+*Predict, then run:* both sites are healthy endpoints of one host. Will the log alternate `A` and `B`? (The block gives the mesh a few seconds to program the gateway first.)
 
 [source,sh,role=execute]
 ----
@@ -553,9 +652,9 @@ oc logs deploy/claims-client -n $CLIENT --tail=3
 10:24:05  HTTP 200  served-by-site=A
 ----
 
-Why *A* and not a mix of A and B? Because the ingress gateway is *co-located with site A's locality*, and `localityLbSetting` makes the mesh *prefer the local site* — site A is priority 0, site B is the failover. Confirm the gateway's Envoy really has both sites as endpoints, and that the outlier-detection failover policy is programmed.
+*What just happened:* steadily *A*. The gateway sits in *site A's locality*, and `localityLbSetting` makes the mesh *prefer the local site*: A is priority 0, B the failover.
 
-The Showroom terminal ships `oc` but not `istioctl` — the mesh CLI that reads what a proxy was *actually* programmed with. Fetch the build matching the running control plane (a one-time download into `~/bin`):
+Confirm the gateway's Envoy has both sites as endpoints. The terminal ships `oc` but not `istioctl`, the mesh CLI that reads what a proxy was *actually* programmed with; fetch the build matching the control plane (one-time, into `~/bin`):
 
 [source,sh,role=execute]
 ----
@@ -566,7 +665,7 @@ export PATH="$HOME/bin:$PATH"
 istioctl version --remote=false
 ----
 
-Now read the gateway's programmed endpoints:
+Read the gateway's programmed endpoints:
 
 [source,sh,role=execute]
 ----
@@ -585,7 +684,7 @@ ENDPOINT                STATUS      OUTLIER CHECK     CLUSTER
 [IMPORTANT]
 .Don't compare the numbers — compare *whose* they are
 ====
-Every cluster (and every namespace on it) allocates its own addresses, so the two IPs above are meaningless to you. What you *should* check is that the two endpoints are *your own* site-a and site-b `claims` Services — because `resolution: DNS` makes Envoy resolve each endpoint to that Service's ClusterIP. Print yours and match them against the table:
+Your cluster allocates its own addresses. With `resolution: DNS`, Envoy resolves each endpoint to a Service's ClusterIP, so check they are *your* site-a and site-b `claims` Services:
 
 [source,sh,role=execute]
 ----
@@ -593,10 +692,10 @@ oc get svc claims -n $SITEA -o jsonpath='site-a claims ClusterIP: {.spec.cluster
 oc get svc claims -n $SITEB -o jsonpath='site-b claims ClusterIP: {.spec.clusterIP}{"\n"}'
 ----
 
-Two endpoints, both `HEALTHY`, and both IPs appearing in the two lines you just printed — that is the shape you want. If the gateway lists addresses that are *neither* of yours, your routing is resolving to something outside your own namespaces; check that the `exportTo: ["."]` line survived on all three resources.
+Both `HEALTHY`, both IPs in the lines you just printed: that is the shape you want. *Neither* of yours means your routing resolves outside your namespaces; check that `exportTo: ["."]` survived on all three resources.
 ====
 
-Now *the failover*. Watch it from *Terminal 2*. If exercise 1's request loop is still running there, let it print its `DONE` line or stop it with `Ctrl-C`. Then start tailing the client log live:
+Now *the failover*. In *Terminal 2* (once exercise 1's loop has printed `DONE`, or after `Ctrl-C`), tail the client log live:
 
 [source,sh,role="execute send-to-tty-bottom",subs="attributes+"]
 ----
@@ -604,14 +703,14 @@ CLIENT={user}-client
 oc logs -f deploy/claims-client -n $CLIENT --tail=3
 ----
 
-Then, back in *Terminal 1*, *fail the entire primary site* — scale site A to zero. There is no site A anymore:
+Back in *Terminal 1*, *fail the entire primary site*: scale site A to zero.
 
 [source,sh,role=execute]
 ----
 oc scale deploy/parasol-claims -n $SITEA --replicas=0
 ----
 
-Watch the tailing log. Within a few seconds the site marker *flips from A to B* — and *every line is still `HTTP 200`*. Leave site A down for a minute or two and keep watching: the log stays on `B` with no error line.
+Within a few seconds the tail *flips from A to B*, *every line still `HTTP 200`*. Leave site A down a minute or two: it stays on `B`, no error line.
 
 .Expected output (the live client log across the failover — the whole primary site is gone, not one request dropped)
 [source,texinfo]
@@ -625,11 +724,14 @@ Watch the tailing log. Within a few seconds the site marker *flips from A to B* 
 17:36:46  HTTP 200  served-by-site=B     <- still site B, still 200, after 140 s of outage
 ----
 
-image::resilience-multicluster-dr/resilience-multicluster-dr-01-failover-log-flip.png["A terminal tailing the claims-client log, with the oc scale --replicas=0 command on site A visible above it. Nine consecutive lines read HTTP 200 served-by-site=A, then every following line reads HTTP 200 served-by-site=B. Notice that every response on both sides of the flip is still HTTP 200 — the whole primary site went away and no request was dropped."]
+*What just happened:* *automatic cross-site failover*. The client kept its address; the mesh *ejected* failing site A (outlier detection) and *retried* in-flight requests onto site B:
 
-That is *automatic cross-site failover*. The client never changed its address; the mesh detected site A's requests failing, *ejected* it (outlier detection), and *retried* the in-flight requests onto site B — so the client saw a clean flip from A to B, not an outage. The whole primary site vanished and *no request was dropped*.
+[mermaid]
+....
+include::example$diagrams/resilience-multicluster-dr/10-failover-request.mmd[]
+....
 
-Now *recover*. Bring site A back. Traffic *returns to the primary* once the three fresh site-A pods are Ready *and* site A's current ejection from the pool lapses, and the locality-aware load balancer re-adds it as the preferred site — *about 30–90 seconds*, longer after a longer outage:
+Now *recover* site A. Traffic returns once its fresh pods are Ready *and* its current ejection lapses: *about 30–90 seconds*, longer after a longer outage.
 
 [source,sh,role=execute]
 ----
@@ -637,7 +739,7 @@ oc scale deploy/parasol-claims -n $SITEA --replicas=3
 oc rollout status deploy/parasol-claims -n $SITEA --timeout=90s
 ----
 
-Back in the tailing log, watch the marker flip *back to A*:
+Watch the tail flip *back to A*:
 
 .Expected output (failback — traffic returns to the recovered primary, still all 200)
 [source,texinfo]
@@ -647,10 +749,10 @@ Back in the tailing log, watch the marker flip *back to A*:
 17:37:42  HTTP 200  served-by-site=A
 ----
 
-Stop the tail in Terminal 2 (`Ctrl-C`). You just failed and recovered a whole site with the client none the wiser.
+Stop the tail in Terminal 2 (`Ctrl-C`). A whole site failed and recovered, the client none the wiser.
 
-[NOTE]
 .Why the brief pause, and why no `404`/`503`
+[%collapsible]
 ====
 Between the last `A` and the first `B` you may see a *one- or two-second gap* in the log (the failover request took a retry hop, so the once-a-second loop skipped a beat) — but *no error line*, however long site A stays down. Two settings make that true:
 
@@ -662,7 +764,7 @@ The same timer sets the failback. Traffic returns to site A when its current eje
 
 [.checkpoint]
 ****
-✔ *Verify:* You wired cross-site failover on the mesh — a *ServiceEntry* declaring both sites with localities, a *DestinationRule* (locality-aware load balancing + outlier detection), and a *VirtualService* with retries on the ingress gateway — saw the client steadily served by the *primary* site A, then *scaled the entire site A to zero* and watched the client *fail over to site B with every request still `200`*, and finally *recovered* site A and watched traffic *return* to it. Automatic failover and failback, zero client change.
+✔ *Verify:* with the three resources applied, the Terminal 2 tail went from `served-by-site=A` to `B`, every line `HTTP 200`, while site A was at zero, and back to `A` after recovery.
 ****
 
 == 3. `[ADD-ON]` Connect two sites over a VAN with Red Hat Service Interconnect
@@ -671,8 +773,17 @@ The same timer sets the failback. Traffic returns to site A when its current eje
 [NOTE]
 .This whole exercise is a flagged, skippable `[ADD-ON]`
 ====
-Red Hat Service Interconnect is a *separate subscription*. Nothing earlier in this module depends on it. Skip it freely if RHSI isn't part of your engagement. It's included, fully hands-on, because *connecting* separate sites is what makes cross-site failover possible in the first place when the sites are real, distant clusters.
+Red Hat Service Interconnect is a *separate subscription*, and nothing earlier depends on it: skip it freely if RHSI isn't part of your engagement. It's here because *connecting* real, distant sites is what makes cross-site failover possible at all.
 ====
+
+The failover you built assumes the sites can reach each other; Parasol's real ones are two data centers with *no shared network*. A *Virtual Application Network* (VAN), a mutual-TLS Layer-7 overlay, connects just the services that need it over one outbound connection, with no VPN.
+
+*You'll end with:* DC-A reading DC-B's claims service (`SITE=B`) through a *local* address, `claims-remote`, over a mutual-TLS link.
+
+[mermaid]
+....
+include::example$diagrams/resilience-multicluster-dr/03-rhsi-van.mmd[]
+....
 
 Set this exercise's shortcuts first (re-run this block after a reconnect):
 
@@ -683,9 +794,7 @@ SITEB={user}-site-b
 echo "DC-A: $SITEA   ·   DC-B: $SITEB"
 ----
 
-The failover you just built assumes the two sites can *reach* each other. On one cluster that's free. Now treat `{user}-site-a` and `{user}-site-b` as *two separate data centers* — DC-A and DC-B — with *no shared network*, and link them with a *Virtual Application Network* (VAN): a mutual-TLS Layer-7 overlay that connects *just the services that need it*, over a single outbound connection, with no VPN.
-
-Each site becomes a *Site*. Make DC-A *linkable* (`linkAccess: default`) so DC-B can connect to it:
+Treat `{user}-site-a` and `{user}-site-b` as data centers DC-A and DC-B. Each becomes a *Site*; DC-A is *linkable* (`linkAccess: default`) so DC-B can connect to it:
 
 [tabs]
 ====
@@ -723,7 +832,18 @@ site.skupper.io/dc-a condition met
 site.skupper.io/dc-b condition met
 ----
 
-Now *expose* DC-B's claims service across the VAN with a *Connector* (it binds the local `parasol-claims` pods to a *routing key*), and *consume* it in DC-A with a *Listener* (a local endpoint `claims-remote:8080` bound to the *same* routing key):
+Expose DC-B's claims service across the VAN, and consume it in DC-A:
+
+[cols="2,5",options="header"]
+|===
+| Object | Its job
+
+| *Connector* `claims`, in DC-B
+| *Exposes*: binds the local `parasol-claims` pods to the *routing key* `claims-cross`
+
+| *Listener* `claims-remote`, in DC-A
+| *Consumes*: a local endpoint, `claims-remote:8080`, bound to the *same* routing key
+|===
 
 // Grounded 2026-07-29 on OCP 4.22.5: `oc get consoleplugins` lists
 // advanced-cluster-security, console-dashboards-plugin, distributed-tracing-console-plugin,
@@ -736,7 +856,7 @@ Now *expose* DC-B's claims service across the VAN with a *Connector* (it binds t
 Console::
 +
 --
-Open the masthead *Quick create* (+) menu → *Import YAML* and create the `Connector` (in `{user}-site-b`) and the `Listener` (in `{user}-site-a`) from the *CLI* tab. The {ocp_console_url}[web console^] *Networking → Service Interconnect* view visualizes them once linked — it is an *optional console plugin*, so if *Service Interconnect* isn't in the *Networking* menu, the plugin isn't installed on this cluster and the CLI checks below are the authoritative view.
+Open the masthead *Quick create* (+) menu → *Import YAML* and create the `Connector` (in `{user}-site-b`) and the `Listener` (in `{user}-site-a`) from the *CLI* tab. The {ocp_console_url}[web console^] *Networking → Service Interconnect* view draws them once linked; it is an *optional console plugin*, so if that menu item is missing, the CLI checks below are authoritative.
 --
 CLI::
 +
@@ -758,7 +878,14 @@ EOF
 --
 ====
 
-Now *link* the two sites. This is the step the field warns about — a *token exchange*: the linkable site (DC-A) issues an *AccessGrant* (a short-lived, redeemable token), and DC-B *redeems* it with an *AccessToken* to form the `Link`. Issue the grant:
+Now *link* the two sites with a *token exchange*, the step the field warns about:
+
+[mermaid]
+....
+include::example$diagrams/resilience-multicluster-dr/11-token-exchange.mmd[]
+....
+
+DC-A, the linkable site, issues an *AccessGrant* (a short-lived, redeemable token):
 
 [source,sh,role=execute]
 ----
@@ -771,7 +898,7 @@ EOF
 oc wait --for=condition=Ready accessgrant/dc-a-grant -n $SITEA --timeout=60s
 ----
 
-The grant publishes its *url*, *code*, and *ca* into its `status`. *Script the redemption* — copy those three fields into an `AccessToken` in DC-B (doing this by hand is the classic RHSI footgun; the multi-line `ca` in particular):
+DC-B redeems it with an *AccessToken*. The block copies the grant's *url*, *code* and *ca* into it (by hand, the multi-line `ca` is the classic RHSI footgun):
 
 [source,sh,role=execute]
 ----
@@ -800,9 +927,15 @@ link.skupper.io/dc-a-token condition met
 link.skupper.io/dc-a-token condition met
 ----
 
-The controller redeems the token in the background and only then creates the `Link`, so the block waits twice: first for the `Link` to exist, then for it to be `Ready`. Each wait prints `condition met`. A single wait on `Ready` straight after the apply fails with `NotFound`, because the `Link` does not exist yet.
+*What just happened:* DC-B redeemed the grant, and the resulting `Link` makes the two DCs one VAN.
 
-Confirm the VAN is wired end-to-end — the Connector and Listener found each other across the link, and both DCs are in one network:
+.Why the block waits twice
+[%collapsible]
+====
+The controller redeems the token in the background and only then creates the `Link`, so the block waits twice: first for the `Link` to exist, then for it to be `Ready`. Each wait prints `condition met`. A single wait on `Ready` straight after the apply fails with `NotFound`, because the `Link` does not exist yet.
+====
+
+Confirm the Connector and Listener found each other across the link, and both DCs are in one network:
 
 [source,sh,role=execute]
 ----
@@ -819,7 +952,7 @@ connector matched=true key=claims-cross
 sites in network=2
 ----
 
-Now the payoff — read DC-B's claims service from *inside DC-A*, through the *local* `claims-remote` address the VAN provides, with the app unchanged:
+*Predict, then run:* from *inside DC-A*, `claims-remote` and `claims` are both local addresses. Which site answers each?
 
 [source,sh,role=execute]
 ----
@@ -842,12 +975,13 @@ remote over the VAN (claims-remote): {"site":"B","service":"parasol-claims","ser
 local in DC-A (claims):              {"site":"A","service":"parasol-claims","served":64,"pod":"parasol-claims-5b546d46bc-fcrp8"}
 ----
 
-If the *remote* line prints `NO-RESPONSE` instead, the link is not carrying traffic — work through xref:resilience-multicluster-dr/troubleshooting.adoc[the troubleshooting page] (the `claims-remote` and `Link` entries) before moving on.
+Remote line `NO-RESPONSE`? The link is not carrying traffic: work through xref:resilience-multicluster-dr/troubleshooting.adoc[the troubleshooting page] (the `claims-remote` and `Link` entries) before moving on.
 
-`SITE=B` through `claims-remote` — DC-A read DC-B's claims service over a mutual-TLS Layer-7 link, through a *local* address, with *no VPN and no shared network*. The `pod` field in the remote response even names an actual DC-B pod — proof the bytes came from the other site, not a local cache. On one cluster this VAN links two *namespaces*; across two clusters the *identical* CRs link two *data centers*. That is how you connect the real sites your mesh then fails over between.
+*What just happened:* DC-A read DC-B's claims service (`SITE=B`) through a *local* address, with *no VPN and no shared network*; the remote `pod` field names a real DC-B pod.
+Here the VAN links two *namespaces*; across two clusters the *identical* CRs link two *data centers*, the real sites your mesh fails over between.
 
-[NOTE]
 .Visualize the network — the Service Interconnect console
+[%collapsible]
 ====
 // Grounded 2026-07-29 on OCP 4.22.5: same `oc get consoleplugins` check as the
 // Connector/Listener marker above — no Service Interconnect plugin installed on this cluster, so per the
@@ -866,7 +1000,7 @@ The {ocp_console_url}[web console^] *Networking → Service Interconnect* view d
 
 [.checkpoint]
 ****
-✔ *Verify:* You built a Skupper VAN across two simulated data centers — two ``Site``s (Ready), a `Connector` exposing DC-B's claims and a `Listener` in DC-A (matched on routing key `claims-cross`), linked by an `AccessGrant`→`AccessToken` (`Link` Ready, 2 sites in the network) — and read DC-B's claims service (`SITE=B`) from inside DC-A through the local `claims-remote` endpoint, distinct from DC-A's own `SITE=A`, with *no VPN*.
+✔ *Verify:* both ``Site``s and the `Link` Ready, Listener and Connector `matched=true` on `claims-cross`, `sites in network=2`, and inside DC-A `claims-remote` answers `SITE=B`, `claims` answers `SITE=A`.
 ****
 
 == Challenge (optional)
@@ -874,11 +1008,11 @@ The {ocp_console_url}[web console^] *Networking → Service Interconnect* view d
 
 You have the mechanics. Try these on your own:
 
-* *Fail over the RHSI VAN too.* You linked DC-A → DC-B. Add a *second* Connector in DC-A on the *same* routing key, so the Listener has two backends across the VAN, then fail one and reason about how RHSI load-balances and fails over across sites — the cross-*cluster* analog of the mesh failover you built in exercise 2.
-* *Break the token redemption on purpose.* In the RHSI section, create the `AccessToken` with a *truncated* `ca` and watch the `Link` never reach `Ready` — then fix it. This is the single most common RHSI support case; feel it once.
-* *Tune the failover window.* Change the `DestinationRule` `outlierDetection.baseEjectionTime` to `5s` and to `120s`, fail site A each time, and time the failback after you recover it. Then delete `retryRemoteLocalities: true` from the `VirtualService`, keep site A down for a full minute, and find the `503` that appears when the ejection lapses.
-* *Header-pin a site.* Add a `VirtualService` `match` on a header (for example `x-parasol-site: b`) that routes *explicitly* to site B regardless of health — the "send my test traffic to the DR site" pattern — on top of the automatic failover.
+* *Fail over the RHSI VAN too.* Add a *second* Connector in DC-A on the *same* routing key, so the Listener has two backends across the VAN; fail one and reason about how RHSI load-balances and fails over across sites, the cross-*cluster* analog of exercise 2.
+* *Break the token redemption on purpose.* Create the `AccessToken` with a *truncated* `ca`, watch the `Link` never reach `Ready`, then fix it: the single most common RHSI support case.
+* *Tune the failover window.* Set `outlierDetection.baseEjectionTime` to `5s`, then `120s`; fail site A each time and time the failback. Then delete `retryRemoteLocalities: true`, keep site A down a full minute, and find the `503` when the ejection lapses.
+* *Header-pin a site.* Add a `VirtualService` `match` on a header (say `x-parasol-site: b`) that routes *explicitly* to site B regardless of health, on top of the automatic failover: the "send my test traffic to the DR site" pattern.
 
-When you are done, run `ws verify {module-id}` in the Terminal — or run `ws prep {module-id} --yes` to return your world to the entry state (the resilient sites and the client up, the failover routing and any RHSI objects removed).
+When you are done, run `ws verify {module-id}` in the Terminal, or `ws prep {module-id} --yes` to return to the entry state (resilient sites and client up, failover routing and RHSI objects removed).
 
 endif::demo[]
