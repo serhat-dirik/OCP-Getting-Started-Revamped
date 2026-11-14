@@ -29,7 +29,22 @@ include::partial$prereq-ws-start.adoc[]
 .Highlighted: what you build in this module
 image::solution-map/gitops-fundamentals.svg["The Parasol solution map with this module's pieces highlighted: GitOps, parasol-claims and claims-db.",width=900]
 
-Set two shortcuts you will reuse in the terminal commands below:
+In this lab a controller deploys Parasol's claims app from Git, undoes hand edits to the cluster, and applies changes you make only in Git.
+
+[NOTE]
+.One terminal, plus two browser tabs
+====
+Terminal commands run in the *Terminal* tab beside these instructions, logged in as `{user}`.
+Open two browser tabs now:
+
+* *Gitea*, your config repo: {gitea_url}/{user}/claims-config[{user}/claims-config^].
+* *Argo CD*, the student instance: {student_argo_url}[the student Argo CD UI^].
+Sign in with *Log in via OpenShift* as `{user}`, with your workshop password.
+
+Argo CD shows *sync and health*; the terminal shows the *workloads* it manages.
+====
+
+Set two shortcuts the terminal commands reuse:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -38,25 +53,7 @@ STAGE={user}-stage
 echo "your environments: $DEV and $STAGE"
 ----
 
-Every exercise that uses them sets them again in its first block: *if your terminal reconnects, run the first block of the exercise you are in again*.
-
-In this lab you hand your claims environments over to GitOps.
-You tour the `claims-config` repository that describes them, create your first Argo CD *Application* so a controller deploys the app from Git into `{user}-dev`, then make the cluster *drift* and watch Argo CD flag it and put it back — first when you press Sync, then on its own.
-Finally you promote a change to `{user}-stage` the GitOps way: by editing Git and letting the change flow in.
-
-[NOTE]
-.One terminal, plus two browser tabs
-====
-Terminal commands run in the *Terminal* tab beside these instructions, logged in as `{user}`.
-Two tabs in the browser carry the rest of the lab:
-
-* *Gitea* — your config repo: {gitea_url}/{user}/claims-config[{user}/claims-config^].
-* *Argo CD* (the student instance) — {student_argo_url}[the student Argo CD UI^].
-You sign in there with *Log in via OpenShift*, using your workshop username `{user}` and password.
-
-Open both now.
-The Argo CD web UI is where you watch *sync and health*; the terminal is where you see the *workloads* it manages.
-====
+TIP: Terminal reconnected? Run the first block of the exercise you are in again: each one sets them.
 endif::demo[]
 
 // ============================================================================
@@ -216,9 +213,17 @@ ifndef::demo[]
 == 1. Git is the source of truth
 ⏱ *~5 min* · tour the repository that describes your environments
 
-Before a controller can reconcile your cluster to Git, you should know what is *in* Git.
-The workshop forked a small config repository into your Git account — `{user}/claims-config` — the *same* repo the config module used.
-Clone it in the terminal and look:
+Parasol's claims environments are described in a small Kustomize repository.
+Before a controller deploys from it, read it.
+
+*You'll end with:* your `claims-config` fork cloned, and the seven objects its `dev` overlay renders: the *desired state*.
+
+[mermaid]
+....
+include::example$diagrams/gitops-fundamentals/05-kustomize-render.mmd[]
+....
+
+Clone your fork and list its files:
 
 // The `|| (cd … && git fetch)` fallback is what makes a SECOND run of this module work. A bare
 // `git clone` into an existing directory fails with "destination path already exists", and the
@@ -256,10 +261,18 @@ find . -type f -not -path './.git/*' | sort
 ----
 ====
 
-This is plain Kustomize: one `base/` that describes a claims environment once (a ConfigMap, a Secret, the database, and the app's Deployment + Service + Route), and three `overlays/` that change only what differs per environment.
-`applicationset.yaml` and `rollouts/` also live in this shared repo, but they belong to the *GitOps at Scale* module — ignore them for this lab.
-The `dev` overlay is *yours* — when your fork was created, its namespace placeholder was rewritten to your username.
-Read it:
+One `base/` describes a claims environment once; three `overlays/` change only what differs per environment.
+Ignore `applicationset.yaml` and `rollouts/`: they belong to the *GitOps at Scale* module.
+
+.What is in `base/`, and why the `dev` overlay names your namespace
+[%collapsible]
+====
+`base/` holds a ConfigMap, a Secret, the database, and the app's Deployment, Service and Route.
+The workshop forked this config repository into your Git account; it is the same repository the *Config, Secrets & Multi-Environment* module works with.
+The `dev` overlay is *yours*: when your fork was created, its namespace placeholder was rewritten to your username.
+====
+
+Read your `dev` overlay:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -294,10 +307,19 @@ patches:
 ----
 ====
 
-The overlay is tiny on purpose: it pins the *namespace* to `{user}-dev`, sets *1 replica*, and patches two ConfigMap values (`APP_ENV=dev`, log level `DEBUG`).
-Everything else — the image, the probes, the database — comes from `base/`.
-Now render what Argo CD will actually reconcile.
-`oc kustomize` renders an overlay to the exact YAML the cluster would receive, *without applying anything*:
+The overlay sets only four things; the image, the probes and the database come from `base/`:
+
+[cols="2,3",options="header"]
+|===
+| The `dev` overlay sets | Value
+
+| Namespace | `{user}-dev`
+| `parasol-claims` replicas | `1`
+| ConfigMap `APP_ENV` | `dev`
+| ConfigMap `QUARKUS_LOG_LEVEL` | `DEBUG`
+|===
+
+`oc kustomize` renders the overlay to the exact YAML the cluster would receive, *without applying anything*:
 
 [source,sh,role=execute]
 ----
@@ -335,27 +357,40 @@ kind: Route
 ----
 ====
 
-That rendered YAML — seven objects (ConfigMap, Secret, two Services, two Deployments, and a Route), all in `{user}-dev`, the claims app at 1 replica — is the *desired state*.
-In the config module you applied it by hand with `oc apply -k`.
-This module hands that job to a controller: you point an Argo CD Application at `overlays/dev`, and it renders and applies exactly this, then keeps the cluster matching it.
+*What just happened:* seven objects (a ConfigMap, a Secret, two Services, two Deployments and a Route), all in `{user}-dev`, the claims app at 1 replica.
+That is the *desired state* an Argo CD Application applies in the next exercise.
+
+.By hand, or by a controller?
+[%collapsible]
+====
+`oc apply -k overlays/dev` applies this same YAML once, by hand: the way the *Config, Secrets & Multi-Environment* module deploys it.
+This module hands that job to a controller instead: you point an Argo CD Application at `overlays/dev`, and it renders and applies exactly this, then keeps the cluster matching it.
+====
 
 [.checkpoint]
 ****
-✔ *Verify:* `find` shows a `base/` and three `overlays/`; `overlays/dev/kustomization.yaml` pins `namespace: {user}-dev` and `count: 1`; and `oc kustomize overlays/dev` renders seven objects into `{user}-dev` — the desired state, not yet applied.
+✔ *Verify:* `find` shows `base/` and three `overlays/`; the `dev` overlay pins `namespace: {user}-dev` and `count: 1`; `oc kustomize overlays/dev` renders seven objects into `{user}-dev`, not yet applied.
 ****
 
 == 2. Create your first Argo CD Application
 ⏱ *~11 min* · point a controller at Git and watch it deploy
 
-Set this exercise's shortcuts first:
+Parasol wants `dev` deployed by a controller reading Git, not by whoever last ran `oc apply`.
+
+*You'll end with:* the `claims-dev-{user}` Application *Synced* and *Healthy* in Argo CD, and the claims app serving from `{user}-dev`.
+
+image::gitops-fundamentals/gitops-fundamentals-04-app-synced-healthy.png["The claims-dev application after SYNC: Synced and Healthy, the seven resources green, and the sidebar counting Synced 7 with nothing OutOfSync or Missing."]
+// fully green: Synced + Healthy, all 7 resources with green health hearts, the two Deployments Healthy.
+// HIGH priority (this is the "it worked" payoff). See media-manifest.md.
+
+Set this exercise's shortcuts:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
 DEV={user}-dev; STAGE={user}-stage
 ----
 
-Your `{user}-dev` namespace is empty of the claims app right now — you removed nothing; the entry state left it clean so *this* is the deploy.
-Confirm it:
+`{user}-dev` has no claims app yet. Confirm it:
 
 [tabs]
 ====
@@ -363,7 +398,7 @@ Console::
 +
 --
 In the {ocp_console_url}[OpenShift web console^], set the *Project* selector to `{user}-dev`, then open *Workloads* → *Deployments*.
-The list is empty — no claims app is deployed here yet.
+The list is empty.
 --
 CLI::
 +
@@ -381,9 +416,7 @@ No resources found in {user}-dev namespace.
 --
 ====
 
-Now create the Application.
-You do this in the *Argo CD web UI*, not with `oc` — and there is a concrete reason.
-Try the `oc` way first and watch it be refused:
+*Predict, then run:* you may deploy into `{user}-dev`. Will the cluster accept an Argo CD Application you submit with `oc`?
 
 // MAINTAINERS: the repoURL below is a DELIBERATE dead end and must stay unresolvable.
 // Do NOT "fix" it into {gitea_url}/{user}/claims-config.git. This is a role=execute block, so the
@@ -417,11 +450,21 @@ Error from server (Forbidden): ... applications.argoproj.io is forbidden:
 User "{user}" cannot get resource "applications" in API group "argoproj.io" in the namespace "ogsr-student-gitops"
 ----
 
-That is by design.
-The Argo CD instance is *shared* by the whole room, and you are not allowed to write objects into its control-plane namespace directly.
-The `repoURL` in that manifest is a deliberate dead end, not a typo — the request is refused before anything reads it, so there is no point pointing it at your real fork.
-That URL belongs in the form you are about to fill in.
-Instead you act *through* Argo CD, signed in as yourself — and it lets you manage only *your* project.
+*What just happened:* refused, by design: the Argo CD instance is *shared* by the whole room.
+You act *through* it, signed in as yourself, and it lets you manage only *your* project.
+
+[mermaid]
+....
+include::example$diagrams/gitops-fundamentals/06-two-ways-in.mmd[]
+....
+
+.Why the `repoURL` in that manifest is a dead end
+[%collapsible]
+====
+It is deliberate, not a typo.
+The request is refused before anything reads the repository, so there is no point pointing it at your real fork.
+Your fork's URL belongs in the form you are about to fill in.
+====
 
 include::partial$idp-choice.adoc[]
 
@@ -431,7 +474,6 @@ image::gitops-fundamentals/gitops-fundamentals-01-argo-login.png[The student Arg
 // "LOG IN VIA OPENSHIFT" button (Dex + OpenShift OAuth). Embed here. HIGH priority: attendees must
 // recognize this button rather than the local admin login. See media-manifest.md.
 
-Now create the app.
 Click *+ NEW APP* (top left) and fill the form:
 
 [cols="1,3",options="header"]
@@ -454,40 +496,39 @@ image::gitops-fundamentals/gitops-fundamentals-02-new-app-form.png["The Argo CD 
 // with exactly these values (Project proj-user1, Path overlays/dev, Namespace user1-dev, Sync Policy
 // Manual). HIGHEST priority capture — the form is the core action of the module. See media-manifest.md.
 
-[TIP]
-.The form is just the object from the concept — see it as YAML
+.The form is the Application object: see it as YAML
+[%collapsible]
 ====
 At the top of the *NEW APP* panel, click *EDIT AS YAML*.
-What you filled in *is* the Application custom resource from the concept — `spec.source` (your repo, `main`, `overlays/dev`), `spec.destination` (in-cluster, `{user}-dev`), and `spec.project` (`proj-{user}`).
+What you filled in *is* the Application custom resource from the concept: `spec.source` (your repo, `main`, `overlays/dev`), `spec.destination` (in-cluster, `{user}-dev`), and `spec.project` (`proj-{user}`).
 The form and the YAML are the same object; the UI is how you create it under your own identity.
 ====
 
-The app appears as a card, *Missing* and *OutOfSync* — Argo CD knows what *should* exist but has not applied it yet (that is what *Manual* sync means).
-The card may take up to ~90 seconds to first populate while Argo CD clones your repository for the first time — if it looks empty for a moment, give it a beat.
-Open the app to see its resource tree: the seven objects you rendered earlier, all greyed out and OutOfSync.
+The app appears *Missing* and *OutOfSync*: with *Manual* sync, Argo CD knows what should exist but waits for you.
+Open it to see the seven objects you rendered, greyed out (the first clone can take ~90 seconds).
 
 image::gitops-fundamentals/gitops-fundamentals-03-app-outofsync-missing.png["The claims-dev application immediately after CREATE: APP HEALTH Missing, SYNC STATUS OutOfSync from main, a note that auto sync is not enabled, and a resource tree of exactly seven objects — two Services, two Deployments, a ConfigMap, a Secret and a Route — all still greyed out. The sidebar counts OutOfSync 7 and Missing 7."]
 // card/tree immediately after CREATE: status Missing + OutOfSync, the 7 resources present but not yet
 // deployed. Embed here. See media-manifest.md.
 
-Now *deploy it*: click *SYNC*, then *SYNCHRONIZE* in the panel that opens.
-Argo CD applies the rendered manifests in order and the tree goes green — Services and Route first, then the Deployments roll out (claims-db, then the app booting and seeding its database).
-Within a minute the app is *Synced* and *Healthy*.
+Click *SYNC*, then *SYNCHRONIZE*.
+Within a minute the app is *Synced* and *Healthy*, as pictured at the top.
 
-image::gitops-fundamentals/gitops-fundamentals-04-app-synced-healthy.png["The claims-dev application after SYNC: Synced and Healthy, the seven resources green, and the sidebar counting Synced 7 with nothing OutOfSync or Missing."]
-// fully green: Synced + Healthy, all 7 resources with green health hearts, the two Deployments Healthy.
-// HIGH priority (this is the "it worked" payoff). See media-manifest.md.
+.What Sync applied, in order
+[%collapsible]
+====
+Argo CD applies the rendered manifests in order: the Services and the Route first, then the Deployments roll out — `claims-db`, then the app, which boots and seeds its database.
+====
 
-Confirm the result — the workloads are really there, and they are *GitOps-managed*:
+Confirm the workloads are really there, and *GitOps-managed*:
 
 [tabs]
 ====
 Console::
 +
 --
-With the *Project* set to `{user}-dev`, open *Workloads* → *Deployments*: `claims-db` and `parasol-claims` are both there, `1/1` ready — the same tree Argo CD shows, now as real workloads.
+With the *Project* set to `{user}-dev`, open *Workloads* → *Deployments*: `claims-db` and `parasol-claims` are both `1/1`.
 Click `parasol-claims`, open its *YAML* tab, and find under `metadata.annotations` the line `argocd.argoproj.io/tracking-id: claims-dev-{user}:apps/Deployment:{user}-dev/parasol-claims`.
-That annotation is Argo CD's fingerprint — the CLI reads the same field below.
 --
 CLI::
 +
@@ -510,16 +551,17 @@ tracking-id: claims-dev-{user}:apps/Deployment:{user}-dev/parasol-claims
 --
 ====
 
-That `tracking-id` annotation is Argo CD's fingerprint: this Deployment was reconciled from your Git repo, not applied by hand.
-Prove the app actually serves Parasol's claims, database-backed:
+*What just happened:* the `tracking-id` is Argo CD's fingerprint: reconciled from your Git repo, not applied by hand.
+
+Prove the app serves Parasol's claims from its database:
 
 [tabs]
 ====
 Console::
 +
 --
-Open *Networking* → *Routes* in `{user}-dev` and click the `parasol-claims` route's *Location* link — it opens the claims portal in a new tab.
-Append `/api/claims` to that URL to see the seeded claims as JSON, and `/q/health/ready` to see the readiness endpoint answer.
+Open *Networking* → *Routes* in `{user}-dev` and click the `parasol-claims` route's *Location* link.
+Append `/api/claims` to that URL for the seeded claims as JSON, and `/q/health/ready` for the readiness endpoint.
 --
 CLI::
 +
@@ -540,26 +582,33 @@ health: 200
 --
 ====
 
-You created one object in a web form and a controller stood up a complete, database-backed environment from Git — and stamped it as its own.
+One object in a web form, and a controller stood up a database-backed environment from Git.
 
 [.checkpoint]
 ****
-✔ *Verify:* the `oc apply` of an Application was *Forbidden* (you use the UI); the `claims-dev-{user}` app is *Synced* and *Healthy* in Argo CD; `oc get deploy -n {user}-dev` shows `claims-db` and `parasol-claims` both `1/1`; the Deployment carries an `argocd.argoproj.io/tracking-id`; and the Route answers `200` with seeded claims.
+✔ *Verify:* `oc apply` of an Application was *Forbidden*; `claims-dev-{user}` is *Synced* and *Healthy* in Argo CD; `oc get deploy -n {user}-dev` shows `claims-db` and `parasol-claims` `1/1`, with an `argocd.argoproj.io/tracking-id`; the Route answers `200` with seeded claims.
 ****
 
 == 3. Drift and self-heal: the platform argues back
 ⏱ *~15 min* · break the cluster by hand, and watch Git win — first on demand, then on its own
 
-Set this exercise's shortcuts first:
+Sooner or later, someone changes a running app by hand, behind Git's back.
+Do it now, and see what Argo CD does.
+
+*You'll end with:* a hand edit reverted twice: first when you press *Sync*, then by *self-heal*, with nobody acting.
+
+[mermaid]
+....
+include::example$diagrams/gitops-fundamentals/07-drift-two-ways.mmd[]
+....
+
+Set this exercise's shortcuts:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
 DEV={user}-dev; STAGE={user}-stage
 ----
 
-This is the beat that makes GitOps matter.
-Your app is deployed from Git and `Synced`.
-Now do what happens in every real cluster: reach in and change the running app by hand, *behind Git's back*.
 Scale the Deployment from its Git-defined 1 replica up to 3:
 
 [tabs]
@@ -568,7 +617,6 @@ Console::
 +
 --
 In *Topology* (Project `{user}-dev`), click the `parasol-claims` node to open its side panel, then click the *up arrow* on the Pod donut twice to raise the count to *3* (or *Actions* → *Edit Pod count*).
-The ring fills to three Pods — a hand edit, exactly the kind of out-of-band change Git is about to notice.
 --
 CLI::
 +
@@ -588,17 +636,14 @@ live replicas now: 3
 --
 ====
 
-Switch to the Argo CD tab and press *Refresh* on the `claims-dev-{user}` app.
-It flips to *OutOfSync*.
-Open the `parasol-claims` Deployment in the tree and click *DIFF*: Argo CD shows you the exact divergence — live `replicas: 3`, desired `replicas: 1`.
+In the Argo CD tab, press *Refresh* on the `claims-dev-{user}` app: it flips to *OutOfSync*.
+Open the `parasol-claims` Deployment in the tree and click *DIFF*: live `replicas: 3`, desired `replicas: 1`.
 
 image::gitops-fundamentals/gitops-fundamentals-05-drift-diff.png["The DIFF tab with Compact diff enabled, showing a single differing line for apps/Deployment/user1-dev/parasol-claims: replicas: 3 on the live side in red against replicas: 1 from Git in green. The sidebar shows OutOfSync 1 while the other eleven resources stay Healthy."]
 // Deployment DIFF panel open, showing `replicas: 3` (live) vs `replicas: 1` (desired/Git), red/green.
 // HIGH priority — this is the module's signature visual. See media-manifest.md.
 
-Here is the important part, and the reason self-heal exists.
-With *Manual* sync, Argo CD *reports* the drift but does *not* fix it.
-Wait, then check — the drift persists; Argo CD is watching, not enforcing:
+*Predict, then run:* sync is *Manual*. Will Argo CD put the replica count back if you wait 30 seconds?
 
 [source,sh,role=execute]
 ----
@@ -612,9 +657,9 @@ oc get deployment/parasol-claims -n $DEV -o jsonpath='still live: {.spec.replica
 still live: 3 replicas (Argo sees OutOfSync but has not reverted)
 ----
 
-Now make Git win.
-In Argo CD, click *SYNC → SYNCHRONIZE*.
-Argo CD reapplies the desired state and the drift is erased — back in the terminal, within a few seconds:
+*What just happened:* no. With *Manual* sync, Argo CD *reports* drift but does not fix it: it watches, it does not enforce.
+
+Now make Git win: in Argo CD, click *SYNC → SYNCHRONIZE*, then check the terminal:
 
 [source,sh,role=execute]
 ----
@@ -628,32 +673,27 @@ oc get deployment/parasol-claims -n $DEV -o jsonpath='after Sync: {.spec.replica
 after Sync: 1 replica (reverted to Git)
 ----
 
-That is the manual model: Argo CD shows drift, *you* decide, Sync reconciles.
-Powerful — but it still needs a human to notice.
-
-*Now turn on the automatic version.*
-In the Argo CD app, open *APP DETAILS* (or *DETAILS*), find *SYNC POLICY*, and click *ENABLE AUTO-SYNC*, then *ENABLE* *SELF HEAL*.
+Manual sync still needs a human to notice.
+*Turn on the automatic version:* in the Argo CD app, open *APP DETAILS* (or *DETAILS*), find *SYNC POLICY*, and click *ENABLE AUTO-SYNC*, then *ENABLE* *SELF HEAL*.
 
 image::gitops-fundamentals/gitops-fundamentals-06-enable-selfheal.png["The application's SYNC POLICY block after exercise 3: ENABLE AUTO-SYNC ticked and SELF HEAL ticked, with PRUNE RESOURCES deliberately left unticked. Above it the SOURCE block confirms the repo, target revision main and path overlays/dev."]
 // panel with AUTO-SYNC enabled and SELF HEAL enabled. Embed here. See media-manifest.md.
 
-With self-heal on, Argo CD stops waiting.
-Drift the cluster one more time — and this time *do not touch Argo CD at all*.
-Watch it snap back on its own.
+Drift the cluster once more, and this time *do not touch Argo CD at all*:
 
 [tabs]
 ====
 Console::
 +
 --
-In *Topology* (Project `{user}-dev`), scale `parasol-claims` up to *3* again with the Pod-donut up arrow, then *keep Topology open and do nothing else*.
-Within a few seconds the ring shrinks back to a single Pod on its own — Argo CD caught the drift and reverted it, with no Sync click.
-(If you are repeating this drift a second or third time, give it longer than a few seconds — see the note below on self-heal backoff.)
+In *Topology* (Project `{user}-dev`), scale `parasol-claims` up to *3* again with the Pod-donut up arrow, then *do nothing else*.
+Within seconds the ring shrinks back to one Pod on its own.
+(Repeating this drift? Give it longer: see the backoff note below.)
 --
 CLI::
 +
 --
-This command polls the live replica count once a second and stops the moment Argo CD has put it back to 1.
+This polls the replica count every second and stops the moment Argo CD puts it back to 1.
 // Bounded by WALL CLOCK ($SECONDS), not by an iteration count. An earlier version looped `seq 1 90`
 // with `sleep 1` and claimed three minutes: true only because each pass also makes an API call, so
 // the real elapsed time depended on how fast the apiserver answered. Same trap tools/ws/ws documents
@@ -688,11 +728,20 @@ drifted to 3 — now watch, hands off (Argo CD snaps it back):
 --
 ====
 
-The console edit vanished — in a few seconds, with *nobody* pressing Sync.
-That is self-heal: Argo CD *watches* the resources it manages, so it catches drift the moment it happens and corrects it — not on a slow timer.
+*What just happened:* the edit vanished in seconds, with *nobody* pressing Sync: self-heal *watches* what Argo CD manages and corrects drift as it happens.
 
-[NOTE]
-.How fast, and what can slow it down
+[cols="2,3,3",options="header"]
+|===
+| | Manual sync | Self-heal
+
+| Drift is | Reported as *OutOfSync* | Reported, then reverted
+| Who reverts it | You, with *Sync* | Argo CD, unasked
+| How fast | When you press *Sync* | Seconds: a watch triggers it
+| Choose it when | People must see a change before it lands | Git must be the only author
+|===
+
+.Slower than a few seconds? How fast self-heal is, and its backoff
+[%collapsible]
 ====
 Self-heal is *watch-triggered*: Argo CD reacts to the live change almost immediately (measured ~4 seconds here), not on a slow poll.
 The controller's periodic reconcile interval — `90s` on this cluster — bounds a single, fresh drift: it is the longest one could linger if a watch event were ever missed under heavy load.
@@ -707,28 +756,43 @@ Either way you *cannot out-edit Git*: the manual *Sync* button reverts drift ins
 
 [.checkpoint]
 ****
-✔ *Verify:* after scaling to 3 with *Manual* sync, the Deployment *stayed* at 3 until you pressed *Sync*, which reverted it to 1; after enabling *Self Heal*, a fresh scale-to-3 reverted to 1 *on its own* — with no Sync click.
-(Seconds on the first drift; up to a couple of minutes if you had already drifted this Deployment more than once — the backoff described above, not a failure.)
-Git won both times.
+✔ *Verify:* with *Manual* sync, the scale to 3 *stayed* until you pressed *Sync*, which reverted it to 1; with *Self Heal* on, a fresh scale to 3 reverted to 1 *on its own*.
+Git won both times. (A repeated drift can take a couple of minutes: the backoff above, not a failure.)
 ****
 
 == 4. A git-driven change: promote to stage
 ⏱ *~9 min* · change the cluster by changing Git, not by touching the cluster
 
-Set this exercise's shortcuts first:
+Parasol promotes the claims app to stage, then gives stage more capacity, changing only Git.
+
+*You'll end with:* `{user}-stage` running *3* replicas, a count you changed only in the repository.
+
+[mermaid]
+....
+include::example$diagrams/gitops-fundamentals/08-git-driven-change.mmd[]
+....
+
+Set this exercise's shortcuts:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
 DEV={user}-dev; STAGE={user}-stage
 ----
 
-Drift taught you that Git wins over live edits.
-The flip side is how you make a *real* change: you edit *Git*, and the cluster follows.
-You will promote the claims app to `{user}-stage` and then change it — entirely through Git.
+Create a second Application for stage: *+ NEW APP* in the Argo CD UI, filled as for dev except for three fields:
 
-First, create a second Application for stage, exactly as you did for dev.
-In the Argo CD UI, *+ NEW APP*:
+[cols="1,3",options="header"]
+|===
+| Field | Value
 
+| Application Name | `claims-stage-{user}`
+| Path | `overlays/stage`
+| Namespace | `{user}-stage`
+|===
+
+.Every field of the stage form
+[%collapsible]
+====
 [cols="1,3",options="header"]
 |===
 | Field | Value
@@ -742,17 +806,17 @@ In the Argo CD UI, *+ NEW APP*:
 | Cluster URL | `https://kubernetes.default.svc` *(in-cluster)*
 | Namespace | `{user}-stage`
 |===
+====
 
 Click *CREATE*, then *SYNC → SYNCHRONIZE*.
-The stage overlay says *2 replicas* (that is its one real difference from dev), so Argo CD stands up the claims app two-up in `{user}-stage`.
-Confirm it:
+The stage overlay runs *2 replicas* where dev runs 1:
 
 [tabs]
 ====
 Console::
 +
 --
-Switch the *Project* selector to `{user}-stage` and open *Workloads* → *Deployments*: `parasol-claims` is `2/2` — two replicas, exactly what `overlays/stage` declares.
+Switch the *Project* selector to `{user}-stage` and open *Workloads* → *Deployments*: `parasol-claims` is `2/2`.
 --
 CLI::
 +
@@ -770,43 +834,36 @@ stage replicas: 2 (from overlays/stage)
 --
 ====
 
-Now the point of the exercise: *change stage by changing Git*.
-Bump stage from 2 replicas to 3 — in the repository, not the cluster.
-Open your fork in the *Gitea* tab at {gitea_url}/{user}/claims-config[{user}/claims-config^]:
+Now bump stage to 3 replicas *in Git*.
+In the *Gitea* tab, open your fork at {gitea_url}/{user}/claims-config[{user}/claims-config^]:
 
-. Navigate to `overlays/stage/kustomization.yaml` and click the *pencil* (Edit) icon.
-. Find the `count:` line under `replicas:` and change `count: 2` to `count: 3`.
-. Scroll down and *Commit Changes* directly to the `main` branch (message e.g. "stage: scale claims to 3").
+. Open `overlays/stage/kustomization.yaml` and click the *pencil* (Edit) icon.
+. Under `replicas:`, change `count: 2` to `count: 3`.
+. *Commit Changes* directly to the `main` branch (message e.g. "stage: scale claims to 3").
 
 image::gitops-fundamentals/gitops-fundamentals-07-gitea-edit-overlay.png["The Gitea editor on overlays/stage/kustomization.yaml in the attendee's claims-config fork: the file tree showing base, overlays/dev, overlays/prod, overlays/stage and rollouts, and the open file with the STAGE overlay's replicas count: 3 edit under the parasol-claims name. The Commit Changes panel is below the fold and not shown."]
 
-[NOTE]
 .Prefer the terminal? The clone you made works too
+[%collapsible]
 ====
 You already cloned the repo in exercise 1.
 You can make the same change there instead — edit `overlays/stage/kustomization.yaml`, then `git commit -am "stage: scale to 3" && git push` (sign in with your workshop username and password when prompted).
 Editing in the Gitea UI is the same commit, without the credential prompt.
 ====
 
-Back in the Argo CD tab, open `claims-stage-{user}` and press *Refresh*.
-Argo CD re-reads `main`, sees the new commit, and the app goes *OutOfSync* — because *Git changed* and the cluster has not caught up yet.
-Open the Deployment's *DIFF*: desired `replicas: 3`, live `replicas: 2`.
+In Argo CD, open `claims-stage-{user}` and press *Refresh*: it goes *OutOfSync*, because *Git changed*.
+The Deployment's *DIFF* shows desired `replicas: 3`, live `replicas: 2`.
 
 image::gitops-fundamentals/gitops-fundamentals-08-stage-gitdriven-diff.png["The DIFF for claims-stage after the git commit, Compact diff enabled: replicas: 2 on the live side in red against replicas: 3 from Git in green — the inverse of the earlier drift shot, where the cluster had changed and Git was right. Here Git changed and the cluster has not caught up."]
 
-Now apply it: *SYNC → SYNCHRONIZE*.
-This is the *same* Sync you used in exercise 3 — there it reconciled the cluster *back* to Git after a console edit; here it reconciles the cluster *forward* to a change you made in Git.
-Either way, Sync makes the live cluster match desired state.
-Once the sync completes, `{user}-stage` runs the *3 replicas you set in the repository*.
-Watch the third replica arrive.
+Apply it: *SYNC → SYNCHRONIZE*, then watch the third replica arrive.
 
 [tabs]
 ====
 Console::
 +
 --
-In *Topology* (Project `{user}-stage`), watch the `parasol-claims` Pod donut fill from two Pods to *three* as the sync lands — or open *Workloads* → *Deployments* and see it settle at `3/3`.
-You never touched the cluster directly; the count changed because *Git* changed.
+In *Topology* (Project `{user}-stage`), watch the `parasol-claims` Pod donut fill from two Pods to *three*, or see it settle at `3/3` in *Workloads* → *Deployments*.
 --
 CLI::
 +
@@ -822,44 +879,52 @@ for i in $(seq 1 20); do
 done
 ----
 
-You should see the Deployment settle at `3/3` — the replica count you set *in Git*, now running, applied without ever running `oc scale`.
+It settles at `3/3`.
 --
 ====
 
-[NOTE]
 .If the count does not move for a few minutes
+[%collapsible]
 ====
 The student Argo CD instance is shared; on a busy cluster a sync can lag while the controller works through everyone's apps.
 The change is queued (the app is `OutOfSync` at your new commit, as the diff showed); pressing *SYNC* again, or waiting a reconcile cycle, applies it.
 If it stays stuck, tell your instructor — the shared controller may need attention (see the troubleshooting page).
 ====
 
-Stop and notice what you did *not* do: you never ran `oc scale`, never touched `{user}-stage` directly.
-You edited a file in Git, Argo CD *computed the exact change* (the diff you saw: desired 3 vs live 2), and Sync *applied* it — reviewed as a commit, diffed before it landed, and revertible by reverting the commit.
-That is promotion the GitOps way, and it is exactly how you would move a change from stage to prod: another edit, another environment's overlay, another Application.
+*What just happened:* you never ran `oc scale` or touched `{user}-stage`.
+You edited Git, Argo CD *computed the exact change*, and Sync *applied* it: a reviewed commit, diffed before it landed, revertible by reverting the commit.
+
+It is the same *Sync* as in exercise 3, moving the cluster the other way:
+
+[cols="2,3,3",options="header"]
+|===
+| | Exercise 3: drift | Exercise 4: a Git change
+
+| What changed first | The cluster | Git
+| The diff showed | Live 3, Git 1 | Git 3, live 2
+| Sync moved the cluster | Back to Git | Forward to Git
+|===
+
+Promoting to prod works the same way: another overlay edit, another Application.
 
 [.checkpoint]
 ****
-✔ *Verify:* `claims-stage-{user}` deployed the app at 2 replicas from `overlays/stage`; after you edited `count: 2` → `3` in Git and synced, `{user}-stage` runs *3* replicas — a change you made *only* in the repository.
+✔ *Verify:* `claims-stage-{user}` deployed 2 replicas from `overlays/stage`; after your Git edit (`count: 2` → `3`) and a sync, `{user}-stage` runs *3*, changed *only* in the repository.
 ****
 
 == Challenge (optional)
 ⏱ *no hand-holding*
 
-You have the whole loop.
 Try these on your own:
 
 * *Let self-heal fight a deletion, not just a scale.*
-With self-heal on for `claims-dev-{user}`, `oc delete configmap claims-config -n {user}-dev` and watch Argo CD recreate it on its next pass.
-(Deletion drift is reverted the same way as edit drift.)
+With self-heal on for `claims-dev-{user}`, `oc delete configmap claims-config -n {user}-dev` and watch Argo CD recreate it on its next pass: deletion drift is reverted like edit drift.
 * *Change config through Git.*
 Edit the dev overlay's `QUARKUS_LOG_LEVEL` from `DEBUG` to `INFO`, commit, Refresh + Sync `claims-dev-{user}`, and confirm the ConfigMap changed — then watch the pods restart to pick it up.
 * *Read your app's history.*
-In the Argo CD app, open *HISTORY AND ROLLBACK* — every sync is a revision you could roll back to.
-Note that "rollback" here means "reconcile to an earlier Git commit."
+*HISTORY AND ROLLBACK* lists every sync as a revision; "rollback" here means "reconcile to an earlier Git commit."
 * *Point an Application at a Helm chart instead of Kustomize.*
-Argo CD renders both — the `source` just names a chart and values instead of a path.
-(No need to build one; reason about what would change in the Application object.)
+Its `source` names a chart and values instead of a path; without building one, reason about what would change in the Application object.
 
 When you are done, run `ws verify {module-id}` — or `ws prep {module-id} --yes` to return `{user}-dev`/`{user}-stage` to a clean entry state (your fork and Applications cleared) and start fresh.
 
