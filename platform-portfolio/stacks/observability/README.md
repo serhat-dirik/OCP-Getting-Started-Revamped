@@ -15,7 +15,7 @@ never per-user; per-user isolation is done with namespaced `ServiceMonitor`/`Pro
 
 | Component | Operator (channel) | Config CRs | Wave |
 |---|---|---|---|
-| `cluster-observability-operator` | `cluster-observability-operator` (`stable`) | `UIPlugin` Dashboards + DistributedTracing (console Observe -> Dashboards/Traces) | 0 |
+| `cluster-observability-operator` | `cluster-observability-operator` (`stable`) | `UIPlugin` Monitoring with Perses + DistributedTracing (console Observe -> Dashboards (Perses)/Traces) | 0 |
 | `tempo` | `tempo-product` (`stable`) | `TempoMonolithic` (memory backend, OTLP ingest) + the shared `ogsr-observability-workshop` namespace | 0 |
 | `opentelemetry` | `opentelemetry-product` (`stable`) | `OpenTelemetryCollector` (OTLP :4317/:4318 -> Tempo) | 1 |
 | `loki-logging` *(optional)* | `loki-operator` + `cluster-logging` (`stable-6.5`) | `LokiStack` 1x.demo + `ClusterLogForwarder` + Logging `UIPlugin` | 2 |
@@ -73,7 +73,9 @@ oc get applications -n openshift-gitops -l portfolio.redhat.com/component | grep
 oc get csv -A | grep -E 'cluster-observability|tempo|opentelemetry'         # operators Succeeded
 oc get tempomonolithic -n ogsr-observability-workshop                            # traces -> Ready
 oc get opentelemetrycollector -n ogsr-observability-workshop                     # otel -> pod Running
-oc get uiplugin                                                             # dashboards, distributed-tracing
+oc get uiplugin                                                             # monitoring, distributed-tracing
+oc get perses perses -n openshift-cluster-observability-operator            # Perses server (Monitoring UIPlugin)
+oc get consoles.operator.openshift.io cluster -o jsonpath='{.spec.plugins}' # has monitoring-console-plugin
 ```
 
 > Verified on install 2026-07-11: the full stack was stood up live on OCP 4.21 (COO 1.5.1, Tempo 0.21.0-2,

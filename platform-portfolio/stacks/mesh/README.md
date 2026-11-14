@@ -16,7 +16,7 @@ app-of-apps. Everything here is a **single shared install** — never per-user; 
 | Component | Operator (channel) | Config CRs | Wave |
 |---|---|---|---|
 | `service-mesh` | `servicemeshoperator3` (channel **unset** → package default, `stable`) | `Istio` (istiod, revision `default`, istio-system) + `IstioCNI` (istio-cni) | 0 |
-| `kiali` | `kiali-ossm` (`stable` = v2.27.1) | `Kiali` (istio-system, OpenShift OAuth, metrics from the Thanos querier) + `istiod-monitor` / `istio-proxies-monitor` | 1 |
+| `kiali` | `kiali-ossm` (`stable` = v2.27.1) | `Kiali` (istio-system, OpenShift OAuth, metrics from the Thanos querier) + `OSSMConsole` (Kiali views inside the OpenShift console) + `istiod-monitor` / `istio-proxies-monitor` | 1 |
 
 **Prerequisite: user-workload monitoring enabled** (`cluster-monitoring-config` → `enableUserWorkload: true`).
 The stack never edits cluster monitoring. Kiali's graph is drawn from what UWM scrapes: istiod and the
@@ -106,6 +106,8 @@ oc get istiocni default                                       # Ready=True
 oc get istiorevision                                          # default -> InUse/Healthy
 oc get kiali kiali -n istio-system                            # Successful
 oc logs -n istio-system deploy/kiali --since=5m | grep -c 'Prometheus unreachable'   # 0
+oc get ossmconsole ossmconsole -n istio-system                # Successful
+oc get consoles.operator.openshift.io cluster -o jsonpath='{.spec.plugins}'   # has ossmconsole
 # coexistence: the Gateway API istiod must STILL be healthy
 oc get gatewayclass openshift-default -o jsonpath='{.status.conditions}'   # Accepted=True
 oc -n openshift-ingress get deploy istiod-openshift-gateway                # 1/1
