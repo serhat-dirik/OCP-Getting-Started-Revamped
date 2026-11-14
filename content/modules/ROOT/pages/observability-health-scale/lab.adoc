@@ -1,4 +1,4 @@
-= Observability, Health & Scale: {lab_page_label}
+= Observability: Metrics, Alerts, Dashboards & Traces: {lab_page_label}
 :module-id: observability-health-scale
 include::partial$version-attributes.adoc[]
 
@@ -9,31 +9,17 @@ include::partial$version-attributes.adoc[]
 // a PrometheusRule that went inactive -> pending (T+50s) -> firing (T+170s) after claims-db was scaled
 // to 0 under a concurrent 5xx burst, with the ServiceMonitor scraping every 10s (re-measured on user2,
 // OCP 4.21.22, 2026-07-19 — the 10s scrape makes the fire deterministic; a 30s scrape flaked at G3),
-// parasol-claims traces in Observe -> Traces with metric->trace exemplars, a CPU HPA that scaled 2->4
-// (timing SUPERSEDED — see the 2026-08-14 re-measurement note below), and a PDB that
-// returned "Cannot evict pod as it would violate the pod's
-// disruption budget" on the last eviction. Timings quoted on the demo page are from that run.
+// parasol-claims traces in Observe -> Traces with metric->trace exemplars. Timings quoted on the demo
+// page are from that run. (The same run also covered a CPU HPA and a PDB; both beats moved out of this
+// module on 2026-11-14, see the note at the end of this comment block.)
 // Those product versions are FROZEN LITERALS, not {cluster_observability_operator_version} /
 // {tempo_version} / {opentelemetry_version}: this is a dated record of what ran on 2026-07-11, and
 // those attributes float (versions.yaml has since moved Tempo to 0.21.0-3 and OTel to 0.152.0-2).
 // The literals match this module's already-frozen siblings — instructor.adoc:6-7 and :219, and
 // troubleshooting.adoc:177 — which describe the same 2026-07-11 run.
-// CORRECTION 2026-08-08: the HPA line above read "scaled 1->4 in ~24s" until then, and both halves
-// were wrong. The HPA carries a min=2 floor, so the event is 2->4; and ~24s came from an earlier
-// pre-floor run that instructor.adoc had already retracted, leaving this comment as the last
-// copy of a withdrawn number (the module's SA outline had copied the wrong pair from here). It was
-// aligned to the then-current "~10s of the load landing".
-// CORRECTION 2026-08-14: that ~10s is now retired too, on four timed runs as user5 (full table in
-// the comment under the post-burst paragraph). The scale-out is RELIABLE — 5 of 5 runs reached the
-// ceiling of 4 — but it takes 47-115s from pressing enter, not ~10s under any reading. The one
-// thing that is instant is the autoscaler's DECISION, which is most likely what the old figure was
-// really describing. Whoever refreshes the SA outline: it still carries "2->4 within ~10s".
 // Source-block rule: subs="attributes" ONLY where {user}/{cluster_domain} must interpolate; blocks
 // using $NS / $CLAIMS shell vars or jsonpath {..} braces omit subs. Console labels I could not ground
 // from a screenshot in the build env are marked // CAPTURE-VERIFY for the media pass.
-// 2026-11-12, as user13 on OCP 4.22.22: the PDB exercise's instructor-run node drain is gone. Attendees evict
-// their own parasol-claims pods through the Eviction API under the PDB (4 replicas: 201, 201, 201,
-// then 429; the retry admitted after 13s, once a replacement was Ready). Captures in ex 6 are that run.
 // CORRECTION 2026-07-28 (grounded as user1 in an authenticated console): the alerting beat used to send
 // the reader to the CLUSTER-scoped Observe -> Alerting page (/monitoring/alertrules). That page reads a
 // cluster-scoped monitoring API an attendee is not granted — it answers 403 (verb=get,
@@ -50,16 +36,21 @@ include::partial$version-attributes.adoc[]
 // 2026-11-14, as user13 on OCP 4.22: exercise 3 (dashboard as code) is new and every exercise after it
 // moved up one. Performed in the real cockpit terminal (ws-session): the PersesDashboard applied and
 // re-applied as the attendee, each panel's PromQL answered 200 through Perses' own datasource proxy with
-// the attendee's token, and the panels' series were read back during the outage and HPA beats.
+// the attendee's token, and the panels' series were read back during the outage beat.
+// 2026-11-14 (restructure, written offline): the HPA exercise moved to health-resources-autoscaling and the
+// PDB/drain exercise is dropped (it lives in deployment-targets-scheduling). This page is now five exercises
+// plus a recap. Nothing here assumes more than one claims replica. Exercise timings are the surviving
+// per-exercise estimates (the alert/fire timings were measured 2026-07-11 / 2026-07-19); the demo timing
+// is re-timed arithmetically from them, and demo beat 3 (dashboard) is UNVERIFIED until Part B on a cluster.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
 
 .Highlighted: what you build in this module
-image::solution-map/observability-health-scale.svg["The Parasol solution map with this module's pieces highlighted: Metrics & alerts, Autoscaling, High availability, parasol-claims and claims-db.",width=900]
+image::solution-map/observability-health-scale.svg["The Parasol solution map with this module's pieces highlighted: Metrics & alerts, parasol-claims and claims-db.",width=900]
 
 Parasol's claims service is already *instrumented*, under a steady trickle of traffic: a load generator lists claims, reads a claim's history, files a new claim, and looks up one that does not exist.
-You will read its signals, make an alert fire, build its dashboard as code, trace a request, then make the service *autoscale* and *survive a node drain*.
+You will read its signals, make an alert fire, build its dashboard as code, and follow a request with a trace.
 
 TIP: Keep the cockpit *terminal* (signed in as `{user}`) and the {ocp_console_url}[OpenShift web console^] open, and pick a lane with the *Console / CLI* toggle; it stays put across the page.
 The console's home base here is *Observe* (Metrics, Alerting, Targets, Traces, Dashboards).
@@ -931,424 +922,6 @@ Until then, rank by duration and confirm the cause in the code.
 You can say what a trace tells you that a metric cannot — *where in the request the time went* — and you saw the `trace_id` *exemplar* that links a metric back to a single request.
 ****
 
-== 6. Autoscale under load with an HPA
-⏱ *~7 min* · add replicas automatically when CPU climbs, and watch it happen
-
-Monday, 9 a.m.: every adjuster signs in at once, and the claims service runs at a fixed replica count.
-Let it add its own replicas instead of paging someone to scale it.
-
-*You'll end with:* a *HorizontalPodAutoscaler (HPA)* that grew `parasol-claims` from 2 to 4 pods under load.
-
-.Where Topology actually shows the scale-out — the Resources panel, not the ring
-image::observability-health-scale/observability-health-scale-03-topology-hpa-scale.png["OpenShift Topology view for the attendee's dev project with the Resources side panel open for the parasol-claims Deployment. The Pods section is headed \"View all 4\" and lists three pod rows, each reading Running, then a HorizontalPodAutoscalers section listing the parasol-claims HPA, followed by Services and Routes sections below."]
-
-Set this exercise's shortcuts (re-run this block after a reconnect):
-
-[source,sh,role=execute,subs="attributes+"]
-----
-NS={user}-dev
-CLAIMS=http://parasol-claims-{user}-dev.{cluster_domain}
-----
-
-The HPA compares CPU use with the container's CPU *request* (200m, set by the entry state) and adds or removes replicas to hold its target:
-
-[mermaid]
-....
-include::example$diagrams/observability-health-scale/10-hpa-loop.mmd[]
-....
-
-Create an HPA that targets *60% CPU utilization*, floor *2* replicas, ceiling *4*:
-
-[tabs]
-====
-Console::
-+
---
-. Open *Workloads* → *Deployments* → `parasol-claims` → *Actions* → *Add HorizontalPodAutoscaler*.
-// Grounded 2026-07-30 on OCP 4.22.5, signed in as an attendee (user1), viewport 1600x1000. The
-// menu item opens a full page (not a modal) at /workload-hpa/ns/<ns>/apps~v1~Deployment/<name>,
-// titled "Add HorizontalPodAutoscaler", with a Form view/YAML view toggle (Form view default)
-// and fields *Name*, *Minimum Pods*, *Maximum Pods*, *CPU Utilization*, *Memory Utilization* —
-// each a stepper or numeric field, Title Case as given here (the lab text below previously read
-// lowercase "pods"/"utilization" and a "Create" button; both corrected against the live form).
-. Set *Minimum Pods* `2`, *Maximum Pods* `4`, *CPU Utilization* `60%`, and *Save*.
-For about a minute it shows `<unknown>` and no replicas of its own while it waits for its first CPU sample (2 replicas and a real percentage after 58 s, measured 2026-08-02): not a fault.
---
-CLI::
-+
---
-[source,sh,role=execute]
-----
-oc autoscale deploy/parasol-claims --cpu=60% --min=2 --max=4 -n $NS
-oc get hpa parasol-claims -n $NS
-----
-
-.Expected output (TARGETS shows current/target utilization)
-[%collapsible]
-=====
-[source,texinfo]
-----
-horizontalpodautoscaler.autoscaling/parasol-claims autoscaled
-NAME             REFERENCE                   TARGETS       MINPODS   MAXPODS   REPLICAS
-parasol-claims   Deployment/parasol-claims   cpu: 9%/60%   2         4         2
-----
-=====
-// The AGE column `oc get hpa` also prints is elided here so the block stays narrow; the -w capture
-// further down keeps it. The idle percentage is a real settled reading (2026-08-14, user5). It is
-// not a constant: across five settled floors that night it read 4%, 4%, 5%, 9% and 13%, so an
-// attendee landing anywhere in roughly 4-15% is normal — the number to react to is the target.
-
-.First reading shows `<unknown>` and `0`?
-[%collapsible]
-=====
-That is the *settled* reading, not what you see the instant you run the two commands back to back.
-A brand-new HPA has no metrics sample yet, so the first `oc get hpa` typically shows
-`TARGETS <unknown>/60%` and `REPLICAS 0` — re-confirmed on 2026-08-14, where the reading straight
-after `oc autoscale` was exactly that. Measured on this cluster (2026-08-02): `<unknown>` at
-15 s, settling to a real percentage with 2 replicas at *58 s*. Re-run the `oc get hpa` line after a
-minute — nothing is wrong.
-=====
---
-====
-
-Now *drive load*: the built-in trickle does not move CPU, so add a short burst of concurrent traffic (you delete it after):
-
-// IMAGE REFERENCE — do not "simplify" this back to a tag. The el8 `openshift4/ose-cli` repository
-// publishes `latest` as its ONLY short tag (v4.16…v4.22 do not exist there) and it has been frozen
-// on v4.15.0 since 2025-09-25 with unapplied Critical errata, so a floating tag here resolved to a
-// client older than versions.yaml's own OCP floor. 44 sites across gitops/, helm/ and pipelines/
-// were repinned onto ose-cli-rhel9:v4.22@sha256:f8bbc732… ; this attendee-typed pair (and the demo
-// beat below) were missed by that sweep because content/** is out of digest-pin-guard.py's scope.
-// The string below is byte-identical to this module's own entry-state load generator,
-// gitops/entry-states/observability-health-scale/templates/load-generator.yaml.
-[source,sh,role=execute]
-----
-oc -n "${NS:?is empty - run the first block of this exercise again}" run claims-burst --restart=Never \
-  --image=registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19 \
-  -- /bin/bash -c 'for i in $(seq 1 20); do ( while true; do \
-    curl -s -o /dev/null http://parasol-claims:8080/api/claims/CLM-1001/history; \
-    curl -s -o /dev/null http://parasol-claims:8080/api/claims; done ) & done; wait'
-----
-
-.Why the long `@sha256:…`?
-[%collapsible]
-====
-That long `@sha256:…` is deliberate: it is the same *digest-pinned* `oc` image the load generator in your namespace is already running, so your burst is the exact same bytes as everyone else's.
-A floating `:latest` would be whatever the registry served that minute — and on this particular repository `latest` has been frozen on a much older build since 2025.
-====
-
-Watch it scale, in either lane:
-
-[tabs]
-====
-Console::
-+
---
-Open *Topology*, click the `parasol-claims` node, and watch the *Resources* panel's *Pods* list grow from 2 to 4 (pictured above); the status ring does not subdivide by pod count.
-// Grounded 2026-07-30 on OCP 4.22.5, signed in as user1, viewport 1600x1000 — the FLOOR half of
-// this marker, after `adm solve` materialized the HPA (`oc get hpa parasol-claims -n user1-dev`:
-// MINPODS 2, MAXPODS 4, REPLICAS 2, ~7% CPU/60% target). Topology (`/topology/ns/user1-dev`)
-// shows the `parasol-claims` node with a solid blue (healthy) status ring; clicking it opens the
-// side panel on its *Resources* tab (tab strip is Details / Resources / Observe), which lists
-// under *Pods*: `parasol-claims-5789dc744b-p9n69` and `parasol-claims-5789dc744b-9rmj2`, both
-// Running — confirming the 2-pod floor and that the Resources panel is where pod membership is
-// read. The panel also lists a *HorizontalPodAutoscalers* entry (`parasol-claims`), confirming
-// the HPA itself surfaces there.
-//
-// GROWTH half grounded 2026-07-31 on OCP 4.22.5, console session signed in as
-// user3 (confirmed via GET /api/kubernetes/apis/user.openshift.io/v1/users/~ ->
-// metadata.name=user3), viewport 1600x1000, device_scale_factor 4 for pixel-level zoom. State:
-// `tools/ws/adm start observability-health-scale --user user3` (evicted
-// entry-multi-tenancy-workload-security-user3 per its own conflictsWith), then
-// `tools/ws/adm solve observability-health-scale --user user3` to materialize the HPA
-// (`oc get hpa parasol-claims -n user3-dev`: MINPODS 2, MAXPODS 4, REPLICAS 2). Load driven with
-// the exact `claims-burst` command AS IT THEN STOOD (not inferred) — `oc -n user3-dev run
-// claims-burst --image=registry.redhat.io/openshift4/ose-cli:latest --restart=Never -- ...`.
-// HISTORICAL: that image was repinned 2026-08-12 to ose-cli-rhel9:v4.22@sha256:f8bbc732… (see the
-// IMAGE REFERENCE note above the block). This line records what was RUN on 2026-07-31 and is left
-// as-run on purpose — copy the command from the block above, never from here. Watched with
-// `oc get hpa parasol-claims -n user3-dev -w`: cpu climbed 12% -> 184%/60%, HPA scaled REPLICAS
-// 2 -> 4 within ~40s of the burst landing, then settled around 55-70%/60% at 4 replicas.
-// RESULT: the prose's premise is WRONG and has been corrected above. Zoomed screenshots
-// (device_scale_factor 4, clip around the node) of the `parasol-claims` ring at 2 replicas and
-// again at steady 4 replicas are pixel-identical — a solid, undivided blue ring with no per-pod
-// wedges and no numeric pod-count decorator anywhere on or near the node (checked a wider crop
-// too). The only place pod count is visible in the Console is the *Resources* side panel's
-// *Pods* list (which read "View all 4" with the fourth pod behind a link once >3), exactly as
-// the FLOOR grounding above already established for 2. This OCP version's Topology status ring
-// encodes only aggregate health (color), not replica count — there is nothing for a screenshot
-// or gif to catch "gaining segments" on, at any point including the transient scale-out (new
-// pods went ContainerCreating -> Running fast enough, on this cluster, that no distinct
-// mid-transition ring frame was observed either). Also observed, not chased further: the HPA
-// flapped once (REPLICAS 4 -> 2 -> 4 within ~15s, cpu 42%/60% at the dip) before settling at 4
-// under continued load — matches the "one scale reverts, an immediate repeat holds" class of
-// oddity seen elsewhere on this cluster today; did not affect the conclusion since the ring was
-// already confirmed identical at both 2 and 4. `tools/media/RUNBOOK.md:260`'s "2 untainted
-// worker slots" capacity claim (dated 2026-07-29) did not hold today — the deployment scheduled
-// its 4th replica without issue, landing pods on control-plane nodes as well as the two workers.
-// Cluster state restored: `claims-burst` deleted, then `adm start observability-health-scale
-// --user user3` re-run to return user3-dev to entry baseline (1 replica, no HPA) — verified via
-// `oc get all -n user3-dev` / `oc get hpa -n user3-dev` (no resources found).
---
-CLI::
-+
---
-[source,sh,role=execute]
-----
-oc get hpa parasol-claims -n $NS -w
-----
-
-.Expected output (Ctrl-C to stop; utilization spikes well past 60%, replicas climb to the ceiling)
-[%collapsible]
-=====
-[source,texinfo]
-----
-NAME             REFERENCE                   TARGETS       MINPODS   MAXPODS   REPLICAS   AGE
-parasol-claims   Deployment/parasol-claims   cpu: 9%/60%   2         4         2          7m18s
-parasol-claims   Deployment/parasol-claims   cpu: 100%/60%   2         4         2          7m49s
-parasol-claims   Deployment/parasol-claims   cpu: 167%/60%   2         4         4          8m4s
-parasol-claims   Deployment/parasol-claims   cpu: 174%/60%   2         4         4          8m19s
-parasol-claims   Deployment/parasol-claims   cpu: 132%/60%   2         4         4          8m34s
-----
-=====
---
-====
-
-*What just happened:* CPU shot well past 60% and the HPA reached the *ceiling of 4* in *42–115 seconds*, not a few: its *decision* is instant, but it waits on the CPU measurement, then the pods.
-Give it a couple of minutes before you decide something is wrong.
-
-Your exercise 3 dashboard shows the same thing without a command: *CPU per pod (cores)* climbs, then gains a line for each new pod, and *Average latency by endpoint* spikes from a few milliseconds to tens of milliseconds as the burst lands, then settles once the new pods share the load.
-// Measured 2026-11-14 as user13 through Perses' datasource proxy: over the 4 minutes after the burst
-// the CPU panel held 4 live pod series (peaks 0.14-0.28 cores) plus the pre-restart pod's fading one;
-// latency panel peaked 0.07-0.09 s per endpoint, against 3-10 ms at the idle baseline. 2 -> 4 in 47 s.
-// Screenshot: user11, same burst + HPA, ~8 minutes into the load, viewport 1440x1120 in the browser pane.
-
-.Your exercise 3 dashboard under the burst: requests split by endpoint, errors flat, latency and CPU reacting
-image::observability-health-scale/observability-health-scale-06-perses-dashboard.png["Observe Dashboards (Perses) view of the Parasol claims dashboard in the attendee's dev project, four panels over the last 15 minutes. Requests per second jumps from near zero to about 115 per second when the burst starts, and its hover tooltip lists three endpoint series: /api/claims at 115, the claim-history endpoint at 113 and the single-claim lookup at 0.46. Server errors (5xx) per second stays a flat zero line. Average latency by endpoint spikes to about 0.07 seconds as the burst lands, then settles near 0.005 once the autoscaler has added pods. CPU per pod shows lines rising to about 0.35 cores, then more pod lines appearing and every line easing back toward 0.1 cores as the load spreads across four pods."]
-
-.Measured: where the 42–115 seconds go
-[%collapsible]
-====
-The burst drives CPU well past the 60% target — across five runs it peaked between *132%* and *250%* — and the HPA reached the *ceiling of 4* on every one of them, then settled back toward the target spread across four pods.
-What it does *not* do is happen in a few seconds. Reaching 4 replicas took between *42* and *115 seconds* from the moment you press enter (42 / 47 / 70 / 83 / 115 s over the five runs), so give this beat a couple of minutes before you decide something is wrong.
-Two things stretch it, and neither is the image: the container is up *3–4 seconds* after `oc run`, and the kubelet reports it *already present on machine* and pulls nothing at all.
-First the *metrics* path — CPU has to be scraped and handed to the autoscaler, which took *10–33 seconds* before `TARGETS` moved off its idle reading at all, and *24–40 seconds* before it first read above 60%, so `REPLICAS` sits at 2 (and `TARGETS` may even dip) for a while.
-Second, the climb is often a *staircase*: three of the five runs went 2 → 3 → 4 rather than straight to the ceiling, and every step waits on another CPU sample — which is what puts the slowest run near two minutes.
-The autoscaler's *decision* is the fast part: in every instrumented run `desiredReplicas` moved in the very same sampling interval that first showed CPU over target.
-What you wait on is the measurement, and then the pods.
-====
-// SCALE-OUT RE-MEASURED 2026-08-14 on OCP 4.22.8, as user5 in user5-dev, running the burst block
-// above VERBATIM five times, each from a settled 2-replica floor. Runs 1-4 sampled the HPA every
-// 2s; run 5 was captured through `oc get hpa -w` and is the transcript in the block above.
-// THE "~10 SECONDS" CLAIM IS RETIRED — it was never re-measured after the min=2 floor landed (see
-// instructor.adoc's own note admitting it was left alone "deliberately"), and it does not survive
-// contact with a clock under ANY reading of "the load landing":
-//   run  container  TARGETS off idle  first >60%  desired>2  first new pod  at 4 replicas  peak
-//   1    3 s        33 s (->174%)     33 s        33 s       47 s           47 s           250%
-//   2    3 s        23 s (->45%)      38 s        38 s       55 s           83 s           135%
-//   3    4 s        10 s (->17%)      24 s        24 s       39 s           70 s           132%
-//   4    3 s        23 s (->57%)      40 s        40 s       54 s           115 s          141%
-//   5    -          -                 ~31 s       -          -              42 s           174%
-// (run 5 is the -w capture, so it has only the granularity `oc get hpa -w` itself prints: 15s.)
-// From `oc run` to 4 replicas: 42/47/70/83/115 s. From CPU first reading over target to 4 replicas:
-// 14/45/46/75 s over the four instrumented runs. Even the FASTEST run's fastest reading is 14 s,
-// so ~10 s was wrong end to end, under every reading of "the load landing".
-// WHAT IS ~INSTANT, and what the old figure was probably describing: the autoscaler's DECISION.
-// In all four instrumented runs `desiredReplicas` moved in the same 2-3 s sample in which CPU first read over
-// target — zero measurable lag between the reading and the decision. The wait is the reading.
-// WHY THE TAIL IS LONG: 3 of 5 runs stepped 2 -> 3 -> 4; runs 1 and 5 went straight to the ceiling
-// and are also the two fastest, which is the whole correlation — each extra step waits on a fresh
-// CPU sample. Steady state at 4 replicas over the last minute of the four 6-minute runs:
-// 81% / 75% / 62% / 62% average. Do NOT quote 42s or 47s alone as "the" number; the staircase runs
-// are the majority and 115s is a legitimate attendee experience.
-// IMAGE FINDINGS FROM 2026-08-12 STILL HOLD and were re-confirmed here: every run logged
-// `Container image … already present on machine`, kubelet pulled nothing. Container Running was
-// 3/3/4/3 s tonight against 1.3-2.8 s measured over 12 runs on 2026-08-12 — the older figure read
-// "1-3 s"; widened to 3-4 s to match what these runs actually showed. Full provenance on why a
-// cold pull of this image cannot be produced on an OpenShift node at all is in instructor.adoc,
-// under the "Why won't the HPA scale back down after I stop the load?" entry.
-// NOT THE CAUSE, ruled out by measurement: the 2026-08-13 LimitRange change (500m -> 1500m default)
-// DOES reach this beat — `claims-burst` is created by the attendee's own `oc run` with no resource
-// flags, so it takes the namespace default, and it was recorded at limits.cpu 1500m and observed
-// pegged at 1498-1507m. The entry-state `claims-load` generator is NOT involved: it pins its own
-// 100m limit and idled at 1-14m throughout, nowhere near its ceiling, exactly as designed.
-Stop the load and clean up the burst pod:
-
-[source,sh,role=execute]
-----
-oc delete pod claims-burst -n $NS
-----
-
-[NOTE]
-.Scale-down is deliberately slow
-====
-`TARGETS` falls below 60% while `REPLICAS` stays at 4 for several minutes: the HPA holds them for a *5-minute stabilization window* by default, so a brief lull does not trigger a shrink-then-grow flap.
-That is correct behavior, not a stuck autoscaler.
-====
-
-[.checkpoint]
-****
-✔ *Verify:* `oc get hpa parasol-claims -n {user}-dev` shows a CPU-targeted HPA (min 2, max 4), and you watched `REPLICAS` climb to 4 while `TARGETS` spiked past 60% — or, in Topology, the *Resources* panel list the new pods (the status ring looks identical at 2 and 4, so read the Pods list).
-****
-
-== 7. Survive a node drain with a PodDisruptionBudget
-⏱ *~8 min* · put a floor under voluntary disruption, then drain your own pods through it
-
-Every patch cycle, Parasol's platform team drains nodes; a drain must never take the claims service's last healthy pod.
-
-*You'll end with:* a *PodDisruptionBudget (PDB)* that let a drain evict every pod but the last, and the last only once a replacement was Ready.
-
-[mermaid]
-....
-include::example$diagrams/observability-health-scale/11-eviction-check.mmd[]
-....
-
-Set this exercise's shortcuts (re-run this block after a reconnect):
-
-[source,sh,role=execute,subs="attributes+"]
-----
-NS={user}-dev
-CLAIMS=http://parasol-claims-{user}-dev.{cluster_domain}
-----
-
-Create the budget: "you may evict my pods, but never leave me fewer than one healthy."
-
-[tabs]
-====
-Console::
-+
---
-Use *+* (*Import YAML*), paste the budget, set the namespace to `{user}-dev`, and *Create*:
-
-[source,yaml,subs="attributes+"]
-----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: parasol-claims
-  namespace: {user}-dev
-spec:
-  minAvailable: 1
-  selector:
-    matchLabels:
-      app: parasol-claims
-----
---
-CLI::
-+
---
-// `adm start` does NOT clear a leftover PodDisruptionBudget from a prior pass on this same cluster
-// (only `ws reset`/`ws prep` do) — clear it first, safe even on a first run (no-op if absent):
-[source,sh,role=execute]
-----
-oc delete pdb parasol-claims -n "${NS:?is empty - run the first block of this exercise again}" --ignore-not-found=true
-oc create pdb parasol-claims --selector=app=parasol-claims --min-available=1 -n $NS
-oc get pdb parasol-claims -n $NS
-----
-
-.Expected output (ALLOWED DISRUPTIONS = current healthy − minAvailable, so it tracks the live replica count)
-[%collapsible]
-=====
-[source,texinfo]
-----
-poddisruptionbudget.policy/parasol-claims created
-NAME             MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
-parasol-claims   1               N/A               3                     1s
-----
-=====
---
-====
-
-*What just happened:* `ALLOWED DISRUPTIONS` is healthy pods minus `minAvailable`: a live promise, not a fixed count.
-
-[cols="1,1,3"]
-|===
-|Healthy pods |Allowed disruptions |When
-
-|4 |3 |The HPA from exercise 6 still holds four (5-minute scale-down window)
-|2 |1 |It settled back to its floor
-|===
-
-Now test it the way a drain does: a drain never deletes pods outright, it asks the *Eviction API*, which checks the budget first.
-Send that same request for your own pods; nothing outside `{user}-dev` moves.
-
-.Why not drain a real node?
-[%collapsible]
-====
-Draining a real node would move every tenant's pods on it, which is why the node itself stays with the platform team.
-Evicting your own pods through the same API is exactly the request a drain sends, scoped to `{user}-dev`.
-====
-
-TIP: *Predict, then run:* four replicas, `minAvailable: 1`. How many of four back-to-back evictions will the API admit?
-
-The block defines an `evict` helper (one `Eviction`, the request `oc adm drain` sends), then evicts every `parasol-claims` pod back to back: the worst case, as if all of them sat on the drained node.
-
-[source,sh,role=execute]
-----
-evict() { echo '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"'"$1"'"}}' | oc create --raw /api/v1/namespaces/$NS/pods/$1/eviction -f -; local rc=$?; echo; return $rc; }
-REFUSED=""
-for P in $(oc get pod -n $NS -l app=parasol-claims -o jsonpath='{.items[*].metadata.name}'); do
-  echo "── evict $P"; evict $P || REFUSED=$P
-done
-oc get pdb parasol-claims -n $NS
-----
-
-.Expected output (four replicas here; with two, the first is admitted and the second refused)
-[%collapsible]
-====
-[source,texinfo]
-----
-── evict parasol-claims-5789dc744b-4g6cf
-{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Success","code":201}
-
-── evict parasol-claims-5789dc744b-b22jj
-{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Success","code":201}
-
-── evict parasol-claims-5789dc744b-c7wvt
-{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Success","code":201}
-
-── evict parasol-claims-5789dc744b-jg6dh
-Error from server (TooManyRequests): Cannot evict pod as it would violate the pod's disruption budget.
-
-NAME             MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
-parasol-claims   1               N/A               0                     5s
-----
-====
-
-*What just happened:* every pod but the last was admitted (`201`); the last would have left no healthy pod, so the API refused it with `429 TooManyRequests` and `ALLOWED DISRUPTIONS` fell to `0`.
-
-A drain that gets this answer waits and asks again. Do the same, and time the wait:
-
-[source,sh,role=execute]
-----
-s=$SECONDS; until evict "${REFUSED:?is empty - run the eviction block above again}" >/dev/null 2>&1; do sleep 2; [ $((SECONDS-s)) -lt 120 ] || break; done
-echo "${REFUSED:?is empty - run the eviction block above again} admitted after $((SECONDS-s))s"
-oc get deploy parasol-claims -n $NS
-oc get pdb parasol-claims -n $NS
-----
-
-.Expected output (the wait is how long one replacement takes to become Ready)
-[%collapsible]
-====
-[source,texinfo]
-----
-parasol-claims-5789dc744b-jg6dh admitted after 13s
-NAME             READY   UP-TO-DATE   AVAILABLE   AGE
-parasol-claims   3/4     4            3           3m20s
-NAME             MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
-parasol-claims   1               N/A               2                     19s
-----
-====
-
-*What just happened:* evictions leave the desired count alone, so the ReplicaSet replaced every evicted pod at once, and the refused pod was admitted as soon as a replacement was Ready.
-The budget paced the drain to your service's recovery speed; it never ran with zero healthy pods.
-
-[.checkpoint]
-****
-✔ *Verify:* `oc get pdb parasol-claims -n {user}-dev` shows `MIN AVAILABLE 1`; every eviction but the last was admitted (`201`), and the last was refused (`429`) until a replacement was Ready, then admitted.
-The drain *waits* rather than taking the last healthy pod: that is what makes node maintenance routine, not an outage risk.
-****
-
 == Recap
 ⏱ *~2 min*
 
@@ -1357,18 +930,19 @@ The drain *waits* rather than taking the last healthy pod: that is what makes no
 ws verify {module-id}
 ----
 
-You instrumented nothing and consumed everything: the golden signals and a custom business metric in user-workload monitoring, an alert you authored and then *made fire*, a dashboard you wrote, changed and re-applied as code, a trace that shows a request's path, an HPA that grows the service under load, and a PDB that keeps it alive through maintenance.
+You instrumented nothing and consumed everything: the golden signals and a custom business metric in user-workload monitoring, an alert you authored and then *made fire*, a dashboard you wrote, changed and re-applied as code, a trace that shows a request's path.
+To turn those signals into action, continue to xref:health-resources-autoscaling/lab.adoc[Health, Resources & Autoscaling] (autoscaling) or xref:deployment-targets-scheduling/lab.adoc[Deployment Targets & Scheduling] (keeping the service up through node maintenance).
 
 [.checkpoint]
 ****
-✔ *Verify:* `ws verify {module-id}` passes — the CPU HPA (≥2 replicas), the `parasol-claims-alerts` PrometheusRule, a PersesDashboard with at least four panels, and the `parasol-claims` PodDisruptionBudget all exist in `{user}-dev`, on top of the always-present instrumented app + ServiceMonitor.
+✔ *Verify:* `ws verify {module-id}` passes — the `parasol-claims-alerts` PrometheusRule and a PersesDashboard with at least four panels exist in `{user}-dev`, on top of the always-present instrumented app + ServiceMonitor.
 ****
 endif::demo[]
 
 ifdef::demo[]
-== A service that tells you it is broken · 15 min
+== A service that tells you it is broken · 10 min
 
-Parasol's claims service has been running blind all workshop; in fifteen minutes it notices its own failure, pages, absorbs a traffic spike with nobody watching, and rides out weekly node maintenance.
+Parasol's claims service has been running blind all workshop; in ten minutes it notices its own failure, shows it on a dashboard kept as code, and pages.
 
 [IMPORTANT]
 .Prep — run before the session
@@ -1380,9 +954,9 @@ This demo starts from the finished lab state. Stage it before the session:
 adm solve observability-health-scale
 ----
 
-It leaves the claims application at two replicas with its CPU HorizontalPodAutoscaler, the `parasol-claims-alerts` PrometheusRule and the `parasol-claims` PodDisruptionBudget already in place, and returns once the module's Argo Application is Healthy — inside the engine's five-minute ceiling and usually well short of it — so start it well ahead of the session.
+It leaves the `parasol-claims-alerts` PrometheusRule and the four-panel `parasol-claims` PersesDashboard already in place on the instrumented claims application, and returns once the module's Argo Application is Healthy — inside the engine's five-minute ceiling and usually well short of it — so start it well ahead of the session.
 
-Have three surfaces open, all as `{user}`: the web console on *Observe → Metrics* with the 5xx-rate query pasted and ready, a second tab on the project-scoped {ocp_console_url}/dev-monitoring/ns/{user}-dev/alertrules?alert-source=user[*Alerting rules* view for `{user}-dev`^], and the cockpit terminal.
+Have four surfaces open, all as `{user}`: the web console on *Observe → Metrics* with the 5xx-rate query pasted and ready, the *Parasol claims* dashboard in *Observe → Dashboards (Perses)*, a tab on the project-scoped {ocp_console_url}/dev-monitoring/ns/{user}-dev/alertrules?alert-source=user[*Alerting rules* view for `{user}-dev`^], and the cockpit terminal.
 
 NOTE: Use that project-scoped link, not the cluster-wide *Observe → Alerting* page. The cluster-wide page reads a cluster-monitoring API a workshop account is not granted, so it renders *0 - 0 of 0*, and its *Source* filter defaults to *Platform* — the link above pins it to *User*.
 
@@ -1390,7 +964,7 @@ CAUTION: The burst in step 2 has one window. About thirty seconds after the data
 
 NOTE: A row that reads *Pending* rather than *Firing* is not a failure — the climb is already banked and the rule's two-minute `for:` window is counting down. Re-running the burst to help it along only adds noise, because the application's counter has already frozen.
 
-CAUTION: The staging command above is idempotent — re-running it restores the end state, with the database back to one replica, the application back to two, and the HPA, alert rule and disruption budget in place. A burst pod left behind from an earlier run keeps CPU high and pins the autoscaler at four replicas; `oc delete pod claims-burst -n {user}-dev` removes it.
+CAUTION: The staging command above is idempotent — re-running it restores the end state, with the database back to one replica and the alert rule and dashboard in place.
 ====
 
 === Brief
@@ -1405,19 +979,12 @@ Observability rests on three kinds of telemetry, and each answers a question the
 
 None of that is a separate purchase. OpenShift ships user-workload monitoring built in, and getting an application into it is one small object — a *ServiceMonitor* saying "scrape this Service's `/q/metrics` every ten seconds". Tempo and OpenTelemetry install as operators under the same subscription. Teams that treat "add monitoring" as a procurement project are usually re-buying what they already own.
 
-*Scaling is a decision, not a reflex*
-
-"It's slow — add replicas" is only sometimes the right answer. A *HorizontalPodAutoscaler* adds replicas when CPU or memory climbs with traffic, and it is the workhorse. Serverless scales to zero for services that are idle for long stretches, KEDA scales on queue depth rather than CPU, and a VerticalPodAutoscaler right-sizes one pod instead of adding more.
-
-Autoscaling handles load. The other half of staying up is *voluntary disruption* — the node reboots and drains that happen every week for patching. A *PodDisruptionBudget* is the application's contract with the platform: take my pods for maintenance, but never leave me fewer than N.
-
 *In this demo*
 
 . The three signals for a live service, read in the console and at the source
 . The database taken away, and what each signal says about a fault in progress
+. The same fault on a dashboard kept as code
 . The alert firing, and a recovery that takes two steps rather than one
-. The autoscaler absorbing a traffic spike with no human and no ticket
-. A disruption budget that keeps routine node maintenance from becoming an outage
 
 === 1 · Three signals in one place — 2 min
 
@@ -1427,7 +994,7 @@ image::observability-health-scale/observability-health-scale-01-observe-metrics.
 
 *Why it matters*
 
-Nothing here was built for this demo. The platform was already collecting; the only integration is a small object pointing at the Service. "Is the claims service healthy" stops being someone tailing logs and becomes a query — and it is the same signal both humans and the autoscaler act on.
+Nothing here was built for this demo. The platform was already collecting; the only integration is a small object pointing at the Service. "Is the claims service healthy" stops being someone tailing logs and becomes a query.
 
 *On screen* — *Observe → Metrics* in `{user}-dev`: plot `sum(rate(http_server_requests_seconds_count[5m]))` for traffic, then `claims_created_total`, the business metric the application team added. A steady line, and a counter climbing.
 
@@ -1481,7 +1048,25 @@ oc logs deploy/parasol-claims -n {user}-dev --tail=20
 
 This is the argument for observability in one screen. The metric noticed, the trace located, and the logs explained. The cause was in the logs all along, but nothing read them until the metric moved. Logs confirm the detail once you know where to look; they do not notice, count or page.
 
-=== 3 · It pages, and the fix takes two steps — 2 min
+=== 3 · The same fault, on a dashboard kept as code — 2 min
+
+While the rule's two-minute window counts down, switch to the *Parasol claims* dashboard. Four panels, one file, applied like any other object.
+
+// UNVERIFIED until Part B: this beat was written offline from the exercise 3 / exercise 4 runs
+// (2026-11-14, user13: the 5xx panel read back near 6/s during the outage, every panel query answered 200
+// through thanos-tenancy). Re-time it on a cluster; the 2 min is an estimate, not a measurement.
+
+*Why it matters*
+
+A dashboard that lives in a file is reviewed, versioned and re-applied to the next cluster in seconds, instead of being clicked together again by whoever is on call. It also answers the room's first question during an incident — "what are users seeing right now?" — without anyone typing a query.
+
+*On screen* — *Observe → Dashboards (Perses)* → *Parasol claims*: *Server errors (5xx) per second* climbing off its flat zero line, *Requests per second* split by endpoint, *Average latency by endpoint* and *CPU per pod* beside it.
+
+*What just happened*
+
+The panels are four PromQL queries in a `PersesDashboard` object; the console draws them with the viewer's own token through the project's `thanos-tenancy` datasource, so the room sees only `{user}-dev`. The error panel moves within seconds, well before the alert's two-minute window finishes — the dashboard is how you watch a fault, the alert is how nobody has to.
+
+=== 4 · It pages, and the fix takes two steps — 2 min
 
 The rule crosses its threshold and moves to *Firing*. Recovery is two commands rather than one, because a healthy database does not on its own heal an application still holding dead connections to the old one.
 
@@ -1505,58 +1090,6 @@ oc rollout restart deploy/parasol-claims -n {user}-dev
 
 Measured on this content: the 5xx rate cleared the rule's `0.1/s` threshold about fifty seconds after the database went away, and the row reached *Firing* about two minutes after that. Going the other way, the rule lingers in *Firing* for roughly five more minutes after recovery, while the burst's 5xx age out of the five-minute rate window — that is the window decaying, not a failed fix.
 
-=== 4 · The autoscaler adds pods, with no human and no ticket — 4 min
-
-With the fault cleared, the opposite problem: too much traffic. Drive CPU load at the service and watch the HorizontalPodAutoscaler take it from two replicas to four on its own.
-
-image::observability-health-scale/observability-health-scale-03-topology-hpa-scale.png["OpenShift Topology view for the user's dev project with the Resources side panel open for the parasol-claims Deployment. The Pods section is headed \"View all 4\" and lists three pod rows, each reading Running, then a HorizontalPodAutoscalers section listing the parasol-claims HPA, followed by Services and Routes sections below."]
-
-*Why it matters*
-
-Sizing for peak means paying for peak all day. An HPA lets the claims service run lean and grow only under real load, and the decision needs no ticket, no change window and nobody awake to approve it.
-
-Start the load first — the scale-out is the last thing to land:
-
-[source,sh,role=execute,subs="attributes+"]
-----
-oc -n {user}-dev run claims-burst --restart=Never \
-  --image=registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19 \
-  -- /bin/bash -c 'for i in $(seq 1 20); do ( while true; do curl -s -o /dev/null http://parasol-claims:8080/api/claims/CLM-1001/history; done ) & done; wait'
-----
-
-*On screen* — *Topology* on `parasol-claims`, with the node's *Resources* panel open on its *Pods* list at 2, and a terminal beside it watching the autoscaler:
-
-[source,sh,role=execute,subs="attributes+"]
-----
-oc get hpa parasol-claims -n {user}-dev -w
-----
-
-*What just happened*
-
-CPU reaches the autoscaler 24–40 seconds after the load starts, and the Pods list gets to 4 between 47 seconds and just under two minutes in, often stepping 2 → 3 → 4 rather than jumping. Read the count from the *Resources* panel: the Topology status ring is pixel-identical at two replicas and at four. When the load stops, the autoscaler holds four for five minutes before shrinking — a stabilization window that keeps it from flapping.
-
-=== 5 · Maintenance that never becomes an outage — 3 min
-
-The platform patches nodes every week, and every patch drains a node. A PodDisruptionBudget is what keeps that routine drain from taking the service down with it.
-
-image::observability-health-scale/observability-health-scale-05-what-you-built.svg["Everything the claims service gained: the application exposing /q/metrics and OpenTelemetry, a ServiceMonitor feeding user-workload monitoring, which in turn feeds Observe Metrics and a PrometheusRule that fires an alert; and from the application directly, Observe Traces via Tempo, an HPA scaling 2 to 4 on CPU, and a PDB that survives the drain."]
-
-*Why it matters*
-
-Without a budget, patching means asking every application team for a maintenance window. With one, the contract is declared in the application's own manifest and the drain honours it — so nodes get patched on a Tuesday afternoon instead of at 02:00 on a Sunday.
-
-[source,sh,role=execute,subs="attributes+"]
-----
-oc get pdb parasol-claims -n {user}-dev
-oc delete pod claims-burst -n {user}-dev
-----
-
-*What just happened*
-
-`ALLOWED DISRUPTIONS` reads 3 while the autoscaler is still holding four replicas: with `minAvailable: 1`, three may go at once, and it falls to one as the service settles back to two. On a node drain the platform evicts pods but never the last healthy one — the eviction API refuses outright with `Cannot evict pod as it would violate the pod's disruption budget`.
-
-A metric noticed, a trace located, an alert paged, the autoscaler absorbed the load, and the budget guards the maintenance. None of it was a separate product to buy.
-
 == Frequently asked questions
 
 *How long does an alert take to fire, and is that tunable?*::
@@ -1570,7 +1103,4 @@ No, and they should not have it. Developers hold project-scoped monitoring right
 
 *Why does the trace show one span rather than every database query?*::
 This build emits the HTTP request span; per-query database spans need a build-time flag on the image. The distinction matters in practice: the trace tells you *which* endpoint is the outlier, and how much of its time is its own rather than a dependency's. Going a level deeper into individual queries is a configuration change, not a re-instrumentation project.
-
-*Why does the autoscaler hold the extra replicas after the load stops?*::
-A five-minute scale-down stabilization window, on by default. `TARGETS` falls below the 60% target while `REPLICAS` stays at 4 — that is correct behaviour, and it is what stops a brief lull from triggering a shrink-then-grow flap. Scale-up has no equivalent window, but it is not instant either: the wait is the metrics path, 24–40 seconds before CPU first reads above target.
 endif::demo[]

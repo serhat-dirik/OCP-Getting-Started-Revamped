@@ -1,4 +1,4 @@
-= Observability, Health & Scale: Concept
+= Observability: Metrics, Alerts, Dashboards & Traces: Concept
 :module-id: observability-health-scale
 include::partial$version-attributes.adoc[]
 
@@ -9,8 +9,9 @@ include::partial$version-attributes.adoc[]
 // 1.5.1 / Tempo 0.21.0-2 / Red Hat build of OpenTelemetry
 // 0.152.0-1 stack, as user2 on 2026-07-11 — the /q/metrics golden signals + the custom
 // claims_created_total in user-workload monitoring, the PrometheusRule that fires on a 5xx spike, the
-// parasol-claims->Tempo traces with metric->trace exemplars, the CPU HPA that scaled 2->4 under load,
-// and the PodDisruptionBudget that refused the last eviction were all cluster-run, not recalled.
+// parasol-claims->Tempo traces with metric->trace exemplars were all cluster-run, not recalled.
+// 2026-11-14: the HPA and PodDisruptionBudget beats left this module (HPA -> health-resources-autoscaling,
+// PDB/drain -> deployment-targets-scheduling); their runs are recorded at those modules.
 // FROZEN LITERALS, not {cluster_observability_operator_version} / {tempo_version} /
 // {opentelemetry_version}: those float with versions.yaml (Tempo has since moved to 0.21.0-3 and
 // OTel to 0.152.0-2), which would silently re-date this 2026-07-11 record on every operator bump.
@@ -23,8 +24,8 @@ It is 02:00 and Parasol's claims API is throwing errors.
 The on-call engineer can see *that* something is wrong — a dashboard is red — but not *why*: which request, which dependency, how many users.
 Every minute spent guessing is a minute the outage runs.
 
-*Observability* is how you turn "something is wrong" into "here is the failing request and its slow database call" in seconds instead of hours — and *health and scale* are how the platform rides out the load spikes and node maintenance that cause half those pages in the first place.
-This module wires the claims service to the three signals the platform already collects — *metrics*, *logs*, and *traces* — makes it *alert* when it misbehaves, *autoscale* when it is busy, and *survive* a node drain without dropping requests.
+*Observability* is how you turn "something is wrong" into "here is the failing request and its slow database call" in seconds instead of hours.
+This module wires the claims service to the three signals the platform already collects — *metrics*, *logs*, and *traces* — makes it *alert* when it misbehaves, and gives it a *dashboard* you keep as code.
 
 include::partial$prep-while-you-read.adoc[]
 
@@ -34,7 +35,7 @@ include::partial$prep-while-you-read.adoc[]
 * How to read the claims service's *golden signals* (request rate, error rate, latency) and a custom business metric, `claims_created_total`, in *Observe → Metrics* — and the *ServiceMonitor* that puts your app into the platform's monitoring.
 * How to author a *PrometheusRule* that alerts on a real fault, and watch it move from *inactive* through *Pending* to *Firing* when you break the database on purpose.
 * How to follow one request end to end in *Observe → Traces*, and use a metric's *exemplar* to jump straight from a graph to the trace behind it.
-* How a *HorizontalPodAutoscaler (HPA)* adds replicas automatically under CPU load, and how a *PodDisruptionBudget (PDB)* keeps a minimum of healthy pods through a node drain.
+* How to keep a *dashboard as code* — a `PersesDashboard` you write, change and re-apply like any other object.
 
 == The three signals, in five minutes
 
@@ -83,36 +84,16 @@ Instrument once against the standard; swap or add backends (Tempo today, somethi
 That is the whole point of OpenTelemetry, and it is why "add tracing" is a platform decision, not a per-app rewrite.
 ====
 
-== Scaling is a decision, not a reflex
+== What this module leaves to its neighbours
 
-"It's slow — add replicas" is only sometimes the right answer.
-OpenShift gives you four scaling tools, and picking the wrong one wastes money or does nothing.
-
-[mermaid]
-....
-include::example$diagrams/observability-health-scale/03-scaling-decision-tree.mmd[]
-....
-
-* *HorizontalPodAutoscaler (HPA)* — more replicas when CPU or memory climbs with traffic.
-This is the workhorse and what you build in the lab.
-It needs a resource *request* on the container to compute utilization against.
-* *Serverless (Knative)* — scale to *zero* when idle, back up on the first request.
-Right for spiky or rarely-used services (cross-referenced in the Serverless module).
-* *KEDA (Custom Metrics Autoscaler)* — scale on an external signal like queue depth, not CPU.
-Right for the batch and event-driven workloads you met in the Jobs module and will meet again in eventing.
-* *VerticalPodAutoscaler (VPA)* — right-*size* one pod's requests/limits rather than adding pods.
-Useful, but *never point a VPA and an HPA at the same resource on the same workload* — they fight.
-VPA is concept-only here.
-
-Autoscaling handles load.
-The other half of staying up is *voluntary disruption* — the node reboots and drains that happen every week for patching.
-A *PodDisruptionBudget (PDB)* is your app's contract with the platform: "you may take my pods for maintenance, but never leave me fewer than N."
-The drain then proceeds one pod at a time, waiting for a replacement to become healthy — so a routine node drain never becomes a routine outage.
+Metrics are also what *steers* a service, not only what reports on it.
+Turning the CPU you graph into replicas is a HorizontalPodAutoscaler, built in xref:health-resources-autoscaling/lab.adoc[Health, Resources & Autoscaling].
+Keeping the service up through weekly node maintenance is a PodDisruptionBudget, built in xref:deployment-targets-scheduling/lab.adoc[Deployment Targets & Scheduling].
 
 == The observability layer over the Parasol platform
 
 Everything you built in earlier modules — the deployment, the config, the pipeline, the GitOps sync — has been running blind.
-This module adds the layer that lets you *see and steer* it.
+This module adds the layer that lets you *see* it.
 
 [mermaid]
 ....
@@ -123,13 +104,12 @@ include::example$diagrams/observability-health-scale/04-platform-accretion.mmd[]
 
 * *"Is it down?" stops being a debate and becomes a query.*
 Before app metrics, "is the claims service healthy" is answered by someone tailing logs or clicking around.
-After, it is a dashboard and an alert that pages *before* a customer notices — and the same signal both humans and the autoscaler act on.
+After, it is a dashboard and an alert that pages *before* a customer notices.
 * *Mean-time-to-resolution collapses when you can locate the fault.*
 The expensive part of an incident is rarely the fix; it is finding *where*.
 A trace that shows the request path and its slow hop turns a multi-team bridge call ("is it us or the database?") into a thirty-second answer.
-* *Capacity becomes elastic instead of a pre-provisioned guess.*
-Sizing for peak means paying for peak all day.
-An HPA lets the claims service run lean and grow only under real load, and a PDB means the platform team can patch nodes on a Tuesday afternoon without asking every app team for a maintenance window.
+* *Dashboards become reviewed code, not hand-built screens.*
+A dashboard that lives in a file is versioned, diffed and re-applied to the next cluster in seconds, instead of being clicked together again by whoever is on call.
 * *Observability is a platform capability you already own.*
 User-workload monitoring ships built into OpenShift; the Cluster Observability Operator, Tempo, and OpenTelemetry install as operators under the same subscription, no separate purchase.
 Teams that treat "add monitoring" as a procurement project are usually re-buying what their OpenShift subscription already includes.
@@ -138,8 +118,8 @@ ifdef::instructor[]
 [NOTE]
 .Presenter framing for the demo arc
 ====
-The lab page carries the timed *Say / Show / Do* demo arc (about 15 minutes) built from a completed end state (`adm solve observability-health-scale --user {user}`).
-The signature beat is *break the database and watch the alert fire live* while you narrate the three signals; the closer is *drive load and watch the HPA scale in real time*.
-Keep the concept to the three-signals slide and the scaling decision tree — the drama is in the console, not the theory.
+The lab page carries the timed *Say / Show / Do* demo arc (about 10 minutes) built from a completed end state (`adm solve observability-health-scale --user {user}`).
+The signature beat is *break the database and watch the alert fire live* while you narrate the three signals; the closer is the dashboard panels showing that outage.
+Keep the concept to the three-signals slide — the drama is in the console, not the theory.
 ====
 endif::instructor[]

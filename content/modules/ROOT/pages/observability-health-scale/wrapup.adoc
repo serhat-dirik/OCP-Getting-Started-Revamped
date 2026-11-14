@@ -1,17 +1,15 @@
-= Observability, Health & Scale: Wrap-up
+= Observability: Metrics, Alerts, Dashboards & Traces: Wrap-up
 :module-id: observability-health-scale
 include::partial$version-attributes.adoc[]
 
 == What you built
 
-You took the claims service from *running blind* to *observed and self-defending*, using only capabilities that ship with OpenShift or install as operators under your existing subscription:
+You took the claims service from *running blind* to *observed*, using only capabilities that ship with OpenShift or install as operators under your existing subscription:
 
 * *Metrics* — read the golden signals (rate, errors, latency) and a custom `claims_created_total` in *Observe → Metrics*, scraped into user-workload monitoring by a *ServiceMonitor*.
 * *An alert* — a `PrometheusRule` in your namespace that you *made fire* by breaking the database, then recovered (database back *and* app restarted to drop the dead connection pool).
 * *A dashboard as code* — a four-panel `PersesDashboard` (request rate, 5xx rate, latency, CPU per pod) in *Observe → Dashboards (Perses)*, changed by editing a file, reading the diff and re-applying.
 * *A trace* — followed a request in *Observe → Traces*, ranked requests by duration, and saw the `trace_id` exemplar that links a metric back to one exact request.
-* *Autoscaling* — a CPU `HorizontalPodAutoscaler` (HPA) that grew the service from 2 to 4 replicas under load and held steady before shrinking.
-* *Resilience* — a `PodDisruptionBudget` that keeps a minimum of one healthy pod through a node drain.
 
 [mermaid]
 ....
@@ -31,16 +29,10 @@ Are your on-call views hand-built in a UI that someone has to click together aga
 You watched metrics say *what* and a trace say *where*; the logs held the cause, but only the alert told you to read them.
 Think of an incident that burned an hour locating the fault across services.
 If every request carried a trace id you could search, how much of that hour disappears?
-. *What are you paying to have provisioned for a peak that happens twice a day?*
-You made the claims service grow only under real load and shrink when idle.
-Which of your services are sized for peak and idle most of the day — and what changes (a CPU request, an HPA) would let them run lean without a human watching a graph?
-. *Can your platform team patch a node on a Tuesday afternoon without asking you first?*
-You gave the claims service a PodDisruptionBudget so a drain can never take the last pod.
-Do your services declare a disruption budget, or does node maintenance quietly depend on nobody draining the wrong node at the wrong time?
 
 == When *not* to reach for this
 
-Observability and autoscaling are powerful, which means being honest about their edges:
+Observability is powerful, which means being honest about their edges:
 
 [cols="3,4"]
 |===
@@ -49,17 +41,8 @@ Observability and autoscaling are powerful, which means being honest about their
 |Alert on causes: a pool at 80%, a queue at 100
 |Alert on the few *symptoms* a user feels, like the 5xx rate; let metrics and traces explain the cause
 
-|Put an HPA on a workload that cannot scale horizontally
-|Autoscale what is stateless behind a Service; right-size the rest
-
 |Build a dashboard panel for every metric the app exposes
 |Chart the few questions on-call asks first; let *Observe → Metrics* answer the one-off ones
-
-|Point a VPA and an HPA at the same resource
-|Pick one axis per workload
-
-|Set a PDB's `minAvailable` at or above the replica count
-|Keep it below your steady count, with an HPA floor so there is always a spare
 |===
 
 .The reasoning behind each row
@@ -69,27 +52,16 @@ Observability and autoscaling are powerful, which means being honest about their
 You alerted on the *5xx rate* — a symptom your users feel.
 It is tempting to alert on every internal metric (a pool at 80%, a queue at 100), but cause-alerts page constantly and train people to ignore the pager.
 Alert on the handful of *symptoms* that mean a user is having a bad time, and let metrics and traces explain the cause once you are looking.
-* *Don't put an HPA on a workload that cannot scale horizontally.*
-The claims service is stateless behind a Service, so more replicas means more capacity.
-A singleton with a leader lock, a StatefulSet whose writes must serialize, or a job that holds a shared file will not go faster — or will corrupt data — when you add pods.
-Autoscale the things that are *actually* horizontally scalable; right-size the rest.
 * *Don't build a dashboard panel for every metric.*
 A dashboard is read in the first minute of an incident, so every panel competes for that minute.
 Forty panels mean nobody finds the one that moved.
 Chart the handful of questions on-call asks first (traffic, errors, latency, saturation, as you did) and leave the one-off questions to *Observe → Metrics*.
-* *Don't point a VPA and an HPA at the same resource.*
-If a VerticalPodAutoscaler is adjusting CPU requests while an HPA is scaling on CPU utilization, they chase each other.
-Pick one axis per workload.
-* *Don't let a PodDisruptionBudget become a drain deadlock.*
-`minAvailable` equal to (or above) the replica count means *zero* allowed disruptions — a node drain then blocks forever, waiting for a headroom that never appears.
-A budget only protects you if it leaves room for at least one pod to move.
-Set it below your steady replica count, and pair it with an HPA floor so there is always a spare.
 ====
 
 == Go deeper
 
-* *Scale on a queue, not CPU* — event- and queue-driven autoscaling with KEDA (the Custom Metrics Autoscaler) is exercised in the Jobs and eventing modules (separate modules).
-* *Scale to zero* — Serverless Zero-to-Hero for spiky or rarely-used services (a separate module).
+* *Scale on what you just measured* — turn the CPU you graphed into replicas with a HorizontalPodAutoscaler in xref:health-resources-autoscaling/lab.adoc[Health, Resources & Autoscaling].
+* *Keep the service up through maintenance* — PodDisruptionBudgets and node drains are exercised in xref:deployment-targets-scheduling/lab.adoc[Deployment Targets & Scheduling].
 * *Logs at scale* — this workshop cluster does not run a shared log store by default (the app is deliberately quiet, and a shared log store needs object storage).
 The always-available baseline is `oc logs` and the console's *Pod → Logs*; a platform team that needs centralized log aggregation could add an optional Loki tier and the Cluster Observability Operator's logging plugin once log volume justifies it — not something this module builds or demonstrates.
 * *Per-query database spans* — enabling database-span instrumentation on the claims image turns the N+1 endpoint into a visible staircase of `SELECT` spans; tracked as an enhancement to the sample app.
@@ -98,7 +70,6 @@ The always-available baseline is `oc logs` and the console's *Pod → Logs*; a p
 .Clean up
 ====
 Redoing the module, or moving on?
-`ws prep {module-id} --yes` returns `{user}-dev` to the clean entry state — it removes the HPA, PrometheusRule and PodDisruptionBudget you created and restores the instrumented app at its baseline.
-If you left a load burst running, `oc delete pod claims-burst -n {user}-dev`.
-To remove your dashboard too: `oc delete persesdashboard parasol-claims -n {user}-dev`.
+`ws prep {module-id} --yes` returns `{user}-dev` to the clean entry state — it removes the PrometheusRule and PersesDashboard you created and restores the instrumented app at its baseline.
+To remove only your dashboard: `oc delete persesdashboard parasol-claims -n {user}-dev`.
 ====

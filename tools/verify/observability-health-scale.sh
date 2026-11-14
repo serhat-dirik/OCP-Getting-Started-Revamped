@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Verify observability-health-scale — Observability, Health & Scale.
+# Verify observability-health-scale — Observability: Metrics, Alerts, Dashboards & Traces.
 #   Entry: {user}-dev has the INSTRUMENTED claims app (OTLP export ON → the shared collector) + an
 #          ephemeral claims-db + a load generator, plus a per-user ServiceMonitor; /q/metrics exposes
-#          the golden signals and the custom claims_created_total. The scale/resilience objects the lab
-#          builds (HPA, PrometheusRule, PDB) are NOT present yet.
-#   End:   the lab's outcomes exist — a CPU HorizontalPodAutoscaler on parasol-claims (>=2 replicas),
-#          a PrometheusRule alert, a PersesDashboard with >=4 panels, and a PodDisruptionBudget.
+#          the golden signals and the custom claims_created_total. The alert rule the lab builds
+#          (PrometheusRule) is NOT present yet.
+#   End:   the lab's outcomes exist — a PrometheusRule alert the attendee can see in their project's
+#          Alerting view, and a PersesDashboard with >=4 panels.
 # Runnable as the attendee: reads only {user}-dev, and probes the app's OWN Route for /q/metrics — no
 # cross-namespace reads (rule 10). The one exception is the attendee-visibility guard at the bottom,
 # which queries the UWM *tenancy* rules endpoint with the CALLER's own token and the mandatory
@@ -62,12 +62,6 @@ metrics_expose() {
     sleep 3
   done
   return 1
-}
-
-# The parasol-claims Deployment has at least N ready replicas (>= so the lab may scale past the floor).
-claims_replicas_at_least() {
-  oc_read get deploy parasol-claims -n "$NS" -o jsonpath='{.status.readyReplicas}' || return 1
-  [[ -n "$OC_OUT" && "$OC_OUT" -ge "$1" ]]
 }
 
 # The parasol-claims ServiceMonitor scrapes every 10s. Not cosmetic: the alert beat (Ex4) needs the
@@ -185,7 +179,7 @@ tenancy_lists_an_alerting_rule() {
   [[ "$n" -ge 1 ]]
 }
 
-# Entry clean-slate helpers: the scale/alert/resilience beats haven't been built yet. Each requires
+# Entry clean-slate helper: the alert beat hasn't been built yet. Each requires
 # the namespace to actually exist first — otherwise an empty `oc get` result is vacuous (true on a
 # cluster where nothing materialized at all), not evidence of a clean, correctly-seeded entry state.
 # NEGATION IS THE DANGEROUS DIRECTION: `[[ -z "$(oc get … 2>/dev/null)" ]]` certifies a clean slate
@@ -205,9 +199,7 @@ prometheusrule_exists() {
   [[ -n "$OC_OUT" ]]
 }
 
-no_hpa_yet()  { ns_exists_then_absent hpa parasol-claims; }
 no_rule_yet() { ns_exists_then_absent prometheusrule; }
-no_pdb_yet()  { ns_exists_then_absent pdb parasol-claims; }
 
 # The dashboard-as-code beat (Ex3): some PersesDashboard in the namespace defines >= N panels.
 # Name-agnostic like the alert check (template rule 14): an attendee who names theirs differently still
@@ -226,15 +218,6 @@ perses_dashboard_panels_at_least() {
     (( n > best )) && best="$n"
   done
   [[ "$best" -ge "$1" ]]
-}
-
-# The HPA targets parasol-claims on CPU.
-hpa_on_cpu() {
-  local tgt
-  oc_read get hpa parasol-claims -n "$NS" -o jsonpath='{.spec.scaleTargetRef.name}' || return 1
-  tgt="$OC_OUT"
-  oc_read get hpa parasol-claims -n "$NS" -o jsonpath='{.spec.metrics[?(@.type=="Resource")].resource.name}' || return 1
-  [[ "$tgt" == "parasol-claims" && "$OC_OUT" == "cpu" ]]
 }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
@@ -265,15 +248,11 @@ else
 fi
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
-  # --- entry state: the scale/resilience objects the lab builds do NOT exist yet ---------------
-  check "no HorizontalPodAutoscaler yet (scale beat not started)"   no_hpa_yet   || hint "entry state has no HPA — ws reset observability-health-scale --user ${USER_NAME}"
+  # --- entry state: the alert rule the lab builds does NOT exist yet ---------------------------
   check "no PrometheusRule yet (alert beat not started)"            no_rule_yet  || hint "entry state has no alert rule — ws reset observability-health-scale --user ${USER_NAME}"
-  check "no PodDisruptionBudget yet (resilience beat not started)"  no_pdb_yet   || hint "entry state has no PDB — ws reset observability-health-scale --user ${USER_NAME}"
 else
-  # --- end state: the lab's outcomes exist (HPA + alert + PDB); >= replicas, never == ----------
+  # --- end state: the lab's outcomes exist (alert + dashboard) ---------------------------------
   info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
-  check "HorizontalPodAutoscaler parasol-claims targets CPU"       hpa_on_cpu                                    || hint "not done yet — the entry state ships no HPA on purpose; creating it is the scale beat: oc autoscale deploy/parasol-claims --cpu=60% --min=2 --max=4 -n ${NS}"
-  check "parasol-claims has >=2 ready replicas (HPA floor)"        claims_replicas_at_least 2                    || hint "not done yet? with no HPA there is nothing holding the floor at 2, so this red follows from the check above and is equally expected before the scale beat. If the HPA EXISTS and replicas are still below 2, give it a moment and look at why: oc get hpa parasol-claims -n ${NS}; oc get pods -n ${NS}"
   check "a PrometheusRule alert exists in ${NS}"                   prometheusrule_exists                         || hint "not done yet — the entry state ships no alert rule on purpose; creating a PrometheusRule in ${NS} is the alert beat, so this red is expected before you get there"
   # The object existing is not the outcome — the attendee SEEING it is. Only assert this when the
   # endpoint answered; unreachable already printed its ⚠, and a denied endpoint already failed above.
@@ -281,7 +260,6 @@ else
     check "attendee's Alerting rules page lists >=1 rule for ${NS}" tenancy_lists_an_alerting_rule          || hint "not done yet, or not loaded — the /dev-monitoring/ns/${NS}/alertrules?alert-source=user page is EMPTY for the attendee. If 'oc get prometheusrule -n ${NS}' is also empty you simply have not written the alert yet (alert beat) and this red is expected. If it DOES list one, that is the real case: Thanos Ruler has not loaded it — a bad expr, or give UWM ~30s and re-verify"
   fi
   check "a PersesDashboard in ${NS} has >=4 panels"              perses_dashboard_panels_at_least 4            || hint "not done yet — the entry state ships no dashboard on purpose; applying the four-panel PersesDashboard is the dashboard-as-code beat, so this red is expected before you get there. If 'oc get persesdashboard -n ${NS}' lists one, count its panels: fewer than 4 means the file was cut short. If it errors with \"doesn't have a resource type\", that is actually broken: the cluster's observability stack (Perses) is not installed — tell your instructor"
-  check "PodDisruptionBudget parasol-claims exists"               oc get pdb parasol-claims -n "$NS"            || hint "not done yet — the entry state ships no PDB on purpose; creating one is the resilience beat: oc create pdb parasol-claims --selector app=parasol-claims --min-available=1 -n ${NS}"
 fi
 
 verify_summary
