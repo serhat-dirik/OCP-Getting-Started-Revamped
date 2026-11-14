@@ -58,7 +58,7 @@ To *change* a value, edit the ConfigMap/Secret instead.
 
 == The Route returns `503`, or a cut-off HTML page, right after a config change
 
-Symptom:: `curl` to the claims Route returns `503` — or, piped through `head -c 80`, prints the start of an HTML page (`<html> <head> <meta name="viewport" …`) — for a few seconds after an `oc set env`/`oc set probe`/`oc set resources` command, even after `oc rollout status` printed `successfully rolled out`.
+Symptom:: `curl` to the claims Route returns `503` — or, piped through `head -c 80`, prints the start of an HTML page (`<html> <head> <meta name="viewport" …`) — for a few seconds after an `oc set env`/`oc set probe` command, even after `oc rollout status` printed `successfully rolled out`.
 Cause:: Each of those commands triggers a rolling update.
 `rollout status` returns as soon as the new pod is Ready, while the old one is still shutting down, and the OpenShift router refreshes its list of backend pods only every few seconds.
 A request sent in that window can still be routed to the old pod's address, hang, and come back as the router's `503` "Application is not available" page.
@@ -75,54 +75,6 @@ curl -sf --retry 30 --retry-all-errors --retry-delay 2 -o /dev/null -w '%{http_c
 ----
 +
 A persistent `503` (not transient) means the pod never becomes Ready — check `oc get pods` and the readiness probe path.
-
-== I broke the readiness probe but the Route stayed `200`
-
-Symptom:: In exercise 4 you pointed readiness at a `404` path, but the Route kept serving `200`.
-Cause:: A probe change is a rolling update, and the rollout is gated by readiness: the new (broken) pod never becomes Ready, so it is held out of the Service while the *old*, healthy pod keeps serving.
-This is the platform protecting users — working as intended.
-Fix:: This is not a failure.
-To see the drained `503` state, roll the whole deployment onto the broken probe by scaling to zero and back to one (deleting individual pods will not work — the old ReplicaSet keeps recreating a *ready* pod):
-+
-[source,sh,role=execute]
-----
-oc scale deploy/parasol-claims --replicas=0
-oc scale deploy/parasol-claims --replicas=1
-sleep 40
-oc get endpoints parasol-claims   # ENDPOINTS column is empty (blank on some server versions, literal "<none>" on others)
-----
-+
-Then fix readiness: `oc set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/ready`.
-
-== `exceeded quota` — my deployment has zero pods
-
-Symptom:: A deployment shows `0/1` available and a `ReplicaFailure` condition; events say `exceeded quota: workshop-quota`.
-Cause:: The pod's total CPU/memory *request* would push the namespace over its `ResourceQuota` (here, `requests.cpu=3`).
-The scheduler never gets the pod — admission refuses it.
-Fix:: This is the deliberate lesson in exercise 5.
-Read the exact message, then right-size or remove the greedy workload:
-+
-[source,sh,role=execute]
-----
-oc get deploy claims-hog -o jsonpath='{range .status.conditions[?(@.type=="ReplicaFailure")]}{.message}{"\n"}{end}'
-oc delete deploy claims-hog
-----
-+
-For a real workload, lower `requests.cpu`/`requests.memory` to what it actually uses — do not assume the quota should be raised.
-
-// Reproduced live as user8 on OCP 4.22.6, 2026-08-14, by applying the lab's claims-hog with its
-// `limits` block removed. Two things were confirmed and neither matched what this entry used to say:
-// the `oc apply` SUCCEEDS (rc 0, "deployment.apps/claims-hog created") and the rejection lands on the
-// Deployment's ReplicaFailure condition, and the limit named in the message is 1500m — the LimitRange
-// default moved 500m -> 1500m in commit 13ed4ef.
-== `must be less than or equal to cpu limit` when setting a big request
-
-Symptom:: You apply a Deployment with a large `requests.cpu` and *no* limit. The `apply` itself *succeeds* — nothing is wrong with the Deployment — but it never gets a Pod, and its `ReplicaFailure` condition reads `FailedCreate: Pod "claims-hog-…" is invalid: spec.containers[0].resources.requests: Invalid value: "4": must be less than or equal to cpu limit of 1500m`.
-Cause:: The namespace LimitRange supplies a *default* limit of `1500m` when you set none, and Kubernetes requires `request <= limit`.
-Your request (`4`) exceeds the defaulted limit (`1500m`).
-Note the shape: this is a *per-container validation* failure, so it names one invalid Pod — not the `exceeded quota` refusal the exercise is after, which needs a container that is individually valid first.
-Fix:: Set an explicit limit `>=` your request (as the lab's `claims-hog` does with `limits.cpu: "4"`).
-Then the pod is valid per-container and is refused by the *quota* instead — which is the behavior the exercise wants to show.
 
 == `oc create configmap ... already exists`
 
@@ -155,7 +107,7 @@ Remember that a property also set via an environment variable will win over the 
 
 == `git clone` of my config fork fails
 
-Symptom:: In exercise 6, `git clone {gitea_url}/{user}/claims-config` fails, though `oc` commands work.
+Symptom:: In exercise 4, `git clone {gitea_url}/{user}/claims-config` fails, though `oc` commands work.
 Cause:: The fork is a *public* repo, so clone needs no credentials — a failure is almost always network (proxy/TLS interception) rather than auth, or the fork job has not finished.
 Fix:: Confirm the Git server is reachable and the fork exists:
 +
@@ -169,7 +121,7 @@ If it is missing, the fork job has not run; ask your instructor to run `adm rese
 
 == The three-environment digest comparison shows a mismatch, not three identical values
 
-Symptom:: In exercise 6's final promotion check, one namespace's `digest=` differs from the other two, even though `dev`/`stage`/`prod` all run the same `overlays/*` referencing the identical `parasol-claims:1.0` tag.
+Symptom:: In exercise 4's final promotion check, one namespace's `digest=` differs from the other two, even though `dev`/`stage`/`prod` all run the same `overlays/*` referencing the identical `parasol-claims:1.0` tag.
 Cause:: This is the mutable-tag trap, not a broken promotion — and it is called out in the lab's own note right after this comparison. The overlays name the image by *tag*, and `imagePullPolicy: IfNotPresent` means a node that already cached an earlier build of `:1.0` (from a previous run of this module, or an image rebuild that landed after that node last pulled) keeps serving its cached bytes instead of pulling what the tag currently points to. Only the pod scheduled onto that stale-cache node shows the odd digest.
 Fix:: Delete the pod in the odd namespace so a fresh pull lands, then re-compare:
 +
@@ -184,7 +136,7 @@ oc -n "$NS" get pod -l app=parasol-claims -o jsonpath='{.items[0].status.contain
 +
 All three digests should now match. This is exactly why a real promotion pipeline references images by *digest* (`@sha256:…`), never by a mutable tag — the fix done properly is in the trusted-supply-chain module.
 
-== Exercise 6's stage-vs-prod log count comes out backwards (prod noisier than stage)
+== Exercise 4's stage-vs-prod log count comes out backwards (prod noisier than stage)
 
 Symptom:: Comparing `oc logs -l app=parasol-claims --tail=100 | grep -c 'io.quarkus'` between stage (`INFO`) and prod (`WARN`) shows prod with *more* matching lines, not fewer — the opposite of what the log-level setting should produce.
 Cause:: Two compounding effects, both structural, not flaky: (1) `oc logs -l …` reads *every* pod the selector matches, and prod runs 3 replicas to stage's 2, so the comparison was never apples-to-apples; (2) every replica of a promoted environment runs Hibernate's `drop-and-create` schema import against the *same* shared ephemeral Postgres on startup (the seed reloads every boot, by design — see `apps/parasol-claims/src/main/resources/application.properties`), so replicas that lose that race throw `duplicate key value violates unique constraint "claim_event_pkey"` at `WARN`, and that exception's stack frames run through `io.quarkus.hibernate.orm.runtime.*` classes — so they still match a blanket `io.quarkus` grep even though they are not the `INFO` startup chatter the exercise means to measure. More replicas means more of that noise, which is why prod (more replicas, higher threshold) can out-count stage.
@@ -192,4 +144,4 @@ Fix:: This is fixed in the current lab page — it now reads a single named pod 
 
 '''
 
-_Last verified on the build cluster (2026-07-09; re-proven 2026-11-12 as user7 on OCP 4.22.22 with the rollout wait lines; exercise-1 readiness-gate rework re-verified 2026-07-15; exercise-1 `--previous` retry and exercise-6 log-count measurement fix added 2026-07-31 from the config-multienv cold-start smoke — the corrected exercise-6 command was re-measured live on 2026-07-31 across four runs and its verification marker cleared; the checkpoint stays qualitative on purpose, because the exact counts drift with the Quarkus version)._
+_Last verified on the build cluster (2026-07-09; re-proven 2026-11-12 as user7 on OCP 4.22.22 with the rollout wait lines; exercise-1 readiness-gate rework re-verified 2026-07-15; exercise-1 `--previous` retry and the exercise-4 log-count measurement fix added 2026-07-31 from the config-multienv cold-start smoke — the corrected exercise-4 command was re-measured live on 2026-07-31 across four runs and its verification marker cleared; the checkpoint stays qualitative on purpose, because the exact counts drift with the Quarkus version)._

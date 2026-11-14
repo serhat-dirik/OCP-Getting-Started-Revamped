@@ -17,8 +17,7 @@ include::partial$prep-while-you-read.adoc[]
 
 * Why the *same container image* must run in every environment, and how *externalized configuration* — environment variables, ConfigMaps, Secrets, and mounted files — makes that possible.
 * The honest difference between a *ConfigMap* and a *Secret*, and why base64 is *encoding, not encryption*.
-* What the platform actually *does* with each of the three health probes — *liveness*, *readiness*, and *startup* — and how a readiness gate holds traffic away from a pod that is not ready.
-* How *requests and limits* interact with a namespace *ResourceQuota* and *LimitRange*, and what happens when a workload asks for more than its share.
+* How a *readiness* check holds a rolling update back when a bad setting ships, so a broken configuration fails safely instead of taking the app down.
 * How to *promote* an application across dev → stage → prod with per-environment config, changing settings without ever rebuilding the image.
 
 == Why externalize configuration at all
@@ -53,47 +52,18 @@ This is the right tool for larger config (a whole properties or YAML file), for 
 
 The lab uses all four, in that order, on the real claims service.
 
-== Probes: how the platform knows your app is healthy
+== A bad setting fails safely
 
-Running is not the same as *ready*.
-A pod can be started but still loading; it can be alive but wedged.
-The platform cannot know the difference unless you tell it — and you tell it with *probes*, small health checks the kubelet runs on a schedule.
-There are three, and the platform does something *different* with each:
-
-[cols="1,3,3",options="header"]
-|===
-| Probe | The question it answers | What the platform does on failure
-
-| *startup* | "Has the app finished booting?" | Hold off the other two probes until this passes — so a slow start is not mistaken for a failure and killed.
-| *readiness* | "Can the app take traffic *right now*?" | Remove the pod from the Service's endpoints — traffic is *held*, not sent to a pod that would error.
-| *liveness* | "Is the app still working, or wedged?" | *Restart* the container.
-|===
-
-The claims service exposes these as HTTP endpoints — `/q/health/started`, `/q/health/ready`, and `/q/health/live` — a convention its Quarkus runtime provides out of the box.
-The distinction that matters most in practice is *readiness*: when a pod fails its readiness check, the platform stops sending it traffic.
+A wrong setting should be caught by the platform, not by a customer.
+In the lab you add one *readiness* check — "can this pod serve traffic *right now*?" — to the claims service, then ship a deliberately bad database host.
+The new pod never becomes ready, so the rolling update holds the old, healthy pod in service while you read the log line that names the cause.
 
 [mermaid]
 ....
-include::example$diagrams/config-multienv/02-readiness-gate.mmd[]
+include::example$diagrams/config-multienv/06-rollout-held.mmd[]
 ....
 
-In the lab you break readiness on purpose and watch the platform pull the pod out of rotation — the Route starts returning `503` because there is *nowhere safe to send the request*.
-That is the platform protecting your users from a half-broken pod, and it is the single most useful thing probes do.
-
-== Requests, limits, and living inside a quota
-
-Every container can declare two numbers for CPU and memory — a *request* (what the scheduler *reserves* for it, and what it uses to decide which node the pod fits on) and a *limit* (the ceiling the container may not exceed: a memory over-limit is killed, a CPU over-limit is throttled).
-You first set these on a Deployment in *Platform Orientation & First App*; this module's new idea is what happens when they meet a *namespace-wide* budget.
-
-Your namespaces come with two guardrails already in place.
-A *LimitRange* supplies *default* requests and limits so a container that declares none still gets sensible numbers (here, a request of `100m` CPU / `256Mi` memory and a limit of `1500m` / `1Gi`).
-A *ResourceQuota* caps the *namespace total* — across all your pods you may request at most `3` CPU cores and `6Gi` of memory.
-
-These are not obstacles to fight; they are the shape of the room you are working in.
-In the lab you set explicit requests and limits on the claims app, then deliberately ask for more CPU than the whole namespace is allowed and watch the platform refuse to schedule it — with an error that tells you exactly why.
-
-This module is deliberately the *tenant's* half of the story: you live inside the guardrail, you do not set it.
-Who authors a ResourceQuota and a LimitRange, who decides how big the room is, and the RBAC that says which of those objects you may even read — that is a module of its own, *Multi-Tenancy & Workload Security*, where you write the quota rather than bump into it.
+Probes, requests and limits, and autoscaling get a full treatment in their own module, xref:health-resources-autoscaling/concept.adoc[Health, Resources & Autoscaling]; here the readiness check is only the safety net under the break.
 
 == Promotion: same image, different config
 
@@ -145,8 +115,8 @@ ifdef::instructor[]
 .Presenter framing
 ====
 Spend no more than five minutes here before the live demo.
-Two ideas must land: (1) the *same image* runs everywhere and configuration is what changes between environments; (2) *readiness* is the probe that holds traffic away from a pod that is not ready.
-Everything you show live — the readiness gate returning `503`, then the same image promoted to stage and prod with different config — is a proof of those two sentences.
+Two ideas must land: (1) the *same image* runs everywhere and configuration is what changes between environments; (2) a Secret is *encoded, not encrypted*.
+Everything you show live — the ConfigMap and Secret, the decoded password, then the same image running in dev, stage and prod with different config — is a proof of those two sentences.
 Use the promotion diagram as your anchor for "one base, three overlays, one image."
 ====
 endif::instructor[]

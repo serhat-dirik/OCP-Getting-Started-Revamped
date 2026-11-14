@@ -11,7 +11,7 @@ include::partial$version-attributes.adoc[]
 // outputs are shown with generic values (no subs) so captured text is never re-interpolated —
 // EXCEPT where a captured output names the attendee's own namespaces, which would otherwise print
 // someone else's user for 7 of 8 attendees. Those two blocks (the stage-overlay preview and the
-// three-environment comparison in exercise 6) carry subs="attributes" and {user}; both are safe to
+// three-environment comparison in exercise 4) carry subs="attributes" and {user}; both are safe to
 // substitute because neither body contains a `{` brace for Asciidoctor to misread as an attribute.
 //
 // Re-proven 2026-11-12 on cluster-5vqxc (OCP 4.22.22) from a cold `adm reset`, as user7 in the
@@ -28,21 +28,23 @@ include::partial$prereq-ws-start.adoc[]
 .Highlighted: what you build in this module
 image::solution-map/config-multienv.svg["The Parasol solution map with this module's pieces highlighted: Config & secrets, parasol-claims and claims-db.",width=900]
 
-In this lab you take Parasol's claims service from a hardcoded configuration to an externalized, probed, and right-sized one, then promote the *same image* to stage and prod.
+In this lab you take Parasol's claims service from a hardcoded configuration to an externalized one, then promote the *same image* to stage and prod.
 You work only in your own namespaces, `{user}-dev`, `{user}-stage` and `{user}-prod`, so nothing you do can affect another attendee.
 
 TIP: Most steps come in two tabs that create the same objects: *Console* for the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`), *CLI* for `oc` in the *Terminal* tab; the tabs stay in sync across the page. Three steps are CLI-only: the Kustomize promotion, the mounted file, and reading a crash-looping pod's _previous_ logs. If a console label differs on your cluster, the `oc` command beside it is the source of truth.
 endif::demo[]
 
 // ============================================================================
-// DEMO FLAVOR — the 12-minute SA demo: readiness holds traffic, then one image runs in three
-// environments. The title's minutes are the sum of the five step headings below (2+4+2+3+1);
-// keep them in step.
+// DEMO FLAVOR — the 10-minute SA demo: configuration lives outside the image, then one image runs in
+// three environments. The title's minutes are the sum of the five step headings below (2+2+3+2+1);
+// keep them in step. // UNVERIFIED until Part B: the 10 min is the sum of per-step estimates, not a
+// timed run — the readiness steps that made the old 12 min were removed (moved to Health, Resources
+// & Autoscaling) and every remaining command is carried over unchanged from the lab or the old demo.
 // ============================================================================
 ifdef::demo[]
-== Up, but not ready — and the same image in three environments · 12 min
+== Configured from outside — and the same image in three environments · 10 min
 
-A pod that is running yet cannot serve is held out of rotation until it recovers, and the identical image digest then runs in dev, stage and prod with only its configuration changing.
+The claims image holds no environment's settings, and the identical image digest then runs in dev, stage and prod with only its configuration changing.
 
 [IMPORTANT]
 .Prep — run before the session
@@ -56,7 +58,7 @@ adm solve config-multienv
 
 It leaves the claims service fully configured in `{user}-dev` and promoted to `{user}-stage` (2 replicas) and `{user}-prod` (3 replicas), and takes a few minutes to return.
 
-Staging brings stage and prod up through Argo CD, and each of them boots a PostgreSQL of its own, so a command that has returned is not the same as three serving environments. Step 4 prints one line per environment and has nothing to show for an empty one, so confirm all three first:
+Staging brings stage and prod up through Argo CD, and each of them boots a PostgreSQL of its own, so a command that has returned is not the same as three serving environments. Step 3 prints one line per environment and has nothing to show for an empty one, so confirm all three first:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -70,7 +72,7 @@ Expect `1`, `2` and `3`; if a line comes back empty, that environment is not ser
 
 Have a terminal signed in as `{user}` and the web console on *Topology* in `{user}-dev`. Pod names and image digests were captured from a live run and will differ here.
 
-CAUTION: Three different image digests in step 4 are not a broken promotion. The shared `parasol-claims:1.0` tag was rebuilt after some nodes had already cached the older image, and `imagePullPolicy: IfNotPresent` let an earlier-scheduled pod keep the cached bytes — which is itself the argument for promoting by digest rather than by tag. Delete the odd pod out, then re-run the comparison:
+CAUTION: Three different image digests in step 3 are not a broken promotion. The shared `parasol-claims:1.0` tag was rebuilt after some nodes had already cached the older image, and `imagePullPolicy: IfNotPresent` let an earlier-scheduled pod keep the cached bytes — which is itself the argument for promoting by digest rather than by tag. Delete the odd pod out, then re-run the comparison:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -90,25 +92,21 @@ A container image is meant to be immutable and portable: build it once, run it a
 
 The fix is old and simple: the image carries the behavior, the environment supplies the settings. OpenShift offers four places to put them — inline environment variables, a ConfigMap, a Secret, and a file mounted from either — in increasing order of how carefully each is handled.
 
-*Running is not the same as ready*
-
-A pod can be up and still unable to serve: loading, waiting on a dependency, or wedged. The platform cannot tell unless the application says so, and it says so through three probes. Startup holds the other two off while the application boots. Liveness restarts a container that has wedged. Readiness answers "can I take traffic right now" — and a pod that answers no is removed from the Service's endpoints, so requests are held rather than sent somewhere they would fail.
-
 *Promotion: same image, different config*
 
-Put the two together and promotion becomes almost boring, which is the goal. Because the image is immutable and every environment-specific setting is external, moving to production is not a rebuild — it is applying a different set of values to the same bytes. Kustomize describes one base and the per-environment overlays that change only what should differ.
+Because the image is immutable and every environment-specific setting is external, moving to production is not a rebuild — it is applying a different set of values to the same bytes. Kustomize describes one base and the per-environment overlays that change only what should differ.
 
 *In this demo*
 
-. The claims service in dev — settings in a ConfigMap, credentials in a Secret, three probes declared
-. Readiness deliberately broken: the container runs, no pod is ever ready, and the Route returns 503
-. The probe restored, and the pod put straight back into rotation
+. The claims service in dev — settings in a ConfigMap, credentials in a Secret
+. A Secret is encoded, not encrypted — one command proves it
 . The identical image digest in dev, stage and prod, with only replica counts and configuration differing
+. One setting, the log level, changing behavior between stage and prod
 . The whole discipline on one screen
 
-=== 1 · Configured from outside, and healthy — 2 min
+=== 1 · Configured from outside — 2 min
 
-Parasol runs the exact same claims image in dev, stage and production, and the only thing that differs between them is configuration. In `{user}-dev` that service is already running with its settings in a ConfigMap, its credentials in a Secret, and three probes declared on the Deployment.
+Parasol runs the exact same claims image in dev, stage and production, and the only thing that differs between them is configuration. In `{user}-dev` that service is already running with its non-secret settings in a ConfigMap and its credentials in a Secret.
 
 image::config-multienv/config-multienv-02-configmap-secret.png["The claims-config ConfigMap detail page in the web console, scrolled to its Data section: five keys with their values in plain readable text — APP_ENV dev, POSTGRESQL_DATABASE parasol, POSTGRESQL_HOST claims-db, POSTGRESQL_PORT 5432 and QUARKUS_LOG_LEVEL INFO."]
 
@@ -116,79 +114,40 @@ image::config-multienv/config-multienv-02-configmap-secret.png["The claims-confi
 
 The image holds no environment's details, so the same bytes can run in every environment — and a setting can be changed, reviewed and rolled back on its own, without a rebuild and without editing the application.
 
-*On screen* — web console → *Topology* in `{user}-dev`: `parasol-claims` and `claims-db`, both running. Then, from the terminal, the probes the Deployment declares:
+*On screen* — web console → *Topology* in `{user}-dev`: `parasol-claims` and `claims-db`, both running. Then, from the terminal, the settings that live outside the image:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
-oc -n {user}-dev get deploy parasol-claims \
-  -o jsonpath='{.spec.template.spec.containers[0].startupProbe.httpGet.path} {.spec.template.spec.containers[0].readinessProbe.httpGet.path} {.spec.template.spec.containers[0].livenessProbe.httpGet.path}{"\n"}'
+oc -n {user}-dev get configmap claims-config -o yaml | grep -A5 '^data:'
 ----
 
 *What just happened*
 
-Three paths, one per probe: started, ready, live. Readiness is the one the next step breaks.
+Five plain keys, readable by anyone allowed to see the namespace — which is exactly why nothing sensitive lives here. The credentials are in the Secret, next.
 
-=== 2 · Break readiness and the Route returns 503 — 4 min
+=== 2 · A Secret is encoded, not encrypted — 2 min
 
-Point the readiness probe at a URL that does not exist and roll the whole Deployment onto it, so the single remaining pod is one whose container is running perfectly well and can never answer yes to the platform's question.
+Credentials get their own object so that "can deploy" and "can read the password" are separate permissions. Ask the obvious question — is it encrypted?
 
-image::config-multienv/config-multienv-03-readiness-503.png["The Pods list for the dev project, two rows: claims-db Running with Ready 1/1, and directly below it parasol-claims also Running with zero restarts but Ready 0/1 — a container that started fine and never passes its readiness probe."]
+image::config-multienv/config-multienv-06-secret-masked.png["The claims-creds Secret detail page, type Opaque, scrolled to its Data section. Both keys are named in the clear — POSTGRESQL_USER and POSTGRESQL_PASSWORD — but each value renders as a row of dots instead of text. A Reveal values link sits at the top right of the section, deliberately not clicked."]
 
 *Why it matters*
 
-This is the failure the platform is built to contain. The container is up and the process is fine; what fails is the platform's question — can you serve? No ready pod means no endpoints, so the Route returns 503 rather than sending a request into a pod that would break it. The column that tells the story is READY, not STATUS.
+The console masks the value, but masking is a display choice on top of base64. What a Secret buys is separate access control and one place to rotate; real encryption of the source of truth is a secrets manager's job.
 
 [source,sh,role=execute,subs="attributes+"]
 ----
-oc -n {user}-dev set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/typo
-# scale to 0 then 1 so the only pod uses the broken readiness check
-oc -n {user}-dev scale deploy/parasol-claims --replicas=0
-# wait for the old pod to actually go, so exactly one pod is left and it is the broken-probe one
-for i in $(seq 1 20); do [ "$(oc -n {user}-dev get pods -l app=parasol-claims --no-headers 2>/dev/null | wc -l | tr -d ' ')" = 0 ] && break; sleep 2; done
-oc -n {user}-dev scale deploy/parasol-claims --replicas=1
-# then sample the new pod instead of sleeping blind: it reaches Running in ~20-30s and then HOLDS at
-# 0/1, because readiness never passes. The loop stops the moment the container reports started.
-for i in $(seq 1 12); do
-  oc -n {user}-dev get pods -l app=parasol-claims --no-headers
-  oc -n {user}-dev get pods -l app=parasol-claims -o jsonpath='{.items[0].status.containerStatuses[0].started}' | grep -q true && break
-  sleep 3
-done
-oc -n {user}-dev get endpoints parasol-claims
-CLAIMS=$(oc -n {user}-dev get route parasol-claims -o jsonpath='{.spec.host}')
-curl -s -o /dev/null -w "Route: %\{http_code}\n" http://$CLAIMS/api/claims
+echo -n "stored:  "; oc -n {user}-dev get secret claims-creds -o jsonpath='{.data.POSTGRESQL_PASSWORD}'; echo
+echo -n "decoded: "; oc -n {user}-dev get secret claims-creds -o jsonpath='{.data.POSTGRESQL_PASSWORD}' | base64 -d; echo
 ----
 
 *What just happened*
 
-No ready pod, so the Service has no endpoints, so the Route answers 503. The platform is holding the request rather than delivering it to a pod that cannot serve it — with no load balancer touched and no pod removed from a pool by hand.
+One pipe to `base64 -d` turned the stored value into the plain password. Anyone who can read the Secret can read the credential.
 
-=== 3 · Restore the probe and the pod returns to rotation — 2 min
+=== 3 · One image, three environments, configuration only — 3 min
 
-Point readiness back at the endpoint that exists. The same gate that drained the pod puts it back into rotation the moment it answers, and the Route recovers within seconds.
-
-image::config-multienv/config-multienv-02-readiness-gate.svg["The readiness gate: a Route and Service above two pods. A solid traffic arrow reaches the pod whose readiness is passing, shown in green and in the Service endpoints; a dashed no-endpoint arrow stops short of the pod whose readiness is failing, shown in red, removed from endpoints with traffic held and the Route returning 503."]
-
-*Why it matters*
-
-Drain, hold, recover is one continuous decision the platform makes from the application's own answer. Nothing was reconfigured, nobody edited a pool, and no user reached the broken pod in between.
-
-[source,sh,role=execute,subs="attributes+"]
-----
-oc -n {user}-dev set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/ready
-oc -n {user}-dev rollout status deploy/parasol-claims
-# re-derive the host rather than reusing $CLAIMS: a fresh terminal would leave it
-# empty, and `curl http:///api/claims` prints "Route: 000" — which reads exactly like a failed fix
-CLAIMS=$(oc -n {user}-dev get route parasol-claims -o jsonpath='{.spec.host}')
-curl -s -o /dev/null -w "Route: %\{http_code}\n" http://$CLAIMS/api/claims
-----
-
-*What just happened*
-
-`Route: 200`. The pod re-entered the endpoints as soon as readiness passed, and the recovery needed no more action than the failure did.
-
-=== 4 · One image, three environments, configuration only — 3 min
-
-The other half of the story: the same image already runs in `{user}-stage` and `{user}-prod`, promoted by a Kustomize overlay per environment. Compare the three side by side — the digest, the replica count, and the environment's own configuration.
+The same image already runs in `{user}-stage` and `{user}-prod`, promoted by a Kustomize overlay per environment. Compare the three side by side — the digest, the replica count, and the environment's own configuration.
 
 image::config-multienv/config-multienv-03-promotion-overlays.svg["One Kustomize base holding the claims app, its config and the parasol-claims:1.0 image, branching into three overlays — dev at 1 replica with APP_ENV dev and log INFO, stage at 2 replicas with APP_ENV stage and log INFO, prod at 3 replicas with APP_ENV prod and log WARN — each applied into its own namespace."]
 
@@ -206,11 +165,31 @@ for ns in {user}-dev {user}-stage {user}-prod; do
 done
 ----
 
+=== 4 · One setting changes the behavior — 2 min
+
+Stage and prod run the same bytes, yet prod is quieter. That is not a different build; it is one line of configuration, `QUARKUS_LOG_LEVEL`: `INFO` in stage, `WARN` in prod.
+
+*Why it matters*
+
+Behavior that differs between environments should be a setting you can point at, not a mystery. Here it is one key in each environment's ConfigMap.
+
+[source,sh,role=execute,subs="attributes+"]
+----
+STAGE_POD=$(oc -n {user}-stage get pod -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+PROD_POD=$(oc -n {user}-prod  get pod -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+echo "stage (INFO):"; oc -n {user}-stage logs "$STAGE_POD" | grep -c 'INFO  \[io\.quarkus'
+echo "prod  (WARN):"; oc -n {user}-prod  logs "$PROD_POD"  | grep -c 'INFO  \[io\.quarkus'
+----
+
+*What just happened*
+
+Stage reports well above zero `INFO` lines; prod reports zero, or close to it. The count compares one pod per environment, so replica counts cannot skew it.
+
 === 5 · The whole discipline on one screen — 1 min
 
-Configuration in a ConfigMap, credentials in a Secret, health in three probes, and one image everywhere — four ordinary platform objects that together remove a whole class of production incident.
+Configuration in a ConfigMap, credentials in a Secret, and one image everywhere — ordinary platform objects that together remove a whole class of production incident.
 
-image::config-multienv/config-multienv-05-what-you-built.svg["What the module assembles: the parasol-claims:1.0 image, one image and one digest, feeding a configured and probed dev environment alongside the claims-config ConfigMap and claims-creds Secret, with oc apply -k of the stage and prod overlays promoting the same image onward to stage at 2 replicas with log INFO and prod at 3 replicas with log WARN."]
+image::config-multienv/config-multienv-05-what-you-built.svg["What the module assembles: the parasol-claims:1.0 image, one image and one digest, feeding a configured dev environment alongside the claims-config ConfigMap and claims-creds Secret, with oc apply -k of the stage and prod overlays promoting the same image onward to stage at 2 replicas with log INFO and prod at 3 replicas with log WARN."]
 
 *Why it matters*
 
@@ -225,9 +204,6 @@ No. A Secret's values are base64-encoded, which is trivially reversible — anyo
 
 *Then where should the real source of truth for secrets live?*::
 In a dedicated manager — HashiCorp Vault, or a cloud secrets service — synced into the cluster on demand. On OpenShift the External Secrets Operator does that: a small `ExternalSecret` object references the external manager, and the operator produces an ordinary Kubernetes Secret that the application consumes unchanged, so nothing in the workload has to know the difference.
-
-*Why did the Route not return 503 the moment the probe broke?*::
-Because a probe change triggers a rolling update, and the rollout is itself gated by readiness: the new pod never becomes ready, so it is held out of the Service while the old, healthy pod keeps serving. That is the platform protecting users from a bad change. A 503 appears only when there is no ready pod at all — which is why the demo scales to zero and back to one, so the only pod is the one with the broken probe.
 
 *All three environments run the same tag — how do you know it is the same bytes?*::
 The comparison reads the image digest from each running pod, not the tag. A tag is a mutable pointer and can be rebuilt underneath you; the digest is the content. That is also why supply-chain practice promotes by digest, and why a digest mismatch across environments is worth investigating rather than glossing over.
@@ -284,12 +260,12 @@ First add a *readiness probe*, the platform's "can this pod serve traffic *right
 [%collapsible]
 ====
 Without one, the platform counts a container as ready the instant its process starts, even while it is seconds from crashing; with one, a pod that cannot serve is held out of rotation.
-You add the full set of probes — startup and liveness too — in exercise 4; this one readiness check is what makes the next failure visible.
+Probes get their own module, xref:health-resources-autoscaling/lab.adoc[Health, Resources & Autoscaling]; this one readiness check is all you need here, because it is what makes the next failure visible.
 ====
 
 // Verified live OCP 4.22.5, 2026-07-28 as user1: at this module's entry state parasol-claims carries
-// no probes at all (all three are gated behind `.Values.solve` in
-// gitops/entry-states/config-multienv/templates/parasol-claims.yaml), so Actions offers "Add Health
+// no probes at all (the entry state in
+// gitops/entry-states/config-multienv/templates/parasol-claims.yaml declares none), so Actions offers "Add Health
 // Checks" here — CLI 'oc set probe --readiness' beside it is authoritative.
 [tabs]
 ====
@@ -691,7 +667,7 @@ stored:  cGFyYXNvbA==
 decoded: parasol
 ----
 
-*What just happened:* the stored value is only base64-encoded, so anyone allowed to *read* the Secret reads the password (encrypting the source of truth is a secrets manager's job: exercise 7).
+*What just happened:* the stored value is only base64-encoded, so anyone allowed to *read* the Secret reads the password (encrypting the source of truth is a secrets manager's job: exercise 5).
 
 [cols="1,2,2",options="header"]
 |===
@@ -796,317 +772,7 @@ Both are first-class: choose by size and rotation, not correctness.
 ✔ *Verify:* `oc set env deploy/parasol-claims --list` shows `POSTGRESQL_USER`/`POSTGRESQL_PASSWORD` coming *from secret claims-creds*, and you saw an `io.quarkus.http.access-log` line while the file was mounted.
 ****
 
-== 4. Add probes — and watch a readiness gate hold traffic
-⏱ *~7 min* · the platform learns your app's health; the second deliberate break
-
-A claims adjuster's request should never land on a pod that cannot answer it.
-Complete the probe set, then watch readiness drain the Service and refill it.
-
-*You'll end with:* all three probes on the Deployment, and a `503` you caused and then fixed.
-
-[mermaid]
-....
-include::example$diagrams/config-multienv/09-readiness-cycle.mmd[]
-....
-
-Add *startup* and *liveness* beside the readiness probe from exercise 1:
-
-[cols="1,2,3",options="header"]
-|===
-| Probe | Path | When it fails, the platform…
-
-| startup | `/q/health/started` | holds the other two off while the app boots
-| readiness | `/q/health/ready` | takes the pod out of the Service's endpoints
-| liveness | `/q/health/live` | restarts the wedged container
-|===
-
-// Grounded live on OCP 4.22.5 (2026-07-28) as user1 — CORRECTS an earlier claim. By this point the
-// Deployment already carries the readiness probe added in exercise 1, so Actions no longer offers "Add
-// Health Checks" — once any probe exists that same menu item reads "Edit Health Checks" instead. CLI
-// 'oc set probe' beside it is authoritative.
-[tabs]
-====
-Console::
-+
---
-. Go to *Workloads* → *Deployments* → `parasol-claims` → *Actions* → *Edit Health Checks* (it reads *Edit*, not *Add*, because a probe already exists).
-. Add a *Startup* probe on `/q/health/started` and a *Liveness* probe on `/q/health/live`: *HTTP GET*, port `8080`, with the CLI tab's periods and failure thresholds. *Readiness* is already listed.
-. *Save*, then wait for the rollout to finish.
---
-CLI::
-+
---
-[source,sh,role=execute]
-----
-oc set probe deploy/parasol-claims --startup   --get-url=http://:8080/q/health/started --period-seconds=3  --failure-threshold=30
-oc set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/ready   --period-seconds=10 --failure-threshold=3   # already set in exercise 1; re-applying is a no-op
-oc set probe deploy/parasol-claims --liveness  --get-url=http://:8080/q/health/live    --period-seconds=10 --failure-threshold=3
-oc rollout status deploy/parasol-claims
-for i in $(seq 1 45); do [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ] && break; sleep 2; done
-----
---
-====
-
-Confirm all three are set:
-
-[source,sh,role=execute]
-----
-oc get deploy parasol-claims -o jsonpath='startup={.spec.template.spec.containers[0].startupProbe.httpGet.path}{"\n"}readiness={.spec.template.spec.containers[0].readinessProbe.httpGet.path}{"\n"}liveness={.spec.template.spec.containers[0].livenessProbe.httpGet.path}{"\n"}'
-----
-
-.Expected output
-[source,texinfo]
-----
-startup=/q/health/started
-readiness=/q/health/ready
-liveness=/q/health/live
-----
-
-Now break *readiness* a different way: point it at a path that returns `404`:
-
-[source,sh,role=execute]
-----
-oc set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/typo
-----
-
-As in exercise 1, the new pod is held out and the Route stays `200`; this time the probe itself fails, not a dependency.
-
-*Predict, then run:* scale to zero and back to one, so the only pod has the failing check. What will the Service's endpoints show?
-
-[source,sh,role=execute]
-----
-oc scale deploy/parasol-claims --replicas=0
-oc scale deploy/parasol-claims --replicas=1
-sleep 40
-oc get endpoints parasol-claims
-----
-
-// Grounded by the config-multienv smoke, 2026-07-31: verified byte-for-byte with `od -c` that this
-// OCP version renders the drained ENDPOINTS column as a genuinely BLANK field, not the literal string
-// `<none>`. Some server versions do print the literal word; either rendering means the same thing —
-// no ready address — so show the blank field actually observed rather than a string that may not
-// print on every cluster.
-.Expected output (endpoints drained — no ready address; the ENDPOINTS column renders blank on some server versions and as the literal `<none>` on others)
-[source,texinfo]
-----
-Warning: v1 Endpoints is deprecated in v1.33+; use discovery.k8s.io/v1 EndpointSlice
-NAME             ENDPOINTS   AGE
-parasol-claims               ...
-----
-
-The deprecation warning is expected, above or below the table (EndpointSlice is the successor view).
-With no endpoints, the Route has nowhere to send traffic:
-
-[source,sh,role=execute]
-----
-CLAIMS=$(oc get route parasol-claims -o jsonpath='{.spec.host}')
-curl -s -o /dev/null -w "Route: %{http_code}\n" "http://$CLAIMS/api/claims"
-----
-
-.Expected output
-[source,texinfo]
-----
-Route: 503
-----
-
-// Shot on the Pods list, not the Service page the manifest first asked for: an unready Pod still
-// matches the Service's selector, so the Service page renders as though nothing were wrong. The
-// Pods list is the manifest's own documented fallback and shows the cause the 503 comes from.
-// Blank line above image:: is load-bearing (037b855); alt text quoted for its commas (c05d684).
-.Running, but not Ready
-image::config-multienv/config-multienv-03-readiness-503.png["The Pods list for the dev project, two rows. The database Pod claims-db is Running with Ready 1/1. Directly below it the application Pod parasol-claims is also Running, with 0 restarts — but its Ready column reads 0/1. The container started fine; it simply never passes its readiness probe, and that one column is the whole reason the Service has no endpoints and the Route answers 503."]
-
-*What just happened:* the `503` is the platform *holding* the request instead of sending it to a pod that would fail it.
-Restore readiness and watch the pod return to rotation:
-
-[source,sh,role=execute]
-----
-oc set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/ready
-oc rollout status deploy/parasol-claims
-for i in $(seq 1 45); do [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ] && break; sleep 2; done
-sleep 10
-curl -sf --retry 30 --retry-all-errors --retry-delay 2 -o /dev/null -w "Route: %{http_code}\n" \
-  "http://$(oc get route parasol-claims -o jsonpath='{.spec.host}')/api/claims"
-----
-
-.Expected output
-[source,texinfo]
-----
-deployment "parasol-claims" successfully rolled out
-Route: 200
-----
-
-[.checkpoint]
-****
-✔ *Verify:* with readiness broken, `oc get endpoints parasol-claims` showed an empty ENDPOINTS column (blank or `<none>`, by server version) and the Route returned `503`; after the fix it returns `200`.
-****
-
-== 5. Set requests and limits — and bump into the quota
-⏱ *~5 min* · resource governance; the third deliberate break
-
-Parasol's teams share one cluster, and a namespace budget stops one greedy workload starving the rest.
-So far the claims app has run on the *LimitRange* defaults you met in *Platform Orientation & First App*.
-
-*You'll end with:* explicit requests and limits on the claims app, and a quota refusal you can read.
-
-[mermaid]
-....
-include::example$diagrams/config-multienv/10-quota-admission.mmd[]
-....
-
-See the defaults the app inherits, then pin *explicit* values on it:
-
-// Verified live OCP 4.22.5, 2026-07-28 as user1: Deployment Actions confirms "Edit resource limits"
-// verbatim (full menu order: Edit Pod count · Add HorizontalPodAutoscaler · Add PodDisruptionBudget ·
-// Pause rollouts · Restart rollout · Add storage · Edit update strategy · Edit resource limits · Edit
-// Health Checks · Make Serverless · Edit labels · Edit annotations · Edit Deployment · Delete Deployment)
-// — CLI 'oc set resources' beside it is authoritative.
-// Grounded 2026-07-29 on OCP 4.22.5 and RE-GROUNDED 2026-08-14 on OCP 4.22.6 as user8: `oc get
-// limitrange workshop-limits -n {user}-dev -o jsonpath='{.spec.limits[0].default}'` shows one
-// Container-type limit whose default is now {cpu: 1500m, memory: 1Gi} — the cpu half moved 500m ->
-// 1500m in commit 13ed4ef — over an unchanged defaultRequest {cpu: 100m, memory: 256Mi}. Read
-// identical in dev, stage and prod, which is what this module walks. Same object Administration >
-// LimitRanges would render as its Default/Default request columns. NOT established: the exact
-// detail-page column labels/layout, which still needs a browser capture.
-[tabs]
-====
-Console::
-+
---
-. See the namespace defaults every pod inherits: *Administration* → *LimitRanges* → `workshop-limits` (its *Default* limit and *Default request*).
-. Set explicit values on the app: *Workloads* → *Deployments* → `parasol-claims` → *Actions* → *Edit resource limits*, then set CPU request `100m` / limit `500m` and Memory request `256Mi` / limit `512Mi`, and *Save*.
---
-CLI::
-+
---
-[source,sh,role=execute]
-----
-oc get limitrange workshop-limits -o jsonpath='default(limit)={.spec.limits[0].default}{"\n"}defaultRequest={.spec.limits[0].defaultRequest}{"\n"}'
-
-oc set resources deploy/parasol-claims \
-  --requests=cpu=100m,memory=256Mi \
-  --limits=cpu=500m,memory=512Mi
-oc rollout status deploy/parasol-claims
-for i in $(seq 1 45); do [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ] && break; sleep 2; done
-----
-
-.Expected output
-[source,texinfo]
-----
-default(limit)={"cpu":"1500m","memory":"1Gi"}
-defaultRequest={"cpu":"100m","memory":"256Mi"}
-deployment.apps/parasol-claims resource requirements updated
-Waiting for deployment "parasol-claims" rollout to finish: 1 old replicas are pending termination...
-deployment "parasol-claims" successfully rolled out
-----
---
-====
-
-Now the other guardrail, the namespace *ResourceQuota*:
-
-[source,sh,role=execute]
-----
-oc describe resourcequota workshop-quota | grep -E 'requests.cpu|requests.memory|pods'
-----
-
-.Expected output
-[source,texinfo]
-----
-pods                    2       30
-requests.cpu            200m    3
-requests.memory         512Mi   6Gi
-----
-
-Numbers higher? Wait a few seconds and re-run: quota accounting lags while the last rollout's old Pod terminates.
-
-[cols="1,2,2",options="header"]
-|===
-| | LimitRange | ResourceQuota
-
-| Applies to
-| Each container
-| The whole namespace
-
-| What it does
-| Fills in default requests and limits for a container that declares none
-| Caps the total requested across every pod
-|===
-
-You are using `200m` of the `3` CPU cores the namespace may request.
-Ask for `4` cores in one pod and watch the platform refuse:
-
-[source,sh,role=execute]
-----
-cat <<'EOF' | oc apply -f -
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: claims-hog
-  labels: { app: claims-hog }
-spec:
-  replicas: 1
-  selector: { matchLabels: { app: claims-hog } }
-  template:
-    metadata: { labels: { app: claims-hog } }
-    spec:
-      containers:
-        - name: hog
-          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
-          command: ["sleep", "infinity"]
-          resources:
-            requests: { cpu: "4", memory: 256Mi }
-            limits:   { cpu: "4", memory: 256Mi }
-EOF
-----
-
-After a few seconds, see why it never becomes available:
-
-[source,sh,role=execute]
-----
-oc get deploy claims-hog
-oc get deploy claims-hog -o jsonpath='{range .status.conditions[?(@.type=="ReplicaFailure")]}{.reason}: {.message}{"\n"}{end}'
-----
-
-.Expected output
-[source,texinfo]
-----
-NAME         READY   UP-TO-DATE   AVAILABLE   AGE
-claims-hog   0/1     0            0           11s
-FailedCreate: pods "claims-hog-79f759969d-8h666" is forbidden: exceeded quota: workshop-quota, requested: requests.cpu=4, used: requests.cpu=200m, limited: requests.cpu=3
-----
-
-// One frame, not the two the manifest sketched: the Deployment page carries both halves already —
-// the greedy request in Containers and the quota's verdict in Conditions — so no second capture of
-// the ResourceQuota page is needed. Blank line above image:: is load-bearing (037b855); alt text
-// quoted for its commas (c05d684).
-.The same refusal, in the Deployment's Conditions
-image::config-multienv/config-multienv-04-quota-replicafailure.png["The claims-hog Deployment detail page scrolled past the fold. Its Containers table lists one container, hog, running the ubi9/ubi-minimal image, with a Resource limits column of cpu: 4, memory: 256Mi — the greedy ask. Below it the Conditions table has three rows: Progressing True with reason NewReplicaSetCreated, Available False with reason MinimumReplicasUnavailable, and Replica Failure True with reason FailedCreate whose message reads pods claims-hog-64597b6dcf-m2t7t is forbidden: exceeded quota: workshop-quota, requested: requests.cpu=4, used: requests.cpu=200m, limited: requests.cpu=3. The Deployment exists; the quota simply never let a Pod be created."]
-
-*What just happened:* `requests.cpu=4` on top of `200m` used exceeds the limit of `3`, so the pod is *forbidden*; the Deployment exists with a `ReplicaFailure` condition and zero pods.
-Remove it (right-sizing its request would work too):
-
-[source,sh,role=execute]
-----
-oc delete deploy claims-hog
-----
-
-.Work *with* the guardrails, not against them
-[%collapsible]
-====
-The LimitRange and ResourceQuota are not there to frustrate you — they keep one team's workload from starving another's on a shared cluster.
-The right instinct when you hit a quota is to *right-size your requests* (do you really need 4 cores?), not to demand the quota be raised.
-Requests are a reservation; asking for more than you use wastes the whole namespace's headroom.
-
-You are meeting these guardrails from the inside, as the tenant.
-Authoring them from the outside — writing the ResourceQuota and LimitRange, and the RBAC that decides who may read or change them — is *Multi-Tenancy & Workload Security*, a separate module in this workshop.
-====
-
-[.checkpoint]
-****
-✔ *Verify:* the claims app shows explicit requests/limits (`oc get deploy parasol-claims -o jsonpath='{.spec.template.spec.containers[0].resources}'`), you saw the `exceeded quota: workshop-quota` message, and `claims-hog` is gone.
-****
-
-== 6. Promote the same image to stage and prod
+== 4. Promote the same image to stage and prod
 ⏱ *~6 min* · one image, three environments, different config
 
 You configured dev by hand, one command at a time; that will not scale to Parasol's stage and production.
@@ -1114,7 +780,7 @@ Capture the configuration *as code* and promote it.
 
 *You'll end with:* the same image digest running in dev (1 replica), stage (2) and prod (3), each with its own configuration.
 
-image::config-multienv/config-multienv-05-what-you-built.svg["What the module assembles: the parasol-claims:1.0 image, one image and one digest, feeding a configured and probed dev environment alongside the claims-config ConfigMap and claims-creds Secret, with oc apply -k of the stage and prod overlays promoting the same image onward to stage at 2 replicas with log INFO and prod at 3 replicas with log WARN."]
+image::config-multienv/config-multienv-05-what-you-built.svg["What the module assembles: the parasol-claims:1.0 image, one image and one digest, feeding a configured dev environment alongside the claims-config ConfigMap and claims-creds Secret, with oc apply -k of the stage and prod overlays promoting the same image onward to stage at 2 replicas with log INFO and prod at 3 replicas with log WARN."]
 
 Your Git account has a fork of `{user}/claims-config`: a Kustomize *base* (the claims app, its config, its database) and three *overlays* that change only what differs per environment.
 Clone it in the Showroom terminal:
@@ -1166,7 +832,7 @@ oc apply -k overlays/stage
 oc apply -k overlays/prod
 ----
 
-Wait for both rollouts (the startup probe gives each time to boot and seed its database):
+Wait for both rollouts (each boots its own database and seeds it):
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -1258,10 +924,10 @@ It cannot be swamped by a database-seeding race between replicas, because that r
 
 [.checkpoint]
 ****
-✔ *Verify:* `ws verify {module-id}` in the Showroom terminal confirms dev is externalized (ConfigMap + Secret + all three probes + explicit resources), stage (2 replicas, `APP_ENV=stage`) and prod (3 replicas, `APP_ENV=prod`) run the promoted app, and all three answer on their own Route.
+✔ *Verify:* `ws verify {module-id}` in the Showroom terminal confirms dev is externalized (ConfigMap + Secret), stage (2 replicas, `APP_ENV=stage`) and prod (3 replicas, `APP_ENV=prod`) run the promoted app, and all three answer on their own Route.
 ****
 
-== 7. [OPTIONAL] Real secret management with External Secrets
+== 5. [OPTIONAL] Real secret management with External Secrets
 ⏱ *~5 min* · read only here — the hands-on is in the Platform Guardrails module
 
 A Kubernetes Secret is base64, not encryption, and it lives in the cluster; sooner or later Parasol's auditors ask where the production password *really* lives.
