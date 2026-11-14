@@ -1067,13 +1067,13 @@ record_once nodes_zoned "${SHAPE_NODES[*]:-}"
 # batch stack (Kueue + KEDA) is a HARD baseline dependency, NOT optional: the workshop-config
 # layer below unconditionally ships per-user Kueue queues (kueue-queues + per-user-batch). Omit
 # batch and workshop-config's sync dies on missing kueue.x-k8s.io CRDs — which also aborts the
-# in-app Gitea/Argo seed hooks riding the same Application, blocking the whole workshop. M06 also
+# in-app Gitea/Argo seed hooks riding the same Application, blocking the whole workshop. M07 also
 # teaches Kueue. Verified: a clean bootstrap without it broke cluster-km7vw's seed (2026-07-12).
-# progressive-delivery (Argo Rollouts via RolloutManager) is BASELINE, not opt-in: M11
+# progressive-delivery (Argo Rollouts via RolloutManager) is BASELINE, not opt-in: M14
 # gitops-at-scale is core catalog (flagship Day-2 path) and its canary/rollback exercises are
 # dead without the controller. The Rollouts CRDs ship with GitOps, which HID the gap — the CR
 # applies cleanly and then nothing reconciles it (QA gate, 2026-07-18: greenfield installs
-# shipped a dead M11 on both install paths).
+# shipped a dead M14 on both install paths).
 # Cluster sign-in (owner decision 2026-11-12): attendees sign in through the cluster's ONE Keycloak
 # OpenID IdP, so oauth-openshift only ever redirects and every cockpit tab signs in inside its frame
 # (its own pages — chooser, HTPasswd form — are refused in a frame). Found = an OpenID IdP whose issuer
@@ -1117,9 +1117,9 @@ STACKS="core-devtools,batch,progressive-delivery"
 [[ "$PORTAL" == "true" ]] && STACKS="${STACKS},portal"
 [[ "$TRUST" == "true" ]] && STACKS="${STACKS},trust"
 # secrets stack (External Secrets Operator) for platform-guardrails. The module's entry state
-# applies SecretStore/ExternalSecret, so WITHOUT this stack M20 is still listed in the cockpit and
+# applies SecretStore/ExternalSecret, so WITHOUT this stack M21 is still listed in the cockpit and
 # fails at sync with `no matches for kind "SecretStore"` — found 2026-09-09 on a cold-start install,
-# eleven days after M20 shipped. modules.yaml declared `stacks: [secrets]` from day one; these two
+# eleven days after M21 shipped. modules.yaml declared `stacks: [secrets]` from day one; these two
 # lines were the half of the wiring that is hand-written. tools/lint/stack-wiring-guard.py now holds
 # modules.yaml and this file to the same set so the next stack cannot land half-wired.
 [[ "$SECRETS" == "true" ]] && STACKS="${STACKS},secrets"
@@ -1264,7 +1264,7 @@ ok "router: X-Frame-Options removed, frame-ancestors allow https://*.${_frame_do
 # (RHDP: replicas=6 on 3 control planes + 3 workers, host ports), the NoSchedule taint on the batch worker left
 # no node for the 6th replica, so ANY router rollout (this header change, an upgrade) stalled at 5/6 and the
 # ingress operator went Degraded (seen 2026-11-12 on cluster-5vqxc). Routers are cluster infrastructure; the
-# taint exists to repel ordinary workloads (M18). Merge patch: keeps the existing nodeSelector.
+# taint exists to repel ordinary workloads (M19). Merge patch: keeps the existing nodeSelector.
 oc patch ingresscontroller/default -n openshift-ingress-operator --type=merge -p '{"spec":{"nodePlacement":{"tolerations":[{"key":"workshop.redhat.com/pool","operator":"Equal","value":"batch","effect":"NoSchedule"}]}}}' >/dev/null
 ok "router: tolerates the ${POOL_LABEL} batch-pool taint (rollouts never stall on it)"
 

@@ -37,7 +37,7 @@
 # demo IS that case, and --user is the whole of it — there is no separate presenter mode:
 #     adm prep <module> --user user1 --yes      # pick ONE identity, keep it for the whole run
 #
-# <module> is a position number (m08) OR a slug (app-security-testing) — both resolve via modules.yaml
+# <module> is a position number (m11) OR a slug (app-security-testing) — both resolve via modules.yaml
 # (position → slug); everything internal keys off the slug. `adm list` shows the mapping.
 #
 # Entry states are Helm charts under gitops/entry-states/<module>/, materialized as
@@ -361,7 +361,7 @@ require_modules_yaml() {  # the catalog must exist to resolve any module; self-h
 
 module_arg() {  # mNN (position, zero-padded) OR a slug → the canonical SLUG (the internal module key)
   local raw="${1:-}" n count slug
-  [[ -n "$raw" ]] || die "module required — e.g. m08 (position) or a slug like app-security-testing; see: ${WS_CMD} list"
+  [[ -n "$raw" ]] || die "module required — e.g. m11 (position) or a slug like app-security-testing; see: ${WS_CMD} list"
   raw="$(echo "$raw" | tr '[:upper:]' '[:lower:]')"
   require_modules_yaml
   if [[ "$raw" =~ ^m0*([0-9]+)$ ]]; then
@@ -695,7 +695,7 @@ meta_rbac() {  # module user → ws-meta purgeRbac entries (ns/kind/name) with $
 }
 
 meta_wait() {  # module → per-module sync-wait seconds (ws-meta waitSeconds); empty = engine default.
-  # Modules whose hooks do real work (m07 solve runs a ~9-min pipeline) declare a longer window.
+  # Modules whose hooks do real work (m10 solve runs a ~9-min pipeline) declare a longer window.
   local meta="${ENTRY_DIR}/${1}/ws-meta.yaml"
   [[ -f "$meta" ]] || return 0
   awk '$1=="waitSeconds:"{print $2; exit}' "$meta"
@@ -731,7 +731,7 @@ meta_smoke_cmds() {  # module → ws-meta smokeCommands list (OPTIONAL, default 
 }
 
 meta_apps() {  # module user → "namespace project" if the module declares attendee-created Argo
-  # Application CRs living OUTSIDE its purge namespaces (m10+: the student-gitops control plane —
+  # Application CRs living OUTSIDE its purge namespaces (m13+: the student-gitops control plane —
   # ADR-0002 amendment 5: GitOps 1.21 refuses per-user source namespaces on a namespace-scoped
   # instance, so attendee apps live in the instance ns, isolated by Argo RBAC + AppProjects).
   # ws-meta keys: purgeAppsNamespace + purgeAppsProject (${USER} resolves).
@@ -789,7 +789,7 @@ purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve s
   # A subshell, not a bare `wait`, so it can never block on a background job of its caller.
   (
   oc delete all,pvc --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
-  # CRs 'oc delete all' misses: Tekton runs (M07+), ImagePolicies (M09+) — extend as modules add types
+  # CRs 'oc delete all' misses: Tekton runs (M10+), ImagePolicies (M12+) — extend as modules add types
   # (Dev Spaces workspaces went first, above). PipelineRuns cascade to their TaskRuns; deleting them
   # also releases per-run workspace PVCs. A leftover trusted-supply-chain ImagePolicy (block-unsigned)
   # would otherwise block the next module's image pulls in this namespace, so purge it too.
@@ -806,14 +806,15 @@ purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve s
   # finalizer. The chart's Repository comes back with the entry state.
   oc delete repositories.pipelinesascode.tekton.dev --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
   oc delete imagepolicies.config.openshift.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
-  # PodDisruptionBudgets aren't in `oc delete all`; an attendee's leftover observability-health-scale PDB
-  # survives reset and then trips the next start's entry verify (found at M12 G1, 2026-07-11).
+  # PodDisruptionBudgets aren't in `oc delete all`; the PDB an attendee creates in deployment-targets-
+  # scheduling survives reset and would trip the next start's entry verify. (First found in the
+  # observability lab, M12 G1, 2026-07-11, before the PDB exercise moved out of it.)
   oc delete poddisruptionbudgets.policy --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
-  # Same for the observability-health-scale attendee-created PrometheusRule — not in `oc delete all`,
+  # Same for the observability-metrics-traces attendee-created PrometheusRule — not in `oc delete all`,
   # survives reset and red-fails the next entry verify ("no PrometheusRule yet") (M12 G3, 2026-07-11 —
   # sibling of the PDB gap).
   oc delete prometheusrules.monitoring.coreos.com --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
-  # PersesDashboards (observability-health-scale ex3, dashboard as code) aren't in `oc delete all` either;
+  # PersesDashboards (observability-metrics-traces ex3, dashboard as code) aren't in `oc delete all` either;
   # one survived a reset on 2026-11-14. Dashboards ONLY: the PersesDatasource `thanos-tenancy` in {user}-dev
   # is workshop-config's (per-user-perses.yaml), not the attendee's, and the panels need it.
   oc delete persesdashboards.perses.dev --all -n "$ns" --wait=false >/dev/null 2>&1 || true &
@@ -892,7 +893,7 @@ purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve s
   done
   wait
   )
-  # Dangling ServiceAccount secret links aren't in `oc delete all` either: M18's Ex4 links the sample
+  # Dangling ServiceAccount secret links aren't in `oc delete all` either: M20's Ex4 links the sample
   # pull Secret into the default SA (`oc secrets link … --for=pull`); the loop above deletes the Secret
   # but the SA's imagePullSecrets/secrets entries survive reset and red-fail the next entry verify
   # ("sample pull Secret is NOT referenced yet") — the exact sibling of the PDB/NetworkPolicy/Template
@@ -1188,7 +1189,7 @@ wait_healthy() {  # appname [timeout_s] [require_sync]
     health="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.health.status}' 2>/dev/null || true)"
     sync="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.sync.status}' 2>/dev/null || true)"
     # Hooks keep the sync OPERATION Running after the app already reads Synced/Healthy — and a
-    # solve hook that does real work (m07: runs the whole pipeline) is exactly the point. Ready
+    # solve hook that does real work (m10: runs the whole pipeline) is exactly the point. Ready
     # means the operation finished too, or "demo-ready" prints while the namespace is still empty.
     phase="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.operationState.phase}' 2>/dev/null || true)"
     sync_ok="true"; [[ "$require_sync" == "true" && "$sync" != "Synced" ]] && sync_ok="false"
@@ -1275,7 +1276,7 @@ cmd_list() {
   done < <(_module_rows)
   [[ "$i" -gt 0 ]] || echo "  (catalog is empty — check ${MODULES_YAML})"
   echo
-  echo "  Use:  ${WS_CMD} ${WS_VERB} <number|slug>   e.g.  ${WS_CMD} ${WS_VERB} m08   or   ${WS_CMD} ${WS_VERB} app-security-testing"
+  echo "  Use:  ${WS_CMD} ${WS_VERB} <number|slug>   e.g.  ${WS_CMD} ${WS_VERB} m11   or   ${WS_CMD} ${WS_VERB} app-security-testing"
 }
 
 cmd_start() {
@@ -1923,7 +1924,7 @@ reset_purge() {  # user module
   #     it are never removed (they aren't app-owned), and the purge that WOULD remove them never
   #     runs. Purging first drains those pods (Completed pods go in ~1s), releases the PVC and
   #     empties the namespace; with selfHeal:false the still-present app only marks OutOfSync.
-  #     This also hardens m05's StatefulSet reset, where volumeClaimTemplate PVCs pin the same way.
+  #     This also hardens m06's StatefulSet reset, where volumeClaimTemplate PVCs pin the same way.
   #  3. Entry-app deletions LAST — conflicting ones here, ours just below. Both are fast now:
   #     the namespace is already empty, so their finalizers have nothing left to prune. This is
   #     strictly SAFER than the old path, where gc_conflicts deleted conflicting apps with the
@@ -4459,7 +4460,7 @@ cmd_preflight() {  # SA pre-install readiness check — run BEFORE bootstrap/ins
       pf_row FAIL "default StorageClass" "no StorageClass found — dynamic RWO storage is required"
     fi
 
-    # Dedicated-worker count → the M17 batch-pool verdict (U8-F-06). Says BEFORE the install which
+    # Dedicated-worker count → the M19 batch-pool verdict (U8-F-06). Says BEFORE the install which
     # half of the scheduling lesson this cluster can teach, instead of leaving an SA to discover it
     # from a verify line mid-workshop. The selector and the floor are bootstrap/install.sh's own
     # (MIN_BATCH_POOL_FOR_TAINT=3) — a pure worker, never a schedulable control-plane, because
@@ -4564,7 +4565,7 @@ cmd_preflight() {  # SA pre-install readiness check — run BEFORE bootstrap/ins
   if [[ -n "$PF_WORKERS_SHORT" ]]; then
     echo
     warn "WORKER COUNT — this cluster has ${PF_WORKERS_SHORT} dedicated worker(s); the workshop wants 3."
-    echo "         Cost: m18 deployment-targets-scheduling loses its toleration exercise (the"
+    echo "         Cost: m19 deployment-targets-scheduling loses its toleration exercise (the"
     echo "         nodeSelector half still runs and is graded). Everything else installs and works."
     echo "         Fix while you still can: re-order with 3 workers, or accept the gap knowingly."
   fi
@@ -5910,7 +5911,7 @@ ws — your workshop commands.
   ws verify <module>       check your work
   ws reset  <module>       put the module back to its starting point
 
-<module> is a number (m08) or a name (app-security-testing); `ws list` shows both.
+<module> is a number (m11) or a name (app-security-testing); `ws list` shows both.
 You never need to say who you are: ws uses the login this terminal already has.
 
 Running the workshop rather than taking it? The operator tool is `adm` — these four

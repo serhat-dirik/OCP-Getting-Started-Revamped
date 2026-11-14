@@ -24,7 +24,7 @@ repo. `tools/ws/adm` is the operator CLI; attendees only get `ws` inside their c
 | Storage | A default StorageClass. ReadWriteOnce is enough: no lab needs RWX, and the storage lab skips its RWX probe on a cluster without one. |
 | Nodes | `linux/amd64`. See [Node count](#node-count). |
 | Network | Outbound access to the Red Hat and Quay registries |
-| Model endpoint (optional) | An OpenAI-compatible chat-completions endpoint and key: Red Hat MaaS, vLLM, or a public provider. No GPU on your cluster. Without it, OpenShift Lightspeed and M06's AI batch-inference step are unavailable. |
+| Model endpoint (optional) | An OpenAI-compatible chat-completions endpoint and key: Red Hat MaaS, vLLM, or a public provider. No GPU on your cluster. Without it, OpenShift Lightspeed and M07's AI batch-inference step are unavailable. |
 | Not supported | OpenShift Local, single-node clusters |
 
 - **Red Hat SAs:** order [Field Sourced Content - OpenShift Base](https://catalog.demo.redhat.com/catalog/babylon-catalog-prod?item=babylon-catalog-prod/published.ocp-field-asset.prod)
@@ -440,7 +440,7 @@ Re-syncing `workshop-config` re-runs it.
 ### Lightspeed shows "Waiting for OpenShift Lightspeed service"
 
 - **Cause:** RHDP clusters ship Lightspeed pointed at Azure OpenAI, and its service principal was
-  deleted. Not caused by the workshop. **M06's batch inference is unaffected**; only the console assistant is.
+  deleted. Not caused by the workshop. **M07's batch inference is unaffected**; only the console assistant is.
 - Confirm: the `lightspeed-app-server` pod is `1/2`, and its log shows `AADSTS700016`:
   `oc -n openshift-lightspeed logs deploy/lightspeed-app-server -c lightspeed-service-api --tail=50 | grep -iE "AADSTS|LLM connection"`
 - **Fix:** point it at the workshop's MaaS (`adm maas show` prints your endpoint and model):

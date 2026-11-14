@@ -53,7 +53,7 @@ oc get applications -n openshift-gitops
 By default the whole workshop is delivered and every platform stack the modules need is
 installed. To run a shorter workshop, set `modulesDisabled` on the order (module numbers or
 slugs) — the disabled modules are hidden from the cockpit and any stack needed only by them is
-skipped, e.g. `modulesDisabled={m21,m22,m23,m24,m25}`. For the MaaS assistant, set
+skipped, e.g. `modulesDisabled={m22,m23,m24,m25,m26}`. For the MaaS assistant, set
 `litemaas.enabled=true` with `litemaas.apiUrl` + `litemaas.apiKey` (Lightspeed auto-skips when
 they are absent). The per-stack `stacks.*` booleans remain only as expert additive overrides.
 

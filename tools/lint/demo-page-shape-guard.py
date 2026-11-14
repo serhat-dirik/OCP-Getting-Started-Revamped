@@ -99,7 +99,7 @@ RE_WHY = re.compile(r"^\*Why it matters\*$")
 RE_RUN_ATTR = re.compile(r"^\[source,[^\]]*\brole=execute\b[^\]]*\]$")
 RE_USER_FLAG = re.compile(r"(?:^\s*|[;&|]\s*)(?:ws|adm)\b.*\s--user\b")
 # The workshop tool is the COMMAND word. `oc adm policy …` is ordinary OpenShift and must not
-# be flagged: M16 demonstrates four tested `oc adm policy` commands.
+# be flagged: M17 demonstrates four tested `oc adm policy` commands.
 RE_ADM = re.compile(r"(?:^\s*|[;&|]\s*)adm\b")
 RE_FAQ_ENTRY = re.compile(r"^\*.+\?\*::$")
 

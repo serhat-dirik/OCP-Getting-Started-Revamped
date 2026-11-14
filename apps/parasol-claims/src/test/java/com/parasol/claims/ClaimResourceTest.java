@@ -523,7 +523,7 @@ class ClaimResourceTest {
      */
     @Test
     void approvingAClaimRequiresAnAssignedAdjuster() {
-        // M07 lab: change this one line true -> false to break the build; revert to fix it.
+        // M10 lab: change this one line true -> false to break the build; revert to fix it.
         final boolean assignAdjusterBeforeApproval = true;
 
         // Open a claim. Toggle on -> it names an adjuster; toggle off -> it stays Unassigned.

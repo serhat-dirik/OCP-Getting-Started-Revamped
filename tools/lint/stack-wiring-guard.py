@@ -9,7 +9,7 @@ is HAND-WRITTEN: a stack only reaches the cluster if someone also adds
     <NAME>="$(stack_toggle <name> <key>)"          # ~line 217
     [[ "$<NAME>" == "true" ]] && STACKS="...,<name>"  # ~line 981
 
-When M20 (platform-guardrails) shipped in 9b94ec8 it declared `stacks: [secrets]` and the stack
+When M21 (platform-guardrails) shipped in 9b94ec8 it declared `stacks: [secrets]` and the stack
 existed on disk with a working kustomization — but neither hand-written line was added. The result
 was not a build failure or a red gate. It was a workshop that installs cleanly, reports
 `✅ workshop bootstrap complete`, lists module 20 in every attendee's cockpit, and then fails the
@@ -30,7 +30,7 @@ nobody hand-edits. This guard gives bootstrap/install.sh the equivalent.
 
 THE TWO DETECTORS, and why each is a real failure rather than a style rule:
 
-  required-but-unwired      a stack modules.yaml asks for that install.sh cannot turn on. The M20
+  required-but-unwired      a stack modules.yaml asks for that install.sh cannot turn on. The M21
                             bug exactly. Ships a broken module to attendees with no error anywhere.
 
   wired-but-absent          install.sh can enable a stack that has no directory on disk — a typo in

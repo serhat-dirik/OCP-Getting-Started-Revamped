@@ -68,7 +68,7 @@ Sizing, every option and troubleshooting: **[INSTALL.md](INSTALL.md)**.
   Red Hat SAs: order [**Field Sourced Content - OpenShift Base**](https://catalog.demo.redhat.com/catalog/babylon-catalog-prod?item=babylon-catalog-prod/published.ocp-field-asset.prod)
   with **3 workers or more** ([how many](INSTALL.md#sizing)).
 * On your machine: `oc`, `git`, `yq`, `openssl`.
-* Optional, for OpenShift Lightspeed and M06's AI batch-inference step: an OpenAI-compatible model endpoint and key.
+* Optional, for OpenShift Lightspeed and M07's AI batch-inference step: an OpenAI-compatible model endpoint and key.
 
 **1. Clone**
 
@@ -163,7 +163,7 @@ Inside the cockpit terminal:
 ws prep <module>        # build this module's starting environment
 ```
 
-Warn them this is a real wait — roughly 2 to 6 minutes for most modules, longer for M09 and M11 —
+Warn them this is a real wait — roughly 2 to 6 minutes for most modules, longer for M10 and M12 —
 and that the concept page is there to read while it runs. The per-module estimates are the **Prep**
 column in the [module table](#workshop-content) above. An attendee who is not told this will assume
 the terminal has hung and start over, which only makes it slower.

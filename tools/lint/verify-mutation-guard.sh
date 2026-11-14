@@ -6,7 +6,7 @@
 # behind an opt-in flag. Its EXIT trap was NOT: the trap was installed unconditionally at the top of
 # the end-state branch, BEFORE the drill's own prerequisite guard, with SITEA_RESTORE still empty —
 # so `--replicas=${SITEA_RESTORE:-3}` resolved to a literal 3 and EVERY end-mode run wrote 3 onto the
-# Deployment, including runs that never entered the drill. M21's lab asks the attendee to scale that
+# Deployment, including runs that never entered the drill. M25's lab asks the attendee to scale that
 # same Deployment to zero and watch the mesh fail over; running `ws verify` in a second terminal at
 # that moment — the obvious thing to do — silently ended their exercise.
 #

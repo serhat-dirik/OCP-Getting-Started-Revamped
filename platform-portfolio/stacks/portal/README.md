@@ -1,10 +1,10 @@
 # stack: portal
 
-The platform prerequisite for **M12 — Developer Hub & Golden Paths [ADS]**. Installs **Red Hat
+The platform prerequisite for **M15 — Developer Hub & Golden Paths [ADS]**. Installs **Red Hat
 Developer Hub (RHDH)** as an Argo CD app-of-apps: a single shared developer portal with the Parasol
 software catalog and a golden-path Software Template that scaffolds a new microservice into the
 attendee's Gitea org. One shared instance — never per-user; per-attendee isolation is each attendee's
-own Gitea org (materialized by the M12 entry state).
+own Gitea org (materialized by the M15 entry state).
 
 ```bash
 ./argocd-bootstrap/install.sh --stacks portal
@@ -30,7 +30,7 @@ the `core-devtools` stack). The `rhdh-gitea` secret (Gitea credentials) is a **c
 the instance reconciles — see `components/rhdh/README.md`. In the workshop the credentials are the Gitea
 admin account; the workshop bootstrap discovers them and creates the secret.
 
-## How the pieces serve M12 (verified live 2026-07-11)
+## How the pieces serve M15 (verified live 2026-07-11)
 
 - **Catalog browse (LAB beat 1):** `catalog.locations` register the `parasol/*` repos' `catalog-info.yaml`
   (parasol-claims/-web/-notifications, their APIs, the `parasol-insurance` System) — served from the
@@ -44,7 +44,7 @@ admin account; the workshop bootstrap discovers them and creates the secret.
 - **Auth:** guest sign-in by default; the optional `rhdh-auth` Secret switches it to any provider
   (e.g. OIDC against Keycloak) without a git change — see `components/rhdh/README.md`.
 - **Developer Lightspeed** ships **on by default** (operator flavour) and degrades gracefully without a
-  model; the M12 [ADS] section wires it to MaaS.
+  model; the M15 [ADS] section wires it to MaaS.
 
 ## Footprint (live, ocp-ws-revamped 2026-07-11, idle)
 
@@ -58,9 +58,9 @@ Idle total ~50m CPU / ~1.4Gi; peaks during catalog refresh + scaffolds. Workers 
 (5–10% CPU, 20–48% memory). A single shared instance is the right shape — do not scale per-user. First
 start takes a few minutes (the Lightspeed `init-rag-data` init container).
 
-## The M12 entry-state seam (NOT installed here)
+## The M15 entry-state seam (NOT installed here)
 
-This stack is a shared platform. The **per-user** wiring is the M12 entry state
+This stack is a shared platform. The **per-user** wiring is the M15 entry state
 (`gitops/entry-states/developer-hub-golden-paths/`, built separately) and layers on top: it gives each attendee a dedicated
 `{user}-svcs` Gitea org to scaffold into and keeps it a clean slate across `ws reset`.
 
@@ -82,4 +82,4 @@ curl -ks -o /dev/null -w '%{http_code}\n' "https://${RT}/"              # 200
 ## Uninstall
 
 Delete the stack Applications (`oc delete application pp-rhdh pp-rhdh-operator -n openshift-gitops`) —
-prune removes the components. The `rhdh-gitea` secret is refreshed automatically on every install (both installers); a preserved stale copy is exactly what broke the M12 catalog cohort-wide.
+prune removes the components. The `rhdh-gitea` secret is refreshed automatically on every install (both installers); a preserved stale copy is exactly what broke the M15 catalog cohort-wide.

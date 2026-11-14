@@ -1,9 +1,9 @@
 # stack: mesh
 
-The platform prerequisite for **M19 — Service Mesh 3 & Advanced Gateways**. Installs the shared,
+The platform prerequisite for **M22 — Service Mesh 3 & Advanced Gateways**. Installs the shared,
 cluster-wide **OpenShift Service Mesh 3 (OSSM3, Sail)** control plane + **Kiali** as an Argo CD
 app-of-apps. Everything here is a **single shared install** — never per-user; per-user enrollment
-(`{user}-mesh` namespaces + the meshed Parasol app) is the workshop layer / M19 entry state on top.
+(`{user}-mesh` namespaces + the meshed Parasol app) is the workshop layer / M22 entry state on top.
 
 ```bash
 ./argocd-bootstrap/install.sh --stacks mesh
@@ -31,7 +31,7 @@ expected and supported. Content and screenshots were *grounded on* v3.3.5 / Isti
 `versions.yaml` `service_mesh`); on a cluster running 3.4.x the operator version in the console will read
 higher, which is correct, not drift.
 
-**Sidecar-default per ADR-0003** — no `ZTunnel` (ambient is an M19 concept + optional exercise, not the
+**Sidecar-default per ADR-0003** — no `ZTunnel` (ambient is an M22 concept + optional exercise, not the
 platform baseline). SMCP/SMMR do **not** exist in 3.x (Sail uses `sailoperator.io/v1` — ban-clean). The
 Istio build is requested via `spec.version` in `components/service-mesh/istio.yaml` (versions.yaml
 `service_mesh.istio_version`). That field is a **CRD enum owned by the operator**, so it is the one thing
@@ -43,7 +43,7 @@ line is `eol: true`), so a 3.3 → 3.4 float needs no manifest change.
 ## Coexistence with the OpenShift Gateway API (the load-bearing design point)
 
 This cluster already runs an **ingress-operator-managed istiod** in `openshift-ingress` (revision
-`openshift-gateway`, Istio 1.27.x) that backs the `openshift-default` GatewayClass (M16's `gateway-api`
+`openshift-gateway`, Istio 1.27.x) that backs the `openshift-default` GatewayClass (M22's `gateway-api`
 component). OSSM3 installs a **second, independent** istiod (revision `default`, Istio 1.28.x) in
 `istio-system`. They coexist cleanly — verified live 2026-07-13, before + after installing OSSM3:
 
@@ -77,7 +77,7 @@ alone. If OSSM **2.x** is present, the GatewayClass goes Degraded (remove one or
 | `istio-system` | istiod (control plane) + the Kiali workload |
 | `istio-cni` | the `istio-cni-node` DaemonSet (privileged PSA) |
 
-## The M19 entry-state seam (NOT installed here)
+## The M22 entry-state seam (NOT installed here)
 
 Workshop-agnostic by design. The **per-user** wiring lives in the workshop layer, on top of this shared
 control plane:
