@@ -163,7 +163,7 @@ Inside the cockpit terminal:
 ws prep <module>        # build this module's starting environment
 ```
 
-Warn them this is a real wait — roughly 2 to 6 minutes for most modules, longer for M10 and M12 —
+Warn them this is a real wait — roughly 2 to 6 minutes for most modules, longer for M12 and M14 —
 and that the concept page is there to read while it runs. The per-module estimates are the **Prep**
 column in the [module table](#workshop-content) above. An attendee who is not told this will assume
 the terminal has hung and start over, which only makes it slower.

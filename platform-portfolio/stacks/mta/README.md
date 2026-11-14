@@ -61,5 +61,5 @@ oc get route -n openshift-mta                             # the MTA web console 
 > default channel `stable-v8.1` → `mta-operator.v8.1.2`, OwnNamespace/SingleNamespace/MultiNamespace
 > install modes (AllNamespaces unsupported), owned CRDs (Tackle/Addon/Extension/Schema/Task), and the
 > Tackle `alm-example` (minimal `feature_auth_required`). Full install verification (operator Succeeded
-> + the Tackle Hub UI/hub/keycloak/postgres pods Running) runs post-merge via Argo — see the M23 build
+> + the Tackle Hub UI/hub/keycloak/postgres pods Running) runs post-merge via Argo — see the retired MTA module's build
 > report for why on-cluster install was merge-gated in the build session.
