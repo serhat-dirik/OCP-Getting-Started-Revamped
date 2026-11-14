@@ -1,0 +1,81 @@
+# Perses dashboards for attendees (console Observe -> Dashboards (Perses), observability-health-scale):
+# one metrics datasource per {user}-dev, plus the one grant that lets it answer. Creating, editing and
+# deleting a PersesDashboard needs NOTHING here: OLM aggregates persesdashboards/persesdatasources CRUD
+# into the stock `admin` ClusterRole, which attendees already hold in their namespaces (per-user-rbac.yaml).
+#
+# TENANCY. The datasource URL is the Thanos querier TENANCY port (9092) pinned to this one namespace: its
+# kube-rbac-proxy authorizes the CALLER for that namespace, and prom-label-proxy forces every query to
+# namespace="{user}-dev" (a query naming another namespace gets HTTP 400). No credential secret is set,
+# so Perses forwards the caller's own bearer token (rhobs/perses proxy.go: the Authorization header
+# passes through unless a datasource secret sets one). The `secret` below is the TLS-only Perses secret
+# the perses-operator generates from `client.tls` (<name>-secret): the service CA, no token. The
+# cluster-wide port (9091) is never offered and refuses an attendee token anyway (403).
+#
+# WHY pod-metrics-reader. Perses sends Prometheus queries as POST (perses/plugins prometheus-client.ts),
+# and the 9092 proxy maps POST to the verb `create` on pods.metrics.k8s.io in the namespace. `admin`
+# grants only get/list/watch there, so every panel would be 403 while a GET from curl works. The stock
+# CMO ClusterRole pod-metrics-reader is exactly {get, create} on pods.metrics.k8s.io; metrics.k8s.io
+# serves no create, so the binding unlocks POST queries to the tenancy proxy and nothing else.
+# Proved 2026-11-14 (OCP 4.22, COO 1.5.5) with a namespace-admin-only token: POST 403 without the
+# binding, 200 with it; another namespace 403; 9091 403.
+#
+# WHY HERE, not the portfolio: the portfolio installs Perses (the Monitoring UIPlugin) and stays
+# workshop-agnostic; anything pinned to a user's namespace lives in the layer that creates it. Argo owns
+# both with selfHeal, so a `ws reset` purge cannot lose them. Gated on the module whose stack installs
+# COO: without it the perses.dev CRDs do not exist and one un-appliable object would fail the whole
+# workshop-config app (see workshop-config.moduleEnabled).
+{{- if include "workshop-config.moduleEnabled" (dict "root" $ "slug" "observability-health-scale") }}
+{{- range $i := until (int .Values.userCount) }}
+{{- $user := printf "%s%d" $.Values.userPrefix (add $i 1) }}
+---
+# The attendee's default metrics datasource: their own namespace's metrics, with their own token.
+apiVersion: perses.dev/v1alpha2
+kind: PersesDatasource
+metadata:
+  name: thanos-tenancy
+  namespace: {{ $user }}-dev
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
+  annotations:
+    # The perses.dev CRDs arrive with COO (observability stack), possibly after this app's first sync.
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  config:
+    display:
+      name: "Metrics ({{ $user }}-dev)"
+    default: true
+    plugin:
+      kind: PrometheusDatasource
+      spec:
+        proxy:
+          kind: HTTPProxy
+          spec:
+            url: "https://thanos-querier.openshift-monitoring.svc.cluster.local:9092?namespace={{ $user }}-dev"
+            secret: thanos-tenancy-secret
+  client:
+    tls:
+      enable: true
+      caCert:
+        type: file
+        certPath: /ca/service-ca.crt
+---
+# Lets the datasource's POST queries through the 9092 tenancy proxy (see WHY pod-metrics-reader above).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $user }}-pod-metrics-reader
+  namespace: {{ $user }}-dev
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pod-metrics-reader
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: {{ $user | quote }}
+{{- end }}
+{{- end }}

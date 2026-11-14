@@ -156,6 +156,7 @@ argoproj.io/Experiment            component:argo-rollouts       Argo Rollouts co
 
 # ── operator workload APIs the providing component never emits itself ──────────
 kueue.x-k8s.io                    component:kueue               kueue-operator (batch stack)
+perses.dev                        component:cluster-observability-operator  perses-operator ships with COO
 tekton.dev                        component:openshift-pipelines openshift-pipelines-operator-rh
 pipelinesascode.tekton.dev        component:openshift-pipelines Pipelines-as-Code ships with it
 operator.tekton.dev               component:openshift-pipelines TektonConfig, same operator
