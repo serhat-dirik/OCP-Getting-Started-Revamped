@@ -4,6 +4,14 @@ What to do, in order, to deliver a live session. Installing and troubleshooting 
 [INSTALL.md](INSTALL.md). Each module's instructor page (`content/modules/ROOT/pages/<slug>/instructor.adoc`)
 has its own timing table, pre-flight checklist and watchouts.
 
+`adm` is the operator CLI at `tools/ws/adm` in this repo. Run it on your own machine from the repo
+root, signed in with `oc` as cluster-admin. The module instructor pages write plain `adm`; to type it
+that way, run this once per shell from the repo root:
+
+```bash
+export PATH="$PWD/tools/ws:$PATH"
+```
+
 1. [Plan](#1-plan)
 2. [Day before](#2-day-before)
 3. [Morning of](#3-morning-of)
