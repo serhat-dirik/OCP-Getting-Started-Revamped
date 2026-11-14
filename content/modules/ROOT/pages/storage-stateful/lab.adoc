@@ -19,15 +19,7 @@ image::solution-map/storage-stateful.svg["The Parasol solution map with this mod
 In this lab you take Parasol's claims database from *ephemeral* (data dies with the Pod) to *persistent* (data survives), by hand, one object at a time — then you run a real StatefulSet and operate it: stable identities, a partitioned update, an init-container migration, and an online volume resize.
 Everything happens in your own `{user}-dev` project, so nothing you do affects another attendee.
 
-[TIP]
-.Two ways to do most steps
-====
-Most cluster steps below are offered two ways.
-Use the *Console* tab for the graphical workflow in the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`), or the *CLI* tab for `oc` in the *Terminal* tab beside these instructions — the two paths act on the same objects.
-Pick a path once: the tabs stay in sync across the page.
-Storage is where the console earns its keep — the *Storage* views show the PVC → PV → StorageClass chain at a glance — so this module leans on it.
-A few steps are terminal-only: seeding and reading claims with `curl` (an app API, not a cluster action), the StatefulSet's in-pod `exec`/DNS checks, and the partitioned-update patch; those say so.
-====
+TIP: Most steps have a *Console* tab, for the {ocp_console_url}[OpenShift web console^] signed in as `{user}`, and a *CLI* tab, for `oc` in the *Terminal* beside these instructions; both act on the same objects. The console's *Storage* views show the PVC → PV → StorageClass chain at a glance. Steps with no tabs are terminal-only.
 endif::demo[]
 
 // ============================================================================
@@ -208,15 +200,25 @@ endif::demo[]
 
 // ============================================================================
 // WORKSHOP FLAVOR — hands-on exercise groups
+// Each exercise opens the same way (the solution map appears once, at the top of the lab): a one-line
+// story beat, and "You'll end with" plus a picture of the result. Steps come next; the why follows as
+// a short *What just happened* and, where it runs long, a collapsible block.
 // ============================================================================
 ifndef::demo[]
 
 == 1. Seed the claims database
 ⏱ *~5 min* · put real data in, so you have something to lose
 
-Your claims service talks to a PostgreSQL database (`claims-db`) running in `{user}-dev`.
-It starts empty.
-Capture the app's public address and confirm there are no claims yet:
+Parasol's claims team files today's work into `claims-db`, the PostgreSQL database behind your claims service.
+
+*You'll end with:* three claims in that database, stored on the `emptyDir` volume below.
+
+[mermaid]
+....
+include::example$diagrams/storage-stateful/05-seed-path.mmd[]
+....
+
+Capture the app's address and confirm there are no claims yet; you get back `[]`:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -225,11 +227,9 @@ echo "claims API: http://$CLAIMS"
 curl -s "http://$CLAIMS/api/claims"
 ----
 
-You get back an empty list, `[]`.
+TIP: `CLAIMS` lasts only for this terminal session. *If your terminal reconnects, run the exercise's first block again*; blocks that need `CLAIMS` say so rather than call an empty address.
 
-TIP: `CLAIMS` is a shell variable, so it lasts only as long as this terminal session. *If your terminal reconnects, run the exercise's first block again* — a fresh shell has no `CLAIMS`, and a block that needs it says so instead of calling an empty address.
-
-Now create three claims through the API — Parasol's claims team filing today's work:
+File three claims through the API:
 
 [source,sh,role=execute]
 ----
@@ -241,8 +241,8 @@ for c in '{"claimant":"Nadia Rahman","type":"auto","amount":3200}' \
 done
 ----
 
-Each `POST` returns `201` and the created claim; the server assigns the numbers `CLM-1001`, `CLM-1002`, `CLM-1003`.
-Confirm the database now holds three claims — the total is in the `X-Total-Count` header:
+Each `POST` returns `201`; the server numbers the claims `CLM-1001` to `CLM-1003`.
+Count them from the `X-Total-Count` header:
 
 [source,sh,role=execute]
 ----
@@ -252,15 +252,22 @@ curl -s -D - -o /dev/null "http://${CLAIMS:?is empty - run the first block of th
 [.checkpoint]
 ****
 ✔ *Verify:* `curl .../api/claims` lists your three claims, and `x-total-count: 3`.
-These three claims are the data you are about to lose — and then save.
 ****
 
 == 2. Lose the data — the ephemeral trap
 ⏱ *~5 min* · break it on purpose, so the fix means something
 
-The `claims-db` Pod stores its data in an *emptyDir* volume.
-An emptyDir is created empty when the Pod starts and *deleted when the Pod is removed* — it belongs to the Pod, not to the cluster.
-See it for yourself:
+Pods get replaced all the time: a node drain, a cluster upgrade, an OOM kill, a crash.
+See what that does to Parasol's claims.
+
+*You'll end with:* zero claims after one routine Pod restart, and the reason why.
+
+[mermaid]
+....
+include::example$diagrams/storage-stateful/06-ephemeral-trap.mmd[]
+....
+
+Check the database's `data` volume:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -274,8 +281,9 @@ oc -n {user}-dev get deploy claims-db -o jsonpath='{.spec.template.spec.volumes[
 {"emptyDir":{},"name":"data"}
 ----
 
-Now do the thing that happens to Pods all the time — a node drain, a cluster upgrade, an OOM kill, a crash.
-Delete the database Pod; its Deployment immediately makes a new one:
+An *emptyDir* is created empty with the Pod and *deleted with it*: it belongs to the Pod, not to the cluster.
+
+Delete the database Pod; its Deployment replaces it in seconds:
 
 // Grounded 2026-07-30 on OCP 4.22.5, signed in as an attendee (user1), viewport 1600x1000.
 // Pods list row kebab (Actions) for pod `claims-db-78c69cd9c8-nw78p` (user1-dev) shows:
@@ -286,7 +294,7 @@ Console::
 +
 --
 . Go to *Workloads* → *Pods*, find the `claims-db-…` Pod, and use its *⋮* (kebab) menu → *Delete Pod* (confirm).
-. The `claims-db` Deployment immediately schedules a replacement — watch it return to *Running* on the Pods list.
+. The `claims-db` Deployment schedules a replacement at once; watch it reach *Running*.
 --
 CLI::
 +
@@ -299,9 +307,7 @@ oc -n {user}-dev rollout status deploy/claims-db
 --
 ====
 
-The new Pod is `Running` in seconds — but it started with a *fresh, empty* emptyDir.
-Ask the app for your claims.
-The `for` line waits until the app passes its readiness check through its Route; that check includes the app's database connection, so a pass means the app is up and connected to the new database Pod:
+Ask the app for your claims:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -310,18 +316,17 @@ for i in $(seq 1 30); do curl -sf -o /dev/null "http://$CLAIMS/q/health/ready" &
 curl -s "http://$CLAIMS/api/claims" -w '\n[HTTP %\{http_code}]\n'
 ----
 
-You get a short `500 - Internal Server Error` page ending in `[HTTP 500]` — not an empty list.
-That is worse than it looks, and it is the point: the database came back so empty that even the *table* is gone — the app can't query a table that no longer exists.
+You get a short `500 - Internal Server Error` page ending in `[HTTP 500]`, not an empty list: even the *table* is gone.
 
-[NOTE]
 .Why the whole schema vanished, not just your rows
+[%collapsible]
 ====
 The database schema — the `claim` table itself — was created inside that emptyDir the first time the app connected.
 When the emptyDir died with the old Pod, the table went with it.
 The app is configured to *reuse* an existing schema (it never wipes data on start), so it does not recreate the table on its own — it just fails, honestly, against an empty database.
 ====
 
-Recover the app by restarting it so it rebuilds the (empty) schema, then count the claims:
+Restart the app so it rebuilds the (empty) schema, then count again:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -331,10 +336,16 @@ for i in $(seq 1 30); do curl -sf -o /dev/null "http://${CLAIMS:?is empty - run 
 curl -s -D - -o /dev/null "http://$CLAIMS/api/claims" | grep -i x-total-count
 ----
 
-The same `for` line again: `rollout status` returns as soon as the new Pod is ready, and the router needs a few more seconds to send traffic to it.
-`x-total-count: 0`.
-Your three claims are gone.
-Confirm the specific claims you created now return `404`:
+`x-total-count: 0`: your three claims are gone.
+
+.What the `for` lines wait for
+[%collapsible]
+====
+The `for` line waits until the app passes its readiness check through its Route; that check includes the app's database connection, so a pass means the app is up and connected to the new database Pod.
+After a restart, `rollout status` returns as soon as the new Pod is ready, and the router needs a few more seconds to send traffic to it; the same `for` line waits that out.
+====
+
+Confirm each claim you created now returns `404`:
 
 [source,sh,role=execute]
 ----
@@ -343,19 +354,26 @@ for n in CLM-1001 CLM-1002 CLM-1003; do
 done
 ----
 
+*What just happened:* the replacement Pod started on a fresh, empty emptyDir; your rows and the schema left with the old Pod.
+
 [.checkpoint]
 ****
-✔ *Verify:* After the DB Pod restart, `x-total-count: 0` and each `CLM-100x` returns `404`.
-You just watched routine Pod churn destroy a database.
-Now make it impossible.
+✔ *Verify:* After the DB Pod restart, `x-total-count: 0` and each `CLM-100x` returns `404`: routine Pod churn destroyed a database.
 ****
 
 == 3. Add persistent storage (a PersistentVolumeClaim)
 ⏱ *~5 min* · one object turns the volume from ephemeral to durable
 
-You will replace the emptyDir with a *PersistentVolumeClaim* — a request for durable storage that the cluster provisions and keeps, independent of any Pod.
+Parasol cannot lose claims to a Pod restart again: give the database storage that the cluster keeps, independent of any Pod.
 
-Write the PVC yourself, so you see exactly what you are asking for — 2Gi, `ReadWriteOnce`, on the default StorageClass (omit `storageClassName` and you get the default):
+*You'll end with:* `claims-db` writing to a `Bound` PersistentVolumeClaim, `claims-db-data`, with three new claims on it.
+
+[mermaid]
+....
+include::example$diagrams/storage-stateful/07-first-consumer-binding.mmd[]
+....
+
+Write the PVC yourself: 2Gi, `ReadWriteOnce`, default StorageClass (omit `storageClassName` to get it):
 
 // Grounded live on OCP 4.22.5 (2026-07-28) as user1 — CORRECTS an earlier claim. The "Create
 // PersistentVolumeClaim" form's fields, in order, are StorageClass (first, defaulted), then
@@ -368,11 +386,11 @@ Write the PVC yourself, so you see exactly what you are asking for — 2Gi, `Rea
 Console::
 +
 --
-. Go to *Storage* → *PersistentVolumeClaims* and click *Create PersistentVolumeClaim*.
-. Leave the *StorageClass* at the default, and name it `claims-db-data`.
-*Access mode* is preset to *Single user (RWO)* and locked — the StorageClass fixes it, and RWO is the right mode for a single-writer database.
+. *Storage* → *PersistentVolumeClaims* → *Create PersistentVolumeClaim*.
+. Keep the default *StorageClass* and name it `claims-db-data`.
+*Access mode* is locked to *Single user (RWO)* by the StorageClass, the right mode for a single-writer database.
 Set *Size* `2` GiB and click *Create*.
-. It appears as *Pending* — that is expected here (the default class waits for the first consumer, the next step).
+. It shows *Pending*: expected, as the default class waits for its first consumer (the next step).
 --
 CLI::
 +
@@ -394,7 +412,7 @@ EOF
 --
 ====
 
-Look at the PVC immediately:
+Look at the PVC straight away:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -408,10 +426,9 @@ NAME             STATUS    VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS      
 claims-db-data   Pending                                      ocs-external-storagecluster-ceph-rbd   <unset>                 3s
 ----
 
-On this cluster it is `Pending`, with *no volume bound yet* — and that is correct, not broken.
-The default StorageClass here uses `WaitForFirstConsumer`: it waits to create the disk until a Pod that uses it is scheduled, so the disk is provisioned near the Pod.
-(If your own cluster's default class binds `Immediate` instead, you may see `Bound` already at this point — that is also correct; either way, continue below.)
-See that reason in the PVC's events:
+*What just happened:* `Pending` with no volume is correct: the default class uses `WaitForFirstConsumer`, so it creates the disk only when a Pod using the claim is scheduled, near that Pod.
+(A default class that binds `Immediate` shows `Bound` already; also correct, so continue.)
+The PVC's events say so:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -424,8 +441,7 @@ oc -n {user}-dev describe pvc claims-db-data | grep -A1 WaitForFirstConsumer
   Normal  WaitForFirstConsumer  ...  persistentvolume-controller  waiting for first consumer to be created before binding
 ----
 
-Now give the database that PVC.
-Try the obvious command first — point the `data` volume at the claim:
+Give the database that PVC; try the obvious command first:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -441,9 +457,7 @@ It fails:
 error: deployments/claims-db volume 'data' already exists. Use --overwrite to replace
 ----
 
-Read the error: there is *already* a volume named `data` (the emptyDir).
-You are not adding a second volume; you are *replacing* the emptyDir with your PVC at the same path.
-Do what the error says — add `--overwrite`:
+A volume named `data`, the emptyDir, *already* exists: you are *replacing* it at the same path, so add `--overwrite`, as the error says:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -457,8 +471,7 @@ oc -n {user}-dev set volume deploy/claims-db --add --overwrite --name data \
 deployment.apps/claims-db volume updated
 ----
 
-That swapped the database's `data` volume from the emptyDir to your PVC, which rolls a new Pod.
-That new Pod is the *first consumer* the StorageClass was waiting for — wait for it, and watch the PVC bind:
+That rolls a new database Pod, the *first consumer* the class was waiting for. Watch the PVC bind:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -474,8 +487,7 @@ claims-db-data   Bound    pvc-0dcf5e0b-7dd7-4230-baba-c3fb1e76b976   2Gi        
 ----
 
 `Bound`, with a real PersistentVolume behind it.
-The database now writes to durable storage.
-Restart the app so it builds its schema on the fresh persistent volume, wait until the Route answers, then re-seed your three claims:
+Restart the app so it builds its schema on the new volume, then re-seed three claims:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -510,7 +522,16 @@ x-total-count: 3
 == 4. Prove the data survives
 ⏱ *~5 min* · the same break, the opposite outcome
 
-Do exactly what destroyed the data in exercise 2 — delete the database Pod — but this time *do not restart the app*:
+Repeat exercise 2's routine restart, now that Parasol's claims live on durable storage.
+
+*You'll end with:* the same three claims after the database Pod is replaced, with no app restart and no error.
+
+[mermaid]
+....
+include::example$diagrams/storage-stateful/08-same-restart-two-outcomes.mmd[]
+....
+
+Delete the database Pod exactly as in exercise 2, but this time do *not* restart the app:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -525,7 +546,7 @@ Confirm the new Pod re-attached to the *same* PersistentVolume:
 oc -n {user}-dev get pvc claims-db-data -o jsonpath='claims-db-data → {.status.phase} → {.spec.volumeName}{"\n"}'
 ----
 
-Now read your claims back — with no app restart:
+Read your claims back, with no app restart:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -544,11 +565,10 @@ x-total-count: 3
 "claimant":"Lasting Lee"
 ----
 
-`x-total-count: 3`, and Persistent Pat, Durable Dana, and Lasting Lee are all there.
-Same Pod deletion as before; this time the app didn't even error, because the data *and* the schema live on the PersistentVolume, not in the Pod.
+*What just happened:* same deletion as exercise 2, yet all three claims are there and the app never errored: the data *and* the schema live on the PersistentVolume, not in the Pod.
 
-[NOTE]
 .Why the app needed no restart
+[%collapsible]
 ====
 Two things carried the app through the database restart on its own.
 While the database Pod was gone, the app's readiness check failed; after three failures in a row OpenShift stops routing requests to the app until the check passes again, and the `for` line waits for that.
@@ -566,15 +586,21 @@ Without that setting, the first request after a database restart fails on a stal
 [.checkpoint]
 ****
 ✔ *Verify:* After deleting the DB Pod, the API still returns your three claims — with no app restart and no error.
-Ephemeral versus persistent was the only thing that changed.
 ****
 
 == 5. Inspect the storage chain
 ⏱ *~5 min* · PVC → PV → StorageClass, and what access modes your cluster really offers
 
-You have a bound PVC.
-Walk the chain from what you asked for to what the platform gave you.
-First the *PVC* — your request, in your namespace:
+Parasol's auditors ask where the claims data physically lives: walk the chain from your request to the disk.
+
+*You'll end with:* your default StorageClass, its binding mode, access mode and reclaim policy, and whether your cluster offers ReadWriteMany.
+
+[mermaid]
+....
+include::example$diagrams/storage-stateful/01-storage-chain.mmd[]
+....
+
+First the *PVC*, your request:
 
 // Grounded 2026-07-30 on OCP 4.22.5, signed in as an attendee (user1), viewport 1600x1000, against
 // the real bound `claims-db-data` PVC. The claim was half right and the wrong half sent attendees
@@ -595,10 +621,9 @@ First the *PVC* — your request, in your namespace:
 Console::
 +
 --
-. Go to *Storage* → *PersistentVolumeClaims* → `claims-db-data`.
-Its detail page shows *Status* `Bound`, *Requested capacity* and *Capacity*, how much is *Used*, the *Access modes*, the *Volume mode*, and a clickable *StorageClass*.
-. Click the *StorageClass* to see what the platform actually provisions from — the provisioner, its reclaim policy and whether it allows expansion.
-. The *PersistentVolume* itself is not linked from here, so reach it by name: take `PV` from the CLI tab's output (or the `volumeName` on the *YAML* tab) and open *Storage* → *PersistentVolumes*, then that entry — the cluster-scoped object with its capacity, reclaim policy and CSI driver.
+. Open *Storage* → *PersistentVolumeClaims* → `claims-db-data`: *Status*, *Requested capacity*, *Capacity*, *Used*, *Access modes*, *Volume mode*, and a *StorageClass* link.
+. Click the *StorageClass*: its provisioner, reclaim policy and whether it allows expansion.
+. The *PersistentVolume* is not linked here: take its name from the *YAML* tab's `volumeName` (or the CLI tab's `PV`) and open it under *Storage* → *PersistentVolumes*, with its capacity, reclaim policy and CSI driver.
 --
 CLI::
 +
@@ -619,7 +644,7 @@ oc -n {user}-dev get pvc claims-db-data \
 .The bound claim — what you asked for, what you got, and the class that provisioned it
 image::storage-stateful/storage-stateful-01-pvc-bound.png["The claims-db-data PersistentVolumeClaim detail page, with a Bound badge beside the name and a donut reading 2 GiB Available. The right-hand column is the whole chain in one view: Status Bound, Requested capacity 2 GiB, Capacity 2 GiB, Used 45.69 MiB — the database's actual footprint — Access modes ReadWriteOnce, Volume mode Filesystem, and the StorageClass that provisioned it, ocs-external-storagecluster-ceph-rbd, rendered as a link. There is no link to the backing PersistentVolume anywhere on this page, which is why the step above reaches it by name instead."]
 
-Take the PV name from that output and look at the *PersistentVolume* — the actual storage the platform provisioned (it is cluster-scoped; you can read it):
+Next the *PersistentVolume*, the storage the platform provisioned (cluster-scoped; you can read it):
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -634,9 +659,9 @@ NAME                                       CAP   MODE            RECLAIM   DRIVE
 pvc-0dcf5e0b-7dd7-4230-baba-c3fb1e76b976   2Gi   ReadWriteOnce   Delete    openshift-storage.rbd.csi.ceph.com
 ----
 
-`RECLAIM: Delete` means the PV (and the real Ceph volume behind it) is deleted when its PVC is deleted — so deleting a PVC is destructive; there is no undo.
-Now the *StorageClass* — the recipe the platform followed.
-Don't hardcode its name; ask which class is the default:
+`RECLAIM: Delete`: deleting the PVC deletes this PV and the Ceph volume behind it. There is no undo.
+
+Then the *StorageClass*, the recipe; ask which class is the default rather than hardcoding its name:
 
 [source,sh,role=execute]
 ----
@@ -653,27 +678,34 @@ NAME                                   PROVISIONER                          BIND
 ocs-external-storagecluster-ceph-rbd   openshift-storage.rbd.csi.ceph.com   WaitForFirstConsumer   true     Delete
 ----
 
-There is the whole chain: your PVC bound to that PV, provisioned by that class, which uses that Ceph provisioner, binds on first consumer, allows expansion, and reclaims by deleting.
+*What just happened:* you read the whole chain: your claim, the volume bound to it, and the class that provisioned it.
 
 .The default StorageClass — the recipe the platform followed
 image::storage-stateful/storage-stateful-02-storageclass.png["The StorageClass detail page for ocs-external-storagecluster-ceph-rbd. The left column shows Name, Labels (No labels), Annotations (2 annotations), Provisioner openshift-storage.rbd.csi.ceph.com, Created at, and Owner (No owner); the right column shows Reclaim policy Delete, Default class True, and Volume binding mode WaitForFirstConsumer. There is no 'Allow volume expansion' field anywhere on this page — the CLI's EXPAND column above is not something this console view repeats."]
 
-Now *access modes*.
-The default class gives `ReadWriteOnce` — one node writes at a time, exactly right for a single database.
-But do not assume RWO is all your cluster offers.
-List the classes and their provisioners:
+Now *access modes*: the default class gives `ReadWriteOnce`, right for one database.
+
+*Predict, then run:* will the class listing tell you which class offers `ReadWriteMany`?
 
 [source,sh,role=execute]
 ----
 oc get sc -o custom-columns='NAME:.metadata.name,PROVISIONER:.provisioner,BINDING:.volumeBindingMode'
 ----
 
-On this cluster, two of the listed classes matter for this exercise: the default block class (`ocs-external-storagecluster-ceph-rbd`, RWO) and a companion file class (`ocs-external-storagecluster-cephfs`) that *does* offer `ReadWriteMany`. Your list may include more classes besides these two, and a different storage backend will name and shape its classes differently — some offer no RWX-capable class at all. Read your own `oc get sc` output above rather than assuming these exact names; the commands below use this cluster's names.
-Before you go further: a StorageClass object has no field that says "this supports ReadWriteMany".
+No column, and no StorageClass field, says so.
+Here the file class `ocs-external-storagecluster-cephfs` *does* offer `ReadWriteMany`, which you can only infer from its provisioner; your names may differ.
+
+.Why no StorageClass says "ReadWriteMany"
+[%collapsible]
+====
+Your list may include more classes besides these two, and a different storage backend will name and shape its classes differently — some offer no RWX-capable class at all. Read your own `oc get sc` output above rather than assuming these exact names; the commands below use this cluster's names.
+
+A StorageClass object has no field that says "this supports ReadWriteMany".
 Run `oc get sc <name> -o yaml` on any class here and you'll see the provisioner, reclaim policy, binding mode and expansion flag — never a list of access modes.
 Whether RWX works is a property of the *provisioner* underneath the class (a file-backed CSI driver such as CephFS, NFS, EFS, Azure Files or Filestore — or not), so the only reliable way to know is to read the provisioner name yourself or ask your platform team.
+====
 
-Take a first guess from provisioner naming, so you have something to try — this sets a shell variable, it does not touch the cluster:
+Guess a candidate from provisioner names (this only sets a shell variable):
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -682,8 +714,8 @@ RWX_CLASS=$(oc get sc -o jsonpath='{range .items[*]}{.metadata.name} {.provision
 echo "candidate RWX-capable class: ${RWX_CLASS:-<none found by name>}"
 ----
 
-[NOTE]
 .A naming guess, not an API guarantee
+[%collapsible]
 ====
 That `grep` only pattern-matches common file-storage provisioner names — it can miss a real RWX class with an unusual name, or, rarely, match one whose driver doesn't actually support it.
 Confirm with your platform team or storage vendor's docs before relying on this outside a lab.
@@ -691,8 +723,7 @@ On *this* cluster it lands on `ocs-external-storagecluster-cephfs` (the CephFS p
 If your own cluster genuinely has no RWX-capable class — common on cloud block-only storage — that is a normal, supported answer: skip the probe below, and keep the lesson — RWX is provisioner-dependent, and you find out by asking, not by reading the StorageClass object.
 ====
 
-If a candidate turned up, prove it's real — create a throwaway RWX claim on it and watch it bind, then clean up.
-If nothing turned up, this step is a deliberate no-op:
+Prove the candidate with a throwaway RWX claim; with no candidate, this is a deliberate no-op:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -718,38 +749,64 @@ else
 fi
 ----
 
-If a candidate was found, the probe binds as `ReadWriteMany`, then you clean it up.
-If not, the message above is the exercise — you just confirmed, on your own cluster, that RWX detection has to come from outside the StorageClass object.
+*What just happened:* a candidate's probe binds as `ReadWriteMany`, then is deleted; with none, the message is the lesson: RWX detection comes from outside the StorageClass object.
 
-[NOTE]
-.RWO, RWX, ROX — and what your cluster supports
+[cols="2,3,2,4",options="header"]
+|===
+|Access mode |Who mounts it |On this cluster |Pick it for
+
+|`RWO` ReadWriteOnce
+|Read-write, one node at a time
+|Yes, both block classes
+|A single writer, such as a database
+
+|`RWX` ReadWriteMany
+|Read-write, many nodes
+|Yes, the CephFS file class
+|Genuinely shared files: a scaled image registry, a shared content directory
+
+|`ROX` ReadOnlyMany
+|Read-only, many Pods
+|No
+|Rarely needed
+|===
+
+.Why access modes depend on your cluster
+[%collapsible]
 ====
 Access modes are a property of the storage backend, not something every cluster offers equally.
 A cloud with block-only storage may offer RWO and nothing else; this lab's own cluster happens to offer RWO (both block classes above) and RWX (the CephFS file class), but not ROX (ReadOnlyMany).
 That is exactly why you *read your own cluster's StorageClasses* instead of assuming: what your app may rely on is a property of the platform it runs on.
-Pick the mode the workload needs: `RWO` for a single writer like a database, `RWX` when Pods genuinely share files (a scaled image registry, a shared content directory) — the wrap-up covers when RWX is the right call and when it is a workaround for the wrong tool.
+The wrap-up covers when RWX is the right call and when it is a workaround for the wrong tool.
 ====
 
 [.checkpoint]
 ****
 ✔ *Verify:* You can name your default StorageClass, its binding mode (`WaitForFirstConsumer`), and its access mode (RWO).
-If your cluster has an RWX-capable class, you saw a claim on it reach `Bound`; if it doesn't, you saw why the StorageClass API can't tell you that up front.
+With an RWX-capable class, you saw a claim on it reach `Bound`; without one, you saw why the StorageClass API can't tell you that up front.
 ****
 
 == 6. Run a StatefulSet
 ⏱ *~5 min* · stable identity, per-Pod volumes, headless DNS
 
-A single database Deployment is fine for one writer.
-When identity matters — when clients must reach a *specific* member and each member owns its own data — you use a *StatefulSet*.
-Deploy a two-replica PostgreSQL StatefulSet with its headless Service and per-Pod volumes.
+Some Parasol datastores have members that clients reach by name, each owning its own data: a job for a *StatefulSet*, not a Deployment.
 
-[NOTE]
-.This StatefulSet is a separate exercise from the claims database
+*You'll end with:* a two-replica PostgreSQL StatefulSet, `pg-sts`, whose Pods keep their names, their own PVCs and their DNS names across restarts.
+
+[mermaid]
+....
+include::example$diagrams/storage-stateful/02-sts-vs-deployment.mmd[]
+....
+
+.`pg-sts` is separate from the claims database, and not replicated
+[%collapsible]
 ====
 This `pg-sts` StatefulSet is a *standalone* storage exercise — it is deliberately *PostgreSQL 16* (from `registry.redhat.io`), while your claims database is PostgreSQL 15 (the in-cluster image).
 That difference is intentional; do not "fix" it.
 The two Pods are *independent* PostgreSQL instances that share a definition — this teaches StatefulSet mechanics (identity, per-Pod storage, DNS), not database replication.
 ====
+
+Deploy it, with its headless Service and per-Pod volumes:
 
 // Grounded 2026-07-30 on OCP 4.22.5, signed in as an attendee (user1), viewport 1600x1000:
 //   · the masthead button is labelled "Quick create" (exact aria-label) and renders as a ⊕ icon,
@@ -769,8 +826,8 @@ The two Pods are *independent* PostgreSQL instances that share a definition — 
 Console::
 +
 --
-Use the masthead *+* (*Quick create*) → *Import YAML*, paste the manifest from the *CLI* tab, and click *Create*.
-It creates the Secret, the headless Service, and the two-replica StatefulSet in one shot; then watch `pg-sts-0` and `pg-sts-1` come up under *Workloads* → *StatefulSets* → `pg-sts`.
+Masthead *+* (*Quick create*) → *Import YAML*: paste the *CLI* tab's manifest and click *Create*, which makes the Secret, headless Service and StatefulSet at once.
+Watch `pg-sts-0` and `pg-sts-1` start under *Workloads* → *StatefulSets* → `pg-sts`.
 --
 CLI::
 +
@@ -823,8 +880,13 @@ oc -n {user}-dev rollout status statefulset/pg-sts
 --
 ====
 
-`rollout status` ends with `partitioned roll out complete: 2 new pods have been updated...` even though you set no partition; that is how `oc` words every finished StatefulSet rollout, and exercise 7 shows what a partition really does.
-Look at what the StatefulSet created — Pods with *ordinal names*, and one PVC *per Pod*:
+.Why "partitioned roll out complete"?
+[%collapsible]
+====
+`rollout status` ends with `partitioned roll out complete: 2 new pods have been updated...` even though you set no partition: that is how `oc` words every finished StatefulSet rollout, and exercise 7 shows what a partition really does.
+====
+
+See what it created: Pods with *ordinal names*, and one PVC *per Pod*:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -846,8 +908,7 @@ persistentvolumeclaim/data-pg-sts-1   Bound    pvc-b088…  1Gi        RWO      
 ----
 ====
 
-The headless Service gives each Pod its own stable DNS name.
-Resolve them from inside `pg-sts-0`:
+The headless Service gives each Pod a stable DNS name; resolve both from inside `pg-sts-0`:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -861,8 +922,7 @@ oc -n {user}-dev exec pg-sts-0 -- sh -c 'getent hosts pg-sts-0.pg-sts pg-sts-1.p
 10.232.2.106    pg-sts-1.pg-sts.{user}-dev.svc.cluster.local
 ----
 
-Now prove the identity is *stable*.
-Note the IP of `pg-sts-0`, delete it, and check the replacement:
+*Predict, then run:* delete `pg-sts-0`. Its replacement keeps the name and the PVC; does it keep the IP?
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -872,8 +932,8 @@ oc -n {user}-dev rollout status statefulset/pg-sts
 echo "after:  $(oc -n {user}-dev get pod pg-sts-0 -o jsonpath='{.status.podIP}')  PVC: $(oc -n {user}-dev get pod pg-sts-0 -o jsonpath='{.spec.volumes[?(@.name=="data")].persistentVolumeClaim.claimName}')"
 ----
 
-The IP changed; the *name* (`pg-sts-0`) and the *PVC* (`data-pg-sts-0`) did not.
-That is the StatefulSet's promise: identity and storage travel together, and the DNS name — not the IP — is how you address a member.
+*What just happened:* the IP changed; the *name* (`pg-sts-0`) and the *PVC* (`data-pg-sts-0`) did not.
+Identity and storage travel together, and the DNS name, not the IP, addresses a member.
 
 [.checkpoint]
 ****
@@ -883,8 +943,16 @@ That is the StatefulSet's promise: identity and storage travel together, and the
 == 7. Stage a partitioned update
 ⏱ *~5 min* · roll the update to one member first, verify, then finish
 
-StatefulSets let you update *one ordinal at a time* as a built-in canary, using `rollingUpdate.partition`.
-Set the partition to `1`, so only Pods with ordinal *≥ 1* (`pg-sts-1`) will take the next change; `pg-sts-0` stays put.
+Parasol wants every database change proven on one member before it reaches the other: a canary, built into the StatefulSet.
+
+*You'll end with:* `pg-sts-1` on a new revision while `pg-sts-0` waits on the old one, then both updated.
+
+[mermaid]
+....
+include::example$diagrams/storage-stateful/09-partitioned-update.mmd[]
+....
+
+Set `rollingUpdate.partition` to `1`, so only Pods with ordinal *≥ 1* (`pg-sts-1`) take the next change:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -892,7 +960,7 @@ oc -n {user}-dev patch statefulset pg-sts --type=merge \
   -p '{"spec":{"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"partition":1}}}}'
 ----
 
-Now change the Pod template — here a marker environment variable stands in for "a new image tag":
+Change the Pod template; a marker environment variable stands in for "a new image tag":
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -900,8 +968,7 @@ oc -n {user}-dev set env statefulset/pg-sts ROLLOUT=canary
 oc -n {user}-dev rollout status statefulset/pg-sts
 ----
 
-Check which Pods actually changed.
-Only `pg-sts-1` should carry the new env and a new revision:
+Check which Pods changed:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -922,9 +989,10 @@ pg-sts-0 ROLLOUT: (unset)
 pg-sts-1 ROLLOUT: canary
 ----
 
-`pg-sts-1` took the change; `pg-sts-0` is untouched on the old revision.
-If this were a bad image, only one member would be affected, and you would roll it back by reverting the change — `pg-sts-0` never moved.
-Satisfied, complete the rollout by dropping the partition to `0`:
+*What just happened:* only `pg-sts-1` took the change; `pg-sts-0`, below the partition, stayed on the old revision.
+A bad image would hit one member, and reverting the change rolls it back.
+
+Satisfied? Finish by dropping the partition to `0`:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -944,9 +1012,17 @@ Now `pg-sts-0` rolls too, and both Pods are on the new revision.
 == 8. Migrate with an init container, then resize a volume
 ⏱ *~5 min* · two everyday storage operations
 
-*Init containers* run to completion, in order, *before* an app container starts.
-The classic use is a schema migration: prepare the database, then let the app start against a schema that already exists.
-Deploy a small workload whose init container migrates a table into `pg-sts-0` (reaching it by the stable headless DNS name from exercise 6), and whose app container only starts once that is done:
+Parasol's next release needs its schema migrated before the app starts, and the claims database needs more room.
+
+*You'll end with:* a migration that finished before its app started, and `claims-db-data` grown to 3Gi with the database running, where your StorageClass allows it.
+
+[mermaid]
+....
+include::example$diagrams/storage-stateful/10-init-container.mmd[]
+....
+
+*Init containers* run to completion, in order, *before* the app container starts.
+Deploy a workload whose init container migrates a table into `pg-sts-0`, by its stable DNS name:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -987,7 +1063,7 @@ EOF
 oc -n {user}-dev rollout status deploy/schema-init-demo
 ----
 
-Read the two containers' logs in order — the init container ran the migration, then the app saw the finished schema:
+Read the two containers' logs in order:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -1015,20 +1091,17 @@ app starting — schema is already migrated:
 ----
 ====
 
-The app never had to guard against a missing table — the init container guaranteed the schema first.
+*What just happened:* the init container migrated and exited; only then did the app start, against a schema that already existed.
 
-The demo has done its job, but its app container is still running (`sleep 3600`), and every running Pod counts against your project's CPU quota.
-Remove it, so the challenge at the end has room for a third StatefulSet Pod:
+Remove the demo; its `sleep 3600` app container counts against your CPU quota, and the challenge needs room for a third StatefulSet Pod:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
 oc -n {user}-dev delete deploy/schema-init-demo
 ----
 
-Now *resize a volume*.
-Your claims database is on a 2Gi PVC.
-Not every StorageClass allows expansion — it's a per-class opt-in (`allowVolumeExpansion`) — so the CLI path below checks your own PVC's class before growing it, rather than assuming.
-Note the filesystem size first, then check and (if allowed) grow it to 3Gi *online*, with no restart:
+Now grow the claims database's 2Gi PVC to 3Gi, *online*.
+Expansion is a per-StorageClass opt-in (`allowVolumeExpansion`), so the CLI path notes the filesystem size and checks your PVC's class first:
 
 // Grounded 2026-07-30 on OCP 4.22.5, signed in as an attendee (user1), viewport 1600x1000:
 // `oc get storageclass -o jsonpath='{.items[*].allowVolumeExpansion}'` returns `true` for every
@@ -1043,9 +1116,8 @@ Note the filesystem size first, then check and (if allowed) grow it to 3Gi *onli
 Console::
 +
 --
-. Go to *Storage* → *PersistentVolumeClaims* → `claims-db-data` → *Actions* → *Expand PVC*.
-. Enter `3` in *Total size* (GiB) and click *Expand*.
-The expansion runs online — the database Pod keeps serving while the volume and its filesystem grow (the next block watches it land).
+. *Storage* → *PersistentVolumeClaims* → `claims-db-data` → *Actions* → *Expand PVC*.
+. Enter `3` in *Total size* (GiB) and click *Expand*; the database keeps serving while it grows.
 --
 CLI::
 +
@@ -1076,8 +1148,12 @@ persistentvolumeclaim/claims-db-data patched
 --
 ====
 
-If your class allows it, watch the resize progress through its conditions, then land at 3Gi — bounded to 60 seconds so a stuck resize doesn't hang the lab.
-This block looks up the database Pod and the class again, so it works after either tab:
+[mermaid]
+....
+include::example$diagrams/storage-stateful/11-online-resize.mmd[]
+....
+
+Watch it land at 3Gi; the block works after either tab and gives up after 60 seconds:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -1111,14 +1187,17 @@ capacity=3Gi  conditions=[none]
 /dev/rbd12      2.9G   46M  2.9G   2% /var/lib/pgsql/data
 ----
 
-The volume grew from ~2Gi to ~2.9Gi while the database kept running — the Pod never restarted.
-(Expansion only ever grows a volume; you cannot shrink a PVC.)
-If your class doesn't allow expansion, the CLI tab prints `StorageClass ... allowVolumeExpansion=false` and the skip message, and this block prints its own skip message — the PVC stays at `2Gi`, nothing failed, and the lesson stands: check `allowVolumeExpansion` before you promise online resize to anyone.
+*What just happened:* the filesystem grew from ~2Gi to ~2.9Gi and the Pod never restarted. Expansion only grows; you cannot shrink a PVC.
+
+.If your class does not allow expansion
+[%collapsible]
+====
+The CLI tab prints `StorageClass ... allowVolumeExpansion=false` and the skip message, and the watch block prints its own skip message — the PVC stays at `2Gi`, nothing failed, and the lesson stands: check `allowVolumeExpansion` before you promise online resize to anyone.
+====
 
 [.checkpoint]
 ****
-✔ *Verify:* The init-container Pod's app logs show the migrated `schema_history` row.
-If your StorageClass allows expansion, `oc get pvc claims-db-data` now reports `3Gi` with the Pod's filesystem grown and zero restarts; if it doesn't, you saw the resize refused up front and know why.
+✔ *Verify:* The init-container Pod's app logs show the migrated `schema_history` row, and `oc get pvc claims-db-data` reports `3Gi` with the filesystem grown and zero restarts (on a class without expansion: the resize refused up front, and you know why).
 ****
 
 == Challenge (optional)
@@ -1127,19 +1206,23 @@ If your StorageClass allows expansion, `oc get pvc claims-db-data` now reports `
 You have the mechanics.
 Try these on your own:
 
-* *Scale the StatefulSet to 3.*
-Run `oc scale statefulset/pg-sts --replicas=3`, watch `pg-sts-2` and `data-pg-sts-2` appear, then scale back to 2 — and notice that `data-pg-sts-2` *survives* the scale-down (StatefulSet PVCs are never auto-deleted).
-* *Feel the reclaim policy.*
-Delete the `pg-sts` StatefulSet with `oc delete statefulset pg-sts`, then run `oc get pvc -l app=pg-sts` — the PVCs are still there.
+* *Scale the StatefulSet to 3* with `oc scale statefulset/pg-sts --replicas=3`, then back to 2. What happens to `data-pg-sts-2`?
+* *Feel the reclaim policy:* `oc delete statefulset pg-sts`, then `oc get pvc -l app=pg-sts`; then run the exercise 6 block again.
+* *Break a mount path:* point the claims database's `data` volume at `/var/lib/postgresql/data` (the community PostgreSQL image's path) with exercise 3's `oc set volume ... --overwrite --name data` and a different `--mount-path`; then put it back.
+
+.What you should see
+[%collapsible]
+====
+* *Scale to 3:* `pg-sts-2` and `data-pg-sts-2` appear, and `data-pg-sts-2` *survives* the scale-down to 2 (StatefulSet PVCs are never auto-deleted).
+* *Reclaim policy:* after deleting the StatefulSet, the PVCs are still there.
 That leaked storage is exactly why `ws reset {module-id}` purges PVCs explicitly.
-Now run the exercise 6 block again: `pg-sts-0` and `pg-sts-1` come back on the very same PVCs, and the `schema_history` row from exercise 8 is still in `pg-sts-0`.
-* *Break a mount path.*
-Point the claims database's `data` volume at `/var/lib/postgresql/data`, the path the community PostgreSQL image uses, instead of `/var/lib/pgsql/data` — the same `oc set volume ... --overwrite --name data` command as exercise 3, with a different `--mount-path`.
-The PVC stays `Bound`, yet the claims API fails: the database initialized an *empty* data directory on the container's own filesystem, and your volume sits unused.
+Run the exercise 6 block again and `pg-sts-0` and `pg-sts-1` come back on the very same PVCs, with the `schema_history` row from exercise 8 still in `pg-sts-0`.
+* *Mount path:* the PVC stays `Bound`, yet the claims API fails: the database initialized an *empty* data directory on the container's own filesystem, and your volume sits unused.
 Put the path back, and your claims return without an app restart; they never left the volume.
 The troubleshooting page shows how to spot this.
+====
 
 When you are done, run `ws verify {module-id}` in the Terminal; every check passes once the StatefulSet is back at two replicas and the database is on its proper path.
-Or run `ws prep {module-id} --yes` to return your world to a fresh (ephemeral) claims app and start over.
+Or run `ws prep {module-id} --yes` to return to a fresh (ephemeral) claims app and start over.
 
 endif::demo[]
