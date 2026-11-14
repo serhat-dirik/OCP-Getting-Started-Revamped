@@ -3,8 +3,10 @@
 include::partial$version-attributes.adoc[]
 
 // Format: Symptom / Cause / Fix. Entries ported from config-multienv and observability-metrics-traces
-// troubleshooting (3c3215e6) keep their measured provenance in the footer; the OOMKilled and liveness
-// entries are new and UNVERIFIED until Part B.
+// troubleshooting (3c3215e6) keep their measured provenance in the footer. The liveness, OOMKilled and
+// request-over-limit entries were verified 2026-11-15 on gn67x (OCP 4.22.22) as user21; the
+// "500 while OOMKilled" entry was dropped then — 128Mi kills the JVM before its first log line, so
+// the schema is never touched (36 of 36 requests answered 200 during the crash loop).
 
 Every entry below is a failure mode the lab produces on purpose, or one that came up while building the exercises it is made from.
 
@@ -55,7 +57,7 @@ oc rollout status deploy/parasol-claims
 
 == A new pod shows `OOMKilled` or `CrashLoopBackOff` after I changed resources
 
-Symptom:: After `oc set resources`, the new pod never becomes ready; its `STATUS` alternates between `OOMKilled` and `CrashLoopBackOff`, and `oc logs --previous` ends mid-startup with no error.
+Symptom:: After `oc set resources`, the new pod never becomes ready; its `STATUS` cycles through `Running`, `OOMKilled` and `CrashLoopBackOff`, and `oc logs --previous` is empty.
 Cause:: The memory limit is below what the Java runtime needs to start, so the kernel kills the container (exit code `137`).
 That is exercise 3's deliberate break; outside it, a limit typed as `128M` instead of `512Mi` does the same.
 Confirm it:
@@ -73,17 +75,9 @@ oc set resources deploy/parasol-claims --requests=memory=256Mi --limits=memory=5
 oc rollout status deploy/parasol-claims
 ----
 
-// UNVERIFIED until Part B: whether a start attempt killed at 128Mi gets far enough to drop the schema.
-== The claims API returns `500` while the `OOMKilled` pod is crash-looping
-
-Symptom:: During exercise 3's break, the old pod is still `1/1`, but `curl …/api/claims` sometimes returns `500`.
-Cause:: The claims service recreates and re-seeds its database schema every time it starts, and every replica shares the one `claims-db`.
-A start attempt that is killed partway through that step can leave the tables missing until the next start completes it.
-Fix:: Restore the memory limit (previous entry). The rollout's new pod finishes the schema and seed on start, and the `500` responses stop.
-
 == `must be less than or equal to memory limit`
 
-Symptom:: `oc set resources` fails with `Invalid value: "256Mi": must be less than or equal to memory limit`.
+Symptom:: `oc set resources` fails with `spec.template.spec.containers[0].resources.requests: Invalid value: "256Mi": must be less than or equal to memory limit of 128Mi`.
 Cause:: A request may never exceed its limit. Lowering only `--limits=memory=128Mi` leaves the `256Mi` request above it.
 Fix:: Set both together, as the lab does: `--requests=memory=128Mi --limits=memory=128Mi`.
 
@@ -109,7 +103,7 @@ An error from `oc adm top` (or a `ScalingActive False` condition naming `FailedG
 
 Symptom:: `claims-burst` is `Running`, but `oc get hpa` still shows `REPLICAS 2` after a minute.
 Cause:: Almost always, not enough time yet.
-In five measured runs `REPLICAS` reached 4 between *42 and 115 seconds* after the burst started: CPU has to be sampled before the HPA sees it over target (*24–40 s*), and the climb often steps 2 → 3 → 4.
+In six measured runs `REPLICAS` reached 4 between *39 and 115 seconds* after the burst started: CPU has to be sampled before the HPA sees it over target (*24–40 s*), and the climb often steps 2 → 3 → 4.
 Fix:: Watch rather than re-run — `oc get hpa parasol-claims -w` — and give it two minutes.
 If `TARGETS` is still at its idle reading after that, check that the burst is actually sending traffic:
 +
@@ -143,4 +137,4 @@ Fix:: Nothing — this is correct. It steps back toward the floor of 2 after abo
 
 '''
 
-_Last verified: the readiness, rollout-timing and burst entries on the build cluster in the modules these exercises came from — readiness on OCP 4.21.22 (2026-07-09, re-proven on OCP 4.22.22 on 2026-11-12), HPA timing on OCP 4.22.8 (five runs, 2026-08-14). The liveness, `OOMKilled`, `500`-during-OOM and request-over-limit entries are new on 2026-11-14 and not yet confirmed on a cluster._
+_Last verified: the readiness, rollout-timing and burst entries on the build cluster in the modules these exercises came from — readiness on OCP 4.21.22 (2026-07-09, re-proven on OCP 4.22.22 on 2026-11-12), HPA timing on OCP 4.22.8 (five runs, 2026-08-14). The liveness, `OOMKilled` and request-over-limit entries, and the HPA settle and scale-out timings, re-confirmed in this module on OCP 4.22.22 (2026-11-15)._

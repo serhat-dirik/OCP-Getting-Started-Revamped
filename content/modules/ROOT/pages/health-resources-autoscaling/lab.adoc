@@ -5,7 +5,9 @@ include::partial$version-attributes.adoc[]
 // Lab page for Health, Resources & Autoscaling. Workshop exercises are guarded ifndef::demo[]; the
 // DEMO rendering shows only the SA demo guide. Every command runs in the SHOWROOM terminal as {user}.
 //
-// PROVENANCE (2026-11-14, built offline — NOT yet performed as this module on a cluster):
+// PERFORMED end to end 2026-11-15 on OCP 4.22.22 as user21, every block clicked literally in the real
+// cockpit terminal; the // Verified lines below carry what was measured.
+// PROVENANCE (2026-11-14, assembled offline before that run):
 //   * exercise 1 is config-multienv lab exercise 4 (readiness break/fix), at 3c3215e6, re-cut to
 //     start from an app with NO probes. Its commands and outputs were performed there (OCP 4.21.22,
 //     2026-07-09; re-proven 2026-11-12 on OCP 4.22.22 as user7 with the wait lines kept below).
@@ -17,8 +19,6 @@ include::partial$version-attributes.adoc[]
 //     same burst and the same load generator — with OpenTelemetry export ON, which this module's
 //     entry state leaves off.
 //   * exercise 2 (liveness break + startup) and the OOMKilled half of exercise 3 are NEW.
-// Every // UNVERIFIED line below is a value or output shape that must be measured in Part B
-// (live proof on user21) before this module ships; none of them has been run here yet.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -46,14 +46,14 @@ A pod that cannot serve is held out of rotation until it recovers, a container t
 ====
 This demo starts from the finished lab state. Stage it before the session:
 
-// UNVERIFIED: re-add role=execute after Part B validates adm solve (house rule: only a live-validated
-// `adm solve` is click-to-run on a Demo page).
-[source,sh]
+// Verified 2026-11-15 on gn67x (OCP 4.22.22): `adm solve health-resources-autoscaling --user user21`
+// from the entry state returned "demo-ready" in 238 s, then `adm verify --solve` passed 14/14.
+[source,sh,role=execute]
 ----
 adm solve health-resources-autoscaling
 ----
 
-It leaves the claims service in `{user}-dev` with all three probes, explicit requests and limits, and a HorizontalPodAutoscaler holding it at 2 replicas. Confirm both pods serve before you start:
+It leaves the claims service in `{user}-dev` with all three probes, explicit requests and limits, and a HorizontalPodAutoscaler holding it at 2 replicas, and takes about 4 minutes to return. Confirm both pods serve before you start:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -61,7 +61,7 @@ oc -n {user}-dev get deploy parasol-claims -o jsonpath='ready={.status.readyRepl
 oc -n {user}-dev get hpa parasol-claims
 ----
 
-Expect `ready=2` and an HPA row with `MINPODS 2` and `MAXPODS 4`; `TARGETS` reads `<unknown>` for its first minute.
+Expect `ready=2` and an HPA row with `MINPODS 2` and `MAXPODS 4`; `TARGETS` already reads a percentage, because `adm solve` returns only once the HPA has its first CPU sample.
 If `ready` is empty or `1`, wait a minute and check again.
 
 Have a terminal signed in as `{user}` and the web console on *Topology* in `{user}-dev`. Pod names were captured from a live run and will differ here.
@@ -128,8 +128,8 @@ The container is up and the process is fine; what fails is the question "can you
 No ready pod means no endpoints, so the Route returns 503 rather than sending a request into a pod that would break it.
 The column that tells the story is READY, not STATUS.
 
-// UNVERIFIED until Part B: scaling to 0 and back to 2 with the solve-state HPA present (the HPA
-// pauses at 0 replicas and resumes at 2; both new pods carry the broken probe).
+// Verified 2026-11-15 on gn67x (OCP 4.22.22) from adm solve: with the HPA present, scale 0 -> 2 gave
+// two 0/1 Running pods and Route: 503 in 44 s; the HPA kept REPLICAS 2 (TARGETS <unknown>).
 [source,sh,role=execute,subs="attributes+"]
 ----
 oc -n {user}-dev set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/typo
@@ -189,9 +189,8 @@ A memory limit is enforced by the kernel, not by the application, so the evidenc
 It is in the pod's last termination state, which reads `OOMKilled`.
 Readiness holds the rollout, so the old pods keep serving while you find out.
 
-// UNVERIFIED until Part B: the 128Mi value on the cluster image. Measured only as a local proxy
-// (2026-11-14, same app build under a Temurin 21 JVM with a podman memory limit): 128Mi and 160Mi
-// were OOMKilled (exit 137) within ~4 s of start; 192Mi started at ~173 MB.
+// Verified 2026-11-15 on gn67x (OCP 4.22.22) from adm solve: the newest pod read OOMKilled in 12 s
+// beside two 1/1 pods; the restore below returned in under a second (back to the previous template).
 [source,sh,role=execute,subs="attributes+"]
 ----
 oc -n {user}-dev set resources deploy/parasol-claims --requests=memory=128Mi --limits=memory=128Mi
@@ -211,7 +210,7 @@ oc -n {user}-dev rollout status deploy/parasol-claims
 
 *What just happened*
 
-The new pod crash-looped with `OOMKilled` while the two old pods kept serving; restoring the limit rolled out healthy pods.
+The new pod crash-looped with `OOMKilled` while the two old pods kept serving; restoring the limit put the Deployment back on its previous template, so the platform simply removed the failing pod.
 
 === 5 · Load arrives, and the HPA adds pods — 3 min
 
@@ -238,7 +237,7 @@ Stop the watch with Ctrl-C, then remove the burst:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
-oc -n {user}-dev delete pod claims-burst
+oc -n {user}-dev delete pod claims-burst --now
 ----
 
 == Frequently asked questions
@@ -343,8 +342,8 @@ Now break readiness: point it at a path that returns `404`.
 
 *Predict, then run:* the change starts a rolling update, with a new pod beside the old one. Will the Route still answer `200`?
 
-// UNVERIFIED until Part B: this in-place break as the attendee's own step (it was the demo FAQ's
-// explanation in config-multienv, not an exercise). Pod names below are illustrative.
+// Verified 2026-11-15 on gn67x (OCP 4.22.22): the block printed exactly this shape — new pod 0/1
+// Running beside the old 1/1, rollout status timed out, Route 200 — in 18 s. Pod names illustrative.
 [source,sh,role=execute]
 ----
 oc set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/typo
@@ -485,8 +484,8 @@ oc set probe deploy/parasol-claims --liveness \
 
 *Predict, then run:* readiness still passes, so the rollout completes. What happens to the new pod half a minute later?
 
-// UNVERIFIED until Part B: time to the first liveness restart (expected ~30-40 s from container
-// start: three failures 10 s apart) and the exact event wording below (standard kubelet messages).
+// Verified 2026-11-15 on gn67x (OCP 4.22.22): first liveness restart 31 s after the new pod was
+// created (block returned in 33 s); the two event lines below are the kubelet's wording verbatim.
 [source,sh,role=execute]
 ----
 # wait until the newest claims pod has been restarted at least once (about a minute)
@@ -591,8 +590,8 @@ include::example$diagrams/health-resources-autoscaling/06-requests-limits.mmd[]
 
 See what the app runs with today — the Deployment declares nothing, yet the pod has numbers:
 
-// UNVERIFIED until Part B: the exact rendering of these two lines. The LimitRange values were read
-// live on 2026-11-14 (user21-dev: default 1500m/1Gi, defaultRequest 100m/256Mi).
+// Verified 2026-11-15 on gn67x (OCP 4.22.22): all three lines rendered byte-for-byte as below
+// (LimitRange default 1500m/1Gi, defaultRequest 100m/256Mi).
 [source,sh,role=execute]
 ----
 oc get deploy parasol-claims -o jsonpath='deployment={.spec.template.spec.containers[0].resources}{"\n"}'
@@ -672,10 +671,10 @@ A Java application needs memory beyond its heap — class metadata, compiled cod
 
 *Predict, then run:* lower the memory limit to `128Mi`. The rollout starts a new pod beside the old one. What will the new pod's status say, and will the old pod keep serving?
 
-// UNVERIFIED until Part B: 128Mi on the cluster image. Local proxy only (2026-11-14: same app build,
-// Temurin 21, podman --memory): 64/96/128/160 MiB all OOMKilled with exit 137 ~4 s after start,
-// 192 MiB started at ~173 MB working set, 256 MiB at ~173 MB, 512 MiB at ~188 MB. The cluster runs
-// the Red Hat OpenJDK 21 runtime image; re-measure there and adjust if 128Mi survives.
+// Verified 2026-11-15 on gn67x (OCP 4.22.22, image parasol-claims:1.0): 128Mi was OOMKilled, exit
+// 137, on 5 of 5 start attempts, each ~11 s after the container started and before it wrote its
+// first log line; the healthy pod's working set at 512Mi read 213Mi. The block returned in 17 s with
+// the sample below; the restore then completed in 3 s and the pod list was back to one 1/1 pod.
 [source,sh,role=execute]
 ----
 oc set resources deploy/parasol-claims --requests=memory=128Mi --limits=memory=128Mi
@@ -687,12 +686,12 @@ oc get pods -l app=parasol-claims
 oc get pod "$BAD" -o jsonpath='reason={.status.containerStatuses[0].lastState.terminated.reason} exitCode={.status.containerStatuses[0].lastState.terminated.exitCode}{"\n"}'
 ----
 
-.Expected output (sample — `STATUS` alternates between `OOMKilled` and `CrashLoopBackOff` as the container restarts)
+.Expected output (sample — the new pod's `STATUS` cycles through `Running`, `OOMKilled` and `CrashLoopBackOff` as the container restarts; `READY` stays `0/1`)
 [source,texinfo]
 ----
-NAME                              READY   STATUS             RESTARTS     AGE
-parasol-claims-84f6d9c7b5-m2t7t   1/1     Running            0            4m
-parasol-claims-6f7b9c8d4f-zr5wq   0/1     CrashLoopBackOff   1 (9s ago)   21s
+NAME                              READY   STATUS    RESTARTS     AGE
+parasol-claims-84f6d9c7b5-m2t7t   1/1     Running   0            56s
+parasol-claims-6f7b9c8d4f-zr5wq   0/1     Running   1 (4s ago)   16s
 reason=OOMKilled exitCode=137
 ----
 
@@ -707,7 +706,7 @@ The new pod never became ready, so readiness held the rollout and the old pod ke
 .Why the logs do not help here
 [%collapsible]
 ====
-`oc logs --previous` on that pod shows a startup that simply *stops* — no exception, no stack trace — because a `SIGKILL` gives the process no chance to write one.
+`oc logs --previous` on that pod prints *nothing at all*: at `128Mi` the Java runtime is killed while it is still starting, before the application writes its first line, and a `SIGKILL` gives no process the chance to log an exception on its way out.
 That is the signature of an out-of-memory kill: when a pod restarts with nothing in its logs, read `lastState.terminated.reason` first.
 In the console, the pod's details page shows the same reason under its container's last state.
 ====
@@ -783,17 +782,16 @@ oc autoscale deploy/parasol-claims --cpu=60% --min=2 --max=4
 oc get hpa parasol-claims
 ----
 
-// Settled reading measured in observability-metrics-traces (2026-08-14, user5): idle utilization read
-// 4-13% across five floors against the same 200m request. UNVERIFIED for this module's entry state
-// (no OpenTelemetry export here, so the idle reading may be a little lower).
+// Verified 2026-11-15 on gn67x (OCP 4.22.22): first read `<unknown>/60%` REPLICAS 0, then 1, and at
+// 36 s `cpu: 10%/60%` with 2 ready; idle readings 5-10% before the burst.
 .Expected output, once settled (TARGETS shows current/target utilization)
 [%collapsible]
 =====
 [source,texinfo]
 ----
 horizontalpodautoscaler.autoscaling/parasol-claims autoscaled
-NAME             REFERENCE                   TARGETS       MINPODS   MAXPODS   REPLICAS
-parasol-claims   Deployment/parasol-claims   cpu: 9%/60%   2         4         2
+NAME             REFERENCE                   TARGETS        MINPODS   MAXPODS   REPLICAS
+parasol-claims   Deployment/parasol-claims   cpu: 10%/60%   2         4         2
 ----
 =====
 
@@ -852,19 +850,21 @@ CLI::
 oc get hpa parasol-claims -w
 ----
 
-// Transcript from observability-metrics-traces ex6, run 5 (2026-08-14, user5, OCP 4.22.8), same burst
-// and same 200m request. UNVERIFIED for this module — re-capture in Part B.
+// Verified 2026-11-15 on gn67x (OCP 4.22.22): transcript captured from this module's run, watch
+// started the moment the burst was created (CPU over 60% at +24 s, REPLICAS 4 at +39 s, all four
+// pods ready at +43 s, peak 217%).
 .Expected output (sample; Ctrl-C to stop — utilization spikes well past 60%, replicas climb to the ceiling)
 [%collapsible]
 =====
 [source,texinfo]
 ----
 NAME             REFERENCE                   TARGETS       MINPODS   MAXPODS   REPLICAS   AGE
-parasol-claims   Deployment/parasol-claims   cpu: 9%/60%   2         4         2          7m18s
-parasol-claims   Deployment/parasol-claims   cpu: 100%/60%   2         4         2          7m49s
-parasol-claims   Deployment/parasol-claims   cpu: 167%/60%   2         4         4          8m4s
-parasol-claims   Deployment/parasol-claims   cpu: 174%/60%   2         4         4          8m19s
-parasol-claims   Deployment/parasol-claims   cpu: 132%/60%   2         4         4          8m34s
+parasol-claims   Deployment/parasol-claims   cpu: 9%/60%   2         4         2          51s
+parasol-claims   Deployment/parasol-claims   cpu: 5%/60%   2         4         2          60s
+parasol-claims   Deployment/parasol-claims   cpu: 102%/60%   2         4         2          75s
+parasol-claims   Deployment/parasol-claims   cpu: 217%/60%   2         4         4          90s
+parasol-claims   Deployment/parasol-claims   cpu: 204%/60%   2         4         4          105s
+parasol-claims   Deployment/parasol-claims   cpu: 124%/60%   2         4         4          2m
 ----
 =====
 --
@@ -873,14 +873,14 @@ parasol-claims   Deployment/parasol-claims   cpu: 132%/60%   2         4        
 *What just happened:* CPU shot well past 60% of the request and the HPA added pods up to its *ceiling of 4*.
 Its *decision* is instant, but it waits on the CPU measurement and then on the new pods, so give it a couple of minutes before you decide something is wrong.
 
-// Ported numbers: observability-metrics-traces ex6, five timed runs as user5 on OCP 4.22.8,
-// 2026-08-14 (42/47/70/83/115 s to 4 replicas; 24-40 s before CPU first read over 60%; peaks
-// 132-250%). UNVERIFIED for this module's entry state — re-measure in Part B and update both this
-// block and instructor.adoc's timing row.
+// Six timed runs: five in observability-metrics-traces ex6 (user5, OCP 4.22.8, 2026-08-14:
+// 42/47/70/83/115 s to 4 replicas, 24-40 s to first read over 60%, peaks 132-250%) plus this
+// module's own. Verified 2026-11-15 on gn67x (OCP 4.22.22, user21): 39 s to 4 replicas in one step
+// 2 -> 4, 24 s to first read over 60%, peak 217%. Keep in step with instructor.adoc's timing row.
 .Where the minute or two goes
 [%collapsible]
 ====
-Measured with the same burst against the same `200m` request, reaching 4 replicas took between *42* and *115 seconds* from pressing enter, and CPU peaked between *132%* and *250%* of the request.
+Measured with the same burst against the same `200m` request, reaching 4 replicas took between *39* and *115 seconds* from pressing enter, and CPU peaked between *132%* and *250%* of the request.
 The burst image does not pull — every node already has it — so the time is the *metrics* path: CPU has to be sampled and handed to the autoscaler, which took *24–40 seconds* before it first read above 60%.
 The climb is also often a *staircase*, 2 → 3 → 4, and each step waits on a fresh sample.
 ====
@@ -889,8 +889,10 @@ Stop the load and clean up the burst pod:
 
 [source,sh,role=execute]
 ----
-oc delete pod claims-burst
+oc delete pod claims-burst --now
 ----
+
+`--now` skips the 30-second grace period the burst's shell would otherwise sit out before it is stopped.
 
 [NOTE]
 .Scale-down is deliberately slow
@@ -919,16 +921,21 @@ Take the claims *database* away — scale `claims-db` to `0` — and keep sendin
 * Do the claims pods restart?
 * What does the Route return, and when does it change?
 
-Then bring it back. Hint: the database alone is not enough — the claims pods hold on to their broken database connections until they restart.
+Then bring it back. Hint: the database alone is not enough — it is ephemeral, so it returns *empty*, and the claims service creates its tables only when it starts.
 
 .One answer
 [%collapsible]
 ====
-// UNVERIFIED until Part B as this module's step. Behavior ported from observability-metrics-traces
-// ex4 (2026-07-11 / 2026-07-19): requests 500 while the pool drains, then 503 about a minute in once
-// readiness pulls the pod; the app kept erroring until `oc rollout restart` after the DB returned.
+// Verified 2026-11-15 on gn67x (OCP 4.22.22): Route 200 for ~30 s, 500 from ~30 s, 503 from ~65 s
+// once readiness pulled both pods; 0 restarts. With claims-db back (three runs) the pods were 1/1
+// within ~10 s but every request 500'd with `relation "claim" does not exist` (emptyDir DB) until
+// the rollout restart, after which the Route answered 200.
 Readiness fails — the claims service's `/q/health/ready` includes its database connection — so the pods leave the Service and the Route turns from `500` to `503` within about a minute.
 Liveness keeps passing, so *nothing restarts*: the platform waits for the dependency instead of killing healthy processes.
+
+When the database returns, readiness passes again within seconds and the pods rejoin the Service — yet every request still fails with `500`.
+Readiness asked the right question ("can I reach my database?") and got an honest yes; the database is simply *empty*, because it keeps no storage and the claims service creates its tables and seed data only when it starts.
+A restart re-creates them:
 
 [source,sh,role=execute]
 ----
