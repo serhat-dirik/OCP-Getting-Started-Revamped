@@ -1,0 +1,177 @@
+= Health, Resources & Autoscaling: Instructor Guide
+:module-id: health-resources-autoscaling
+include::partial$version-attributes.adoc[]
+
+// Internal delivery runbook. Built offline on 2026-11-14 from two measured modules (see lab.adoc's
+// header): exercise 1 from config-multienv ex4, exercise 4 from observability-health-scale ex6.
+// Exercise 2 and the OOMKilled half of exercise 3 are new. Every timing marked "Part B" below is
+// UNVERIFIED until this module is performed end to end on a cluster (user21, tonight's Part B).
+
+This module is three "read the evidence, then fix it" breaks and one live scale-out.
+The two ideas that must land are *"readiness holds traffic away from a pod that cannot serve"* and *"the request is what the scheduler and the HPA read; the limit is what the kernel enforces."*
+The breaks are the spine: a readiness probe on a `404` path (a held rollout, then a `503`), a liveness probe with a typo (a healthy container restarted), and a memory limit too small to start in (`OOMKilled`, exit `137`).
+The closer, the HorizontalPodAutoscaler (HPA) growing the service from 2 to 4 pods, is *reliable but not quick*: in the measured runs it took 42 seconds to just under two minutes.
+
+include::partial$prep-before-you-teach.adoc[]
+
+== Timing
+
+Total hands-on: *~28 min*.
+Add ~10 min of in-room concept discussion up front.
+
+`ws prep health-resources-autoscaling` waits up to *5 minutes* for the entry state to converge (the engine default; this module declares no longer budget in `ws-meta.yaml`).
+Attendees start it from the top of the *concept* page, so it converges while you teach the concept.
+
+[cols="1,4,1,3",options="header"]
+|===
+| # | Exercise group | Attendee time | Measured core
+
+| 1 | Readiness holds traffic away from a pod that cannot serve | ~7 min | stable `503` after scale 0→1 (the lab's `sleep 40`); recovery *~15–20 s* (measured in Config, 2026-07-09 / 2026-11-12). The in-place break's held rollout: Part B
+| 2 | Liveness restarts a wedged container; add startup | ~6 min | first liveness restart expected *~30–40 s* after the new container starts (3 failures × 10 s); Part B
+| 3 | Requests, limits, QoS — and `OOMKilled` | ~7 min | rollouts *~15–40 s* each; `128Mi` killed the JVM *~4 s* after start in a local proxy run (2026-11-14); on-cluster value and timing: Part B
+| 4 | Autoscale under load with an HPA | ~8 min | HPA settles from `<unknown>` in *~1 min*; burst to 4 replicas in *42–115 s*, CPU peaks *132–250%* (measured in Observability, 2026-08-14, same image, burst and request); scale-down held *5 min*
+|===
+
+[NOTE]
+.How this timing was measured
+====
+The *Measured core* column carries measurements from the modules these exercises came from, on the same image, the same load generator and the same `200m` CPU request:
+
+* *Readiness break and recovery* — Config, Secrets & Multi-Environment, 2026-07-09 on the build cluster, re-proven 2026-11-12 from a cold reset with the rollout wait lines this lab keeps.
+* *HPA scale-out* — Observability, five timed runs on 2026-08-14: 42 / 47 / 70 / 83 / 115 s to 4 replicas, three of five stepping 2 → 3 → 4.
+That entry state exported OpenTelemetry traces and this one does not, so idle CPU here may read slightly lower.
+* *OOMKilled* — a local run of the same application build under a Java 21 runtime with a container memory limit: 64–160 MiB were killed with exit `137` about 4 s after start; 192 MiB started at a ~173 MB working set.
+
+Everything marked *Part B* is to be measured on a cluster before the module ships, and this table updated.
+The *Attendee time* column adds reading, checkpoint and think time on top of the core.
+====
+
+== Pre-flight checklist
+
+Run these *before the session* (as an instructor/admin).
+
+. *The entry state materializes and verifies* for a sample user.
++
+--
+[source,sh,role=execute]
+----
+adm start health-resources-autoscaling --user user1
+ws verify health-resources-autoscaling --user user1 --entry-only
+----
+
+// UNVERIFIED until Part B: the check counts (9 entry, 12 end) are by construction from the script.
+Expect `✅ all 9 checks passed`: namespace, marker, quota, `claims-db`, `parasol-claims` and `claims-load` ready, Route `200`, *no probes* on `parasol-claims`, *no HPA*.
+A completed lab verifies 12/12: the 7 shared checks plus all three probes, a CPU request, a memory limit, a CPU HPA with a floor of 2, and at least 2 ready replicas.
+--
+
+. *The prebuilt image is present*:
++
+[source,sh,role=execute]
+----
+oc get istag parasol-claims:1.0 -n ogsr-parasol-images \
+  -o jsonpath='{.image.dockerImageReference}{"\n"}'
+----
++
+If it is missing, the claims app never starts — rebuild it (see the app README) before the session.
+
+. *The metrics API is available* — the HPA reads CPU from it, and without it every HPA stays `<unknown>`:
++
+[source,sh,role=execute]
+----
+oc get apiservice v1beta1.metrics.k8s.io -o jsonpath='{.status.conditions[?(@.type=="Available")].status}{"\n"}'
+----
++
+Expect `True`.
+
+. *Attendees may create HPAs* in their own namespace:
++
+[source,sh,role=execute]
+----
+oc auth can-i create horizontalpodautoscalers -n user1-dev --as=user1 --as-group=workshop-attendees --as-group=system:authenticated
+----
++
+Expect `yes` (read 2026-11-14 for a sample attendee).
+
+. *The demo end state stands up* (for the demo flavor): `adm solve health-resources-autoscaling --user user1`, then:
++
+[source,sh,role=execute]
+----
+oc -n user1-dev get deploy parasol-claims -o jsonpath='ready={.status.readyReplicas}{"\n"}'
+oc -n user1-dev get hpa parasol-claims
+----
++
+Expect `ready=2` and an HPA with `MINPODS 2`, `MAXPODS 4`.
+
+. *`adm smoke` passes for a sample attendee* — the only pre-flight check that runs as the attendee, in the real cockpit terminal:
++
+[source,sh,role=execute]
+----
+adm smoke health-resources-autoscaling user1
+----
++
+It runs the module's `smokeCommands` (the `claims-load` Deployment is readable; the attendee may create HPAs) under the attendee's real identity.
+
+[NOTE]
+.What "done" looks like
+====
+Each exercise ends on its own ✔ *Verify:* line — the per-exercise move-on signal.
+Exercise 4 ends with the attendee running `ws verify health-resources-autoscaling` themselves; every check ✅ means the module is complete.
+====
+
+== Demo-mode notes
+
+Beyond the steps on the Demo page:
+
+* *Solve first, always.* `adm solve health-resources-autoscaling` a few minutes ahead, then confirm `ready=2`; the HPA reads `<unknown>` for its first minute, which is fine.
+* *The readiness break needs the scale-to-zero step.*
+Break readiness alone and the old pods keep serving — a held rollout, which is a fine point to make, but not the `503`.
+With the HPA present, scale to `0` and back to `2`: the HPA pauses at zero replicas and resumes at two.
+* *Say why the OOMKilled pod's logs are empty* before anyone asks: the kernel killed the process, so it had no chance to log.
+The evidence is `lastState.terminated.reason`.
+* *Fill the HPA wait.* The scale-out takes one to two minutes; narrate the measurement path (sample → compare → scale) while the watch runs, and point at the *Resources* panel's *Pods* list, not the Topology ring, which looks the same at 2 and 4.
+* *Delete the burst pod* before the next run — a forgotten `claims-burst` pins the HPA at 4.
+
+== Top questions attendees ask
+
+*1. "I broke readiness and the Route still says 200 — did it not work?"*::
+It worked: the probe change started a rolling update, and the new pod never became ready, so the rollout is *held* and the old pod keeps serving.
+That is the platform refusing to ship a broken change.
+The `503` only appears once no pod is ready at all, which is why the lab scales to zero and back.
+
+*2. "Why did the platform restart my perfectly healthy app?"*::
+Because the liveness probe asked the wrong question — the typo'd path answers `404`, and three failures in a row read as "wedged".
+A wrong liveness probe is worse than none, which is the point of exercise 2.
+The same reasoning is why liveness must never check a database: one blip, every pod restarted.
+
+*3. "The OOMKilled pod's logs show nothing — where is the error?"*::
+There is none in the logs: the kernel stopped the process with `SIGKILL` (exit code `137` = 128 + 9) the moment it crossed its memory limit.
+Read `oc get pod <name> -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}'` — it says `OOMKilled`.
+
+*4. "My HPA says `<unknown>` — is it broken?"*::
+For the first minute, no: it has no CPU sample yet.
+If it stays `<unknown>`, the container has no CPU request to compute a percentage against — exercise 3 sets `200m`; check it is still there.
+
+*5. "Why is the scale-out so slow, and why won't it scale back down?"*::
+Up: the autoscaler decides instantly, but CPU has to be sampled first (*24–40 s* before it first read over target in the measured runs), and the climb often steps 2 → 3 → 4.
+Down: a deliberate *5-minute stabilization window*, so a short lull does not cause a shrink-then-grow flap.
+
+== Watchouts
+
+* *Exercise 3 leaves a crash-looping pod until the attendee restores the limit.*
+An attendee who stops after the `OOMKilled` step has a held rollout and a pod in `CrashLoopBackOff`; `ws verify` then fails the readiness check with a hint to restore the limit.
+Point them at the restore block.
+* *The `128Mi` value depends on the Java runtime.*
+It was chosen from a local measurement with a wide margin (the JVM needed ~173 MB to start); a future image that starts smaller could survive it.
+If an attendee's new pod comes up `1/1` at `128Mi`, have them try `64Mi`, and report it.
+* *Rapid `oc set probe` / `oc set resources` mean several quick rollouts.*
+Between rollouts the Route can briefly answer `503` even after `rollout status` succeeds, because the router refreshes its backend list every few seconds.
+The lab's blocks wait for one pod, sleep and retry; a hand-typed `curl` mid-rollout may see a transient `503` — have them re-run it.
+* *Clean up burst pods.*
+A `claims-burst` left running keeps CPU high, pins the HPA at 4, and skews the next run: `oc delete pod claims-burst -n {user}-dev`.
+* *The optional challenge scales the database to zero.*
+The app keeps erroring after the database returns until the claims pods restart (`oc rollout restart deploy/parasol-claims`) — that step is in the challenge's answer.
+
+== Provenance
+
+This module was assembled on 2026-11-14 from measured material: exercise 1 from *Config, Secrets & Multi-Environment* (performed 2026-07-09, re-proven 2026-11-12), exercise 4 from *Observability* (timings re-measured over five runs on 2026-08-14), the console paths from those modules' live groundings (2026-07-28 to 2026-07-31).
+The liveness break, the startup probe step and the `OOMKilled` break are new, and the module as a whole has not yet been performed end to end on a cluster; until it has, the *Part B* rows above are expectations, not measurements.

@@ -1,0 +1,138 @@
+= Health, Resources & Autoscaling: Concept
+:module-id: health-resources-autoscaling
+include::partial$version-attributes.adoc[]
+
+// Concept page for Health, Resources & Autoscaling. Renders in all three flavors (workshop/demo/instructor).
+// Environment values appear ONLY as attributes; product versions ONLY via version-attributes.
+// Ported 2026-11-14 from config-multienv (probes, requests/limits) and observability-health-scale
+// (scaling decision tree, HPA) at 3c3215e6; the OOMKilled section is new. Not yet performed as a
+// module of its own on a cluster — see lab.adoc's header for what is measured and what is not.
+
+[.lead]
+Monday, 9 a.m.: every Parasol claims adjuster signs in at once.
+One claims pod is still booting and already taking requests, another has run out of memory, and nobody is awake to add a third.
+
+This module teaches the platform three things about the claims service: when it can *serve*, how much it *needs*, and when to *add more of it*.
+You add health probes, set requests and limits, read what happens when a limit is too small, and let a HorizontalPodAutoscaler (HPA) grow the service under load.
+
+include::partial$prep-while-you-read.adoc[]
+
+== What you'll learn
+
+* What the platform *does* with each of the three health probes — *readiness*, *liveness* and *startup* — and why a readiness gate holds traffic away from a pod that cannot serve.
+* Why a wrong liveness probe is worse than none.
+* How *requests* and *limits* differ, which one the scheduler reads and which one the kernel enforces, and what *Quality of Service (QoS)* class a pod ends up in.
+* What `OOMKilled` means, and how to read it from a pod's last termination state.
+* How a *HorizontalPodAutoscaler (HPA)* adds replicas when CPU rises with traffic, and why it needs a CPU request to do it.
+
+== Running is not the same as ready
+
+A pod can be started and still loading; it can be alive and wedged.
+The platform cannot tell those apart unless the application says so, and it says so through *probes*: small health checks the kubelet, the node agent that runs your containers, makes on a schedule.
+There are three, and the platform does something *different* with each:
+
+[cols="1,3,3",options="header"]
+|===
+| Probe | The question it answers | What the platform does on failure
+
+| *startup* | "Has the app finished booting?" | Holds the other two probes off until this passes, so a slow start is not mistaken for a failure.
+| *readiness* | "Can the app take traffic *right now*?" | Removes the pod from the Service's endpoints: traffic is *held*, not sent to a pod that would fail it.
+| *liveness* | "Is the app still working, or wedged?" | *Restarts* the container.
+|===
+
+The claims service exposes these as HTTP endpoints — `/q/health/started`, `/q/health/ready` and `/q/health/live` — which its Quarkus runtime provides out of the box.
+The one that matters most day to day is *readiness*: a pod that answers no stops receiving traffic until it answers yes again.
+
+[mermaid]
+....
+include::example$diagrams/health-resources-autoscaling/01-readiness-gate.mmd[]
+....
+
+Readiness also guards every rollout.
+A new pod that never becomes ready never replaces the old one, so a bad change is *held back* while the old version keeps serving.
+
+Liveness is the probe to be careful with.
+Point it at the wrong path, or at something the app does not control, and the platform will dutifully restart a healthy container over and over.
+That is why liveness should ask "is *this process* healthy?", never "is the database up?".
+
+== Requests, limits, and what the kernel enforces
+
+Every container can declare two numbers for CPU and for memory:
+
+*Request*:: What the scheduler *reserves* for the container, and what it uses to decide which node has room for the pod.
+The HPA also measures CPU use as a percentage *of the request*.
+*Limit*:: The ceiling the container may not cross.
+Over the CPU limit, the container is *throttled*: slower, but still running.
+Over the memory limit, the kernel *kills* it, and the pod reports `OOMKilled`.
+
+[mermaid]
+....
+include::example$diagrams/health-resources-autoscaling/06-requests-limits.mmd[]
+....
+
+Your namespace already fills in defaults through a *LimitRange* (here a request of `100m` CPU and `256Mi` memory, and a limit of `1500m` and `1Gi`), so a container that declares nothing still gets numbers.
+Defaults are a safety net, not a sizing decision: in the lab you replace them with values chosen for the claims service.
+
+The two numbers also decide a pod's *Quality of Service (QoS)* class, which is the order the node evicts pods in when it runs short of memory:
+
+* *Guaranteed* — every container's requests equal its limits; evicted last.
+* *Burstable* — requests are set but lower than limits (the common case, and the claims app's).
+* *BestEffort* — no requests or limits at all; evicted first.
+The LimitRange means you will not see this one in your namespace.
+
+=== When the limit is too small: OOMKilled
+
+A memory limit is enforced by the Linux kernel, not by the application.
+When the container crosses it, the process is killed on the spot — no exception, no stack trace, no graceful shutdown.
+The pod's last termination state reads `reason: OOMKilled` with exit code `137`, and the container restarts into the same wall until the limit changes.
+
+A Java application needs memory beyond its heap — class metadata, compiled code, threads — before it serves a single request.
+Set the limit below that and it never finishes starting.
+In the lab you do exactly that, read the evidence, and put the limit back.
+
+== Scaling is a decision, not a reflex
+
+"It's slow — add replicas" is only sometimes the right answer.
+OpenShift gives you four scaling tools, and picking the wrong one wastes money or does nothing.
+
+[mermaid]
+....
+include::example$diagrams/health-resources-autoscaling/04-scaling-decision-tree.mmd[]
+....
+
+* *HorizontalPodAutoscaler (HPA)* — more replicas when CPU or memory rises with traffic.
+This is the workhorse, and what you build in the lab.
+It needs a resource *request* on the container to compute utilization against.
+* *Serverless (Knative)* — scale to *zero* when idle and back up on the first request.
+Right for bursty or rarely used services; see the xref:serverless-zero-to-hero/concept.adoc[Serverless Zero-to-Hero] module.
+* *KEDA (Custom Metrics Autoscaler)* — scale on an external signal such as queue depth, not CPU.
+Right for batch and event-driven work; see xref:jobs-batch-kueue/concept.adoc[Jobs, Batch & Queued Workloads] and xref:eventing-deep-dive/concept.adoc[Eventing Deep-Dive & Serverless Workflows].
+* *VerticalPodAutoscaler (VPA)* — right-*size* one pod's requests and limits instead of adding pods.
+Useful, but never point a VPA and an HPA at the same resource on the same workload: they fight.
+VPA is concept-only here.
+
+The HPA's loop is simple: sample CPU, compare the average with the target, and change the replica count to close the gap.
+What takes time is the *sample*, not the decision — which is why, in the lab, the scale-out takes a minute or two rather than a few seconds.
+
+== How this shows up in real orgs
+
+* *Fewer 2 a.m. pages from half-started pods.*
+A readiness probe turns "the deployment went out and users saw errors for a minute" into "the deployment waited until the new pods could serve".
+* *Right-sizing is a cost conversation.*
+Requests are reserved capacity, used or not.
+Teams that copy `requests: 4 CPU` from a template pay for idle cores across every replica; teams that measure and set requests honestly fit more on the same nodes.
+* *`OOMKilled` is the most common "it just restarts" ticket.*
+Knowing to read the last termination state — not the current logs, which show nothing — saves hours.
+* *Capacity follows demand.*
+An HPA lets a service run lean overnight and grow for the Monday peak, without anyone filing a ticket to scale it.
+Keeping enough of those pods running through node maintenance is the job of a PodDisruptionBudget, covered in xref:deployment-targets-scheduling/concept.adoc[Deployment Targets & Scheduling].
+
+ifdef::instructor[]
+[NOTE]
+.Presenter framing
+====
+Spend no more than five minutes here before the live demo.
+Two ideas must land: (1) *readiness* holds traffic away from a pod that cannot serve, and a wrong *liveness* probe restarts a healthy one; (2) the *request* is what the scheduler and the HPA read, the *limit* is what the kernel enforces.
+The demo proves both: a `503` you cause and fix, an `OOMKilled` container, and an HPA adding pods under load.
+====
+endif::instructor[]

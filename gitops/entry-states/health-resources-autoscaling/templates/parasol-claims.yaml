@@ -1,0 +1,114 @@
+# The claims service in {user}-dev, deliberately under-specified so the lab can complete it:
+#   * NO health probes — exercises 1 and 2 add readiness, liveness and startup, and break each once;
+#   * NO explicit requests/limits — exercise 3 sets them (the container inherits the namespace
+#     LimitRange defaults, request 100m/256Mi and limit 1500m/1Gi, until then), and exercise 4's HPA
+#     needs the CPU request to compute utilization.
+# Runs the SHARED prebuilt image so this module never depends on any per-user build having happened.
+---
+# why: the running claims REST API (%prod profile); datasource is env-driven at Service claims-db.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-claims
+    {{- include "hra.labels" . | nindent 4 }}
+spec:
+  # Entry = 1 replica. Solve starts at the HPA's floor of 2, so the HPA does not fight a lower
+  # Deployment replica count on first sync.
+  replicas: {{ if .Values.solve }}2{{ else }}1{{ end }}
+  selector:
+    matchLabels:
+      app: parasol-claims
+  template:
+    metadata:
+      labels:
+        app: parasol-claims
+        workshop.redhat.com/module: health-resources-autoscaling
+    spec:
+      containers:
+        - name: parasol-claims
+          # Shared image built once into parasol-images (independent of any per-user build).
+          image: image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims:1.0
+          # Mutable workshop tag - rebuilt in place, so a node-cached IfNotPresent layer served the OLD image (measured 2026-07-29).
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # Point the %prod datasource at the claims-db Service in this namespace.
+            - name: POSTGRESQL_HOST
+              value: claims-db
+          envFrom:
+            # POSTGRESQL_USER / _PASSWORD / _DATABASE — the same Secret the DB was initialized with.
+            - secretRef:
+                name: claims-db
+{{- if .Values.solve }}
+          # SOLVE (end state): the probes and resources exactly as the lab sets them.
+          startupProbe:
+            httpGet:
+              path: /q/health/started
+              port: 8080
+            periodSeconds: 3
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 3
+          # The CPU request is what the HPA computes utilization against (actual / request).
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+{{- end }}
+---
+# why: stable in-cluster address for the claims API (port 8080); the load generator calls it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-claims
+    {{- include "hra.labels" . | nindent 4 }}
+spec:
+  selector:
+    app: parasol-claims
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+# why: publishes the claims API at parasol-claims-{user}-dev.{clusterDomain} (host auto-generated).
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-claims
+    {{- include "hra.labels" . | nindent 4 }}
+spec:
+  to:
+    kind: Service
+    name: parasol-claims
+  port:
+    targetPort: http
+  tls:
+    # Browser-facing Route: MUST be edge-terminated (the console links https; a plain Route answers
+    # 503 there). Allow, NOT Redirect — Redirect makes `curl http://...` return an empty 302, which
+    # breaks the terminal steps that drive traffic with curl.
+    termination: edge
+    insecureEdgeTerminationPolicy: Allow

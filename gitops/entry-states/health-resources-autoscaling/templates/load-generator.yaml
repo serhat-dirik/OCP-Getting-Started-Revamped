@@ -1,0 +1,70 @@
+# A single, gentle curl loop against the in-cluster claims Service — the same generator the
+# observability entry state runs, so the autoscaling exercise starts from the same idle CPU baseline.
+# It keeps the app's CPU off zero (the HPA's first reading is a real percentage, not 0%) without
+# pinning it; the lab's short claims-burst pod is what pushes CPU past the HPA target. Each cycle:
+#   * GET  /api/claims                       — list traffic
+#   * GET  /api/claims/CLM-1001/history      — the heavier N+1 read
+#   * POST /api/claims                       — a write
+#   * GET  /api/claims/CLM-0000              — a 404
+# Uses ose-cli (bash + curl on every connected cluster; no custom image). Resources are tiny and
+# capped so it never dominates the {user}-dev quota.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claims-load
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: claims-load
+    {{- include "hra.labels" . | nindent 4 }}
+    # Generates a standing 404 rate ON PURPOSE — see entry-states/README.md rule 7 and `ws by-design`.
+    workshop.redhat.com/by-design: "true"
+  annotations:
+    workshop.redhat.com/by-design-symptom: >-
+      steady 404 rate on parasol-claims in this namespace, and connection errors in this pod's
+      own loop while a lab exercise has the claims app deliberately out of rotation
+    workshop.redhat.com/by-design-reason: >-
+      health-resources-autoscaling: this pod curls parasol-claims in a loop so the app always has
+      a little traffic and a non-zero CPU baseline for the autoscaling exercise. GET
+      /api/claims/CLM-0000 is a deliberate 404. parasol-claims is healthy; the traffic is synthetic.
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: claims-load
+  template:
+    metadata:
+      labels:
+        app: claims-load
+        workshop.redhat.com/module: health-resources-autoscaling
+    spec:
+      containers:
+        - name: load
+          # Digest-pinned; el8 `ose-cli:latest` was frozen on v4.15.0 with unapplied Critical errata.
+          image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          env:
+            - name: TARGET
+              value: http://parasol-claims:8080
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -uo pipefail
+              echo "▶ claims load generator → ${TARGET} (gentle steady baseline)"
+              # Wait for the claims API to answer readiness before driving load.
+              until curl -sf -o /dev/null "${TARGET}/q/health/ready"; do sleep 3; done
+              echo "  ✓ claims ready — generating traffic"
+              while true; do
+                curl -s  -o /dev/null "${TARGET}/api/claims"
+                curl -s  -o /dev/null "${TARGET}/api/claims/CLM-1001/history"
+                curl -s  -o /dev/null -X POST "${TARGET}/api/claims" \
+                  -H 'Content-Type: application/json' \
+                  -d '{"claimant":"Load Generator","type":"auto","amount":100.00}'
+                curl -s  -o /dev/null "${TARGET}/api/claims/CLM-0000"
+                sleep 2
+              done

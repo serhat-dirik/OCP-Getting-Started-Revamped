@@ -1,0 +1,93 @@
+= Health, Resources & Autoscaling: Wrap-up
+:module-id: health-resources-autoscaling
+include::partial$version-attributes.adoc[]
+
+== What you built
+
+You taught the platform three things about the claims service.
+*When it can serve:* a readiness probe that held a broken rollout back and drained the Service to a `503` when no pod could answer, a liveness probe whose typo restarted a healthy container, and a startup probe that protects the boot.
+*How much it needs:* explicit requests and limits, a QoS class you read back, and an `OOMKilled` container that showed what a too-small memory limit does.
+*When to add more of it:* a HorizontalPodAutoscaler that grew the service from 2 to 4 pods under load and kept them through the lull.
+
+[mermaid]
+....
+include::example$diagrams/health-resources-autoscaling/09-what-you-built.mmd[]
+....
+
+The idea under all of it: the platform can only protect, place and scale an application that *tells it* what healthy looks like and what it needs.
+
+== Map to your org
+
+Take these back to how your teams work today:
+
+. *What do your probes actually check?*
+Pick one production service and read its liveness and readiness probes.
+Does liveness reach a database, a cache, or another service?
+If that dependency blipped right now, would the platform restart every pod at once?
+. *Where did your requests come from?*
+For the same service, compare its CPU and memory *requests* with what it actually uses on a normal day.
+Were they measured, or copied from a template?
+How much reserved-but-idle capacity is that across every replica and every environment?
+. *Who scales your services at peak today?*
+Is it a person, a ticket, a scheduled script, or the platform?
+Which of your services rises and falls with traffic on CPU — a good HPA fit — and which is driven by a queue or sits idle for hours, where something else fits better?
+
+== When *not* to do it this way
+
+These are strong defaults, and each can be over-applied.
+Be honest about the edges:
+
+[cols="3,4",options="header"]
+|===
+|If… |Reach for…
+
+|You are choosing what a liveness probe checks
+|The process's *own* ability to make progress — never a dependency's health
+
+|The load is driven by a queue or event backlog, not CPU
+|KEDA (Custom Metrics Autoscaler), scaling on queue depth
+
+|The service is idle for long stretches, then bursty
+|Serverless (Knative), which scales to zero between bursts
+
+|The app is single-instance by design (a leader, a singleton job) or holds local state
+|A fixed replica count, not an HPA
+
+|You do not know the app's real usage yet
+|Measure first; leave the LimitRange defaults until you have numbers
+|===
+
+.The reasoning behind each row
+[%collapsible]
+====
+* *A liveness probe that checks a dependency is a restart storm waiting to happen.*
+When the database blips, every pod fails at once and the platform restarts all of them — turning a short outage into a long one, and hammering the database as it recovers.
+Let readiness reflect dependencies if you must; keep liveness about the process itself.
+* *CPU is the wrong signal for queue-driven work.*
+A consumer that is waiting on a queue uses little CPU while the backlog grows; an HPA on CPU never notices.
+Scale on the backlog instead.
+* *An HPA never scales to zero.*
+Its floor is at least one pod, so a service that is idle most of the day pays for that pod all day.
+Serverless removes it.
+* *Not every workload can run more copies of itself.*
+A leader-elected controller, a singleton job or an app with local state may break or do duplicate work when an autoscaler adds replicas.
+* *Guessed requests are worse than defaults.*
+A request copied from a template reserves capacity nobody uses; a limit set too low gives you the `OOMKilled` you caused on purpose.
+Measure under real load, then set both.
+====
+
+== Go deeper
+
+* xref:config-multienv/lab.adoc[Config, Secrets & Multi-Environment] — the same claims service, configured from outside and promoted unchanged to stage and prod (a separate module).
+* xref:observability-health-scale/lab.adoc[Observability: Metrics, Alerts, Dashboards & Traces] — the metrics behind the autoscaler's decisions, an alert that fires when the service breaks, and a dashboard that shows the scale-out (a separate module).
+* xref:deployment-targets-scheduling/lab.adoc[Deployment Targets & Scheduling] — where pods land, and the PodDisruptionBudget that keeps enough of them running through node maintenance (a separate module).
+* xref:multi-tenancy-workload-security/lab.adoc[Multi-Tenancy & Workload Security] — the ResourceQuota and LimitRange your namespace runs inside, authored from the platform side (a separate module).
+* xref:serverless-zero-to-hero/lab.adoc[Serverless Zero-to-Hero] — scaling to zero and back on the first request (a separate module).
+* Red Hat documentation: the OpenShift guides on *monitoring application health with probes*, *quotas and limit ranges*, and *automatically scaling pods with the horizontal pod autoscaler*.
+
+[NOTE]
+.Clean up
+====
+To return `{user}-dev` to a fresh entry state (the claims app with no probes, no resources and no HPA), run `ws prep {module-id} --yes`.
+Leave everything running if you are continuing to another module — each module materializes its own world.
+====

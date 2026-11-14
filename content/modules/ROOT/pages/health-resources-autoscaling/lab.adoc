@@ -1,0 +1,936 @@
+= Health, Resources & Autoscaling: {lab_page_label}
+:module-id: health-resources-autoscaling
+include::partial$version-attributes.adoc[]
+
+// Lab page for Health, Resources & Autoscaling. Workshop exercises are guarded ifndef::demo[]; the
+// DEMO rendering shows only the SA demo guide. Every command runs in the SHOWROOM terminal as {user}.
+//
+// PROVENANCE (2026-11-14, built offline — NOT yet performed as this module on a cluster):
+//   * exercise 1 is config-multienv lab exercise 4 (readiness break/fix), at 3c3215e6, re-cut to
+//     start from an app with NO probes. Its commands and outputs were performed there (OCP 4.21.22,
+//     2026-07-09; re-proven 2026-11-12 on OCP 4.22.22 as user7 with the wait lines kept below).
+//   * exercise 3's requests/limits half is config-multienv exercise 5's first half (the quota half
+//     stays in Multi-Tenancy & Workload Security). The CPU request is 200m here, not 100m, so the
+//     HPA in exercise 4 reads against the same request the measured HPA runs used.
+//   * exercise 4 is observability-health-scale lab exercise 6 (HPA), at 3c3215e6. Its timings were
+//     measured there (OCP 4.22.8, user5, 2026-08-14) on the same image, the same 200m request, the
+//     same burst and the same load generator — with OpenTelemetry export ON, which this module's
+//     entry state leaves off.
+//   * exercise 2 (liveness break + startup) and the OOMKilled half of exercise 3 are NEW.
+// Every // UNVERIFIED line below is a value or output shape that must be measured in Part B
+// (live proof on user21) before this module ships; none of them has been run here yet.
+
+ifndef::demo[]
+include::partial$prereq-ws-start.adoc[]
+
+.Highlighted: what you build in this module
+image::solution-map/health-resources-autoscaling.svg["The Parasol solution map with this module's pieces highlighted: Deploy & scale, Autoscaling, parasol-claims and claims-db.",width=900]
+
+In this lab you teach the platform three things about Parasol's claims service: when it can serve, how much it needs, and when to add more of it.
+You work only in your own namespace, `{user}-dev`, so nothing you do can affect another attendee.
+
+TIP: Most steps come in two tabs that do the same thing: *Console* for the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`), *CLI* for `oc` in the *Terminal* tab; the tabs stay in sync across the page. Reading a pod's termination state and driving load are CLI-only. If a console label differs on your cluster, the `oc` command beside it is the source of truth.
+endif::demo[]
+
+// ============================================================================
+// DEMO FLAVOR — readiness holds traffic, a too-small memory limit is killed, and the HPA adds pods.
+// The title's minutes are the sum of the five step headings below (2+3+2+2+3); keep them in step.
+// ============================================================================
+ifdef::demo[]
+== Ready, right-sized and elastic · 12 min
+
+A pod that cannot serve is held out of rotation until it recovers, a container that outgrows its memory limit is stopped by the kernel, and the platform adds pods on its own when CPU climbs.
+
+[IMPORTANT]
+.Prep — run before the session
+====
+This demo starts from the finished lab state. Stage it before the session:
+
+// UNVERIFIED until Part B: `adm solve health-resources-autoscaling` as a workshop account.
+[source,sh,role=execute]
+----
+adm solve health-resources-autoscaling
+----
+
+It leaves the claims service in `{user}-dev` with all three probes, explicit requests and limits, and a HorizontalPodAutoscaler holding it at 2 replicas. Confirm both pods serve before you start:
+
+[source,sh,role=execute,subs="attributes+"]
+----
+oc -n {user}-dev get deploy parasol-claims -o jsonpath='ready={.status.readyReplicas}{"\n"}'
+oc -n {user}-dev get hpa parasol-claims
+----
+
+Expect `ready=2` and an HPA row with `MINPODS 2` and `MAXPODS 4`; `TARGETS` reads `<unknown>` for its first minute.
+If `ready` is empty or `1`, wait a minute and check again.
+
+Have a terminal signed in as `{user}` and the web console on *Topology* in `{user}-dev`. Pod names were captured from a live run and will differ here.
+====
+
+=== Brief
+
+image::health-resources-autoscaling/health-resources-autoscaling-01-readiness-gate.svg["The readiness gate: a Route and Service above two pods. A solid traffic arrow reaches the pod whose readiness is passing, shown in green and in the Service endpoints; a dashed no-endpoint arrow stops short of the pod whose readiness is failing, shown in red, removed from endpoints with traffic held and the Route returning 503."]
+
+*Running is not the same as ready*
+
+A pod can be up and still unable to serve: loading, waiting on a dependency, or wedged.
+The platform cannot tell unless the application says so, through three probes: startup holds the others off while the application boots, liveness restarts a wedged container, and readiness removes a pod that cannot serve from the Service.
+
+*Requests, limits and the kernel*
+
+A container's *request* is what the scheduler reserves for it, and what the autoscaler measures against.
+Its *limit* is a ceiling: over the CPU limit it is slowed down, over the memory limit the kernel kills it.
+
+*Scaling without a ticket*
+
+A HorizontalPodAutoscaler (HPA) samples CPU against the request and changes the replica count to hold a target, so capacity follows demand rather than a guess made weeks ago.
+
+*In this demo*
+
+. The claims service with three probes, explicit resources and an autoscaler
+. Readiness deliberately broken: every pod runs, none is ready, and the Route returns 503
+. The probe restored, and the pods put straight back into rotation
+. A memory limit too small for the JVM, and the `OOMKilled` it produces
+. Load arrives, and the HPA adds pods on its own
+
+=== 1 · Three probes, explicit resources and an autoscaler — 2 min
+
+The claims service in `{user}-dev` already declares how the platform should check its health, how much CPU and memory it needs, and how far it may scale.
+
+[mermaid]
+....
+include::example$diagrams/health-resources-autoscaling/09-what-you-built.mmd[]
+....
+
+*Why it matters*
+
+These are ordinary fields on a Deployment plus one small object, and together they decide whether a bad rollout reaches users, whether one service can starve another, and whether a Monday peak needs a person.
+
+[source,sh,role=execute,subs="attributes+"]
+----
+oc -n {user}-dev get deploy parasol-claims -o jsonpath='startup={.spec.template.spec.containers[0].startupProbe.httpGet.path}{"\n"}readiness={.spec.template.spec.containers[0].readinessProbe.httpGet.path}{"\n"}liveness={.spec.template.spec.containers[0].livenessProbe.httpGet.path}{"\n"}resources={.spec.template.spec.containers[0].resources}{"\n"}'
+oc -n {user}-dev get hpa parasol-claims
+----
+
+*What just happened*
+
+Three probe paths, a request and a limit for CPU and memory, and an HPA that keeps between 2 and 4 pods at 60% of the CPU request.
+
+=== 2 · Break readiness and the Route returns 503 — 3 min
+
+Point readiness at a URL that does not exist, then replace every pod, so all of them run perfectly well and none can ever answer yes to the platform's question.
+
+image::health-resources-autoscaling/health-resources-autoscaling-02-readiness-503.png["The Pods list for the dev project, two rows: claims-db Running with Ready 1/1, and directly below it parasol-claims also Running with zero restarts but Ready 0/1 — a container that started fine and never passes its readiness probe."]
+
+*Why it matters*
+
+The container is up and the process is fine; what fails is the question "can you serve?".
+No ready pod means no endpoints, so the Route returns 503 rather than sending a request into a pod that would break it.
+The column that tells the story is READY, not STATUS.
+
+// UNVERIFIED until Part B: scaling to 0 and back to 2 with the solve-state HPA present (the HPA
+// pauses at 0 replicas and resumes at 2; both new pods carry the broken probe).
+[source,sh,role=execute,subs="attributes+"]
+----
+oc -n {user}-dev set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/typo
+# scale to 0 and back, so every pod that comes up carries the broken readiness check
+oc -n {user}-dev scale deploy/parasol-claims --replicas=0
+for i in $(seq 1 20); do [ "$(oc -n {user}-dev get pods -l app=parasol-claims --no-headers 2>/dev/null | wc -l | tr -d ' ')" = 0 ] && break; sleep 2; done
+oc -n {user}-dev scale deploy/parasol-claims --replicas=2
+sleep 40
+oc -n {user}-dev get pods -l app=parasol-claims
+CLAIMS=$(oc -n {user}-dev get route parasol-claims -o jsonpath='{.spec.host}')
+curl -s -o /dev/null -w "Route: %\{http_code}\n" http://$CLAIMS/api/claims
+----
+
+*What just happened*
+
+Both pods are `Running` at `0/1`, the Service has no endpoints, and the Route answers 503.
+The platform is holding the request rather than delivering it to a pod that cannot serve it.
+
+=== 3 · Restore the probe and the pods return to rotation — 2 min
+
+Point readiness back at the endpoint that exists. The same gate that drained the pods puts them back the moment they answer.
+
+[mermaid]
+....
+include::example$diagrams/health-resources-autoscaling/03-readiness-cycle.mmd[]
+....
+
+*Why it matters*
+
+Drain, hold, recover is one continuous decision the platform makes from the application's own answer: nothing was reconfigured by hand, and no user reached a broken pod in between.
+
+[source,sh,role=execute,subs="attributes+"]
+----
+oc -n {user}-dev set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/ready
+oc -n {user}-dev rollout status deploy/parasol-claims
+sleep 10
+CLAIMS=$(oc -n {user}-dev get route parasol-claims -o jsonpath='{.spec.host}')
+curl -sf --retry 30 --retry-all-errors --retry-delay 2 -o /dev/null -w "Route: %\{http_code}\n" http://$CLAIMS/api/claims
+----
+
+*What just happened*
+
+`Route: 200`. The recovery took no more action than the failure did.
+
+=== 4 · Too little memory: the kernel stops the container — 2 min
+
+Lower the memory limit below what the Java runtime needs just to start, and read why the new pod never comes up.
+
+[mermaid]
+....
+include::example$diagrams/health-resources-autoscaling/08-oomkilled.mmd[]
+....
+
+*Why it matters*
+
+A memory limit is enforced by the kernel, not by the application, so the evidence is not in the logs: the process is killed mid-start with no exception.
+It is in the pod's last termination state, which reads `OOMKilled`.
+Readiness holds the rollout, so the old pods keep serving while you find out.
+
+// UNVERIFIED until Part B: the 128Mi value on the cluster image. Measured only as a local proxy
+// (2026-11-14, same app build under a Temurin 21 JVM with a podman memory limit): 128Mi and 160Mi
+// were OOMKilled (exit 137) within ~4 s of start; 192Mi started at ~173 MB.
+[source,sh,role=execute,subs="attributes+"]
+----
+oc -n {user}-dev set resources deploy/parasol-claims --requests=memory=128Mi --limits=memory=128Mi
+# wait until the newest pod has been killed and restarted at least once
+for i in $(seq 1 30); do R=$(oc -n {user}-dev get pods -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].status.containerStatuses[0].lastState.terminated.reason}'); [ -n "$R" ] && break; sleep 2; done
+oc -n {user}-dev get pods -l app=parasol-claims
+echo "last termination of the newest pod: $R"
+----
+
+Put the limit back before moving on:
+
+[source,sh,role=execute,subs="attributes+"]
+----
+oc -n {user}-dev set resources deploy/parasol-claims --requests=memory=256Mi --limits=memory=512Mi
+oc -n {user}-dev rollout status deploy/parasol-claims
+----
+
+*What just happened*
+
+The new pod crash-looped with `OOMKilled` while the two old pods kept serving; restoring the limit rolled out healthy pods.
+
+=== 5 · Load arrives, and the HPA adds pods — 3 min
+
+Start a short burst of concurrent traffic and watch the autoscaler react: CPU climbs past the 60% target and the replica count follows, with no person involved.
+
+image::health-resources-autoscaling/health-resources-autoscaling-05-topology-hpa-scale.png["OpenShift Topology view for the user's dev project with the Resources side panel open for the parasol-claims Deployment. The Pods section is headed \"View all 4\" and lists three pod rows, each reading Running, then a HorizontalPodAutoscalers section listing the parasol-claims HPA, followed by Services and Routes sections below."]
+
+*Why it matters*
+
+Capacity follows demand: the service runs at 2 pods when quiet and grows to 4 under load, and it shrinks back after a deliberate 5-minute wait so a short lull does not cause a flap.
+
+[source,sh,role=execute,subs="attributes+"]
+----
+oc -n {user}-dev run claims-burst --restart=Never \
+  --image=registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19 \
+  -- /bin/bash -c 'for i in $(seq 1 20); do ( while true; do \
+    curl -s -o /dev/null http://parasol-claims:8080/api/claims/CLM-1001/history; \
+    curl -s -o /dev/null http://parasol-claims:8080/api/claims; done ) & done; wait'
+oc -n {user}-dev get hpa parasol-claims -w
+----
+
+*On screen* — web console → *Topology* in `{user}-dev` → click `parasol-claims` → *Resources*: the *Pods* list grows from 2 to 4 within one to two minutes.
+Stop the watch with Ctrl-C, then remove the burst:
+
+[source,sh,role=execute,subs="attributes+"]
+----
+oc -n {user}-dev delete pod claims-burst
+----
+
+== Frequently asked questions
+
+*Why did the Route not return 503 the moment the probe broke?*::
+A probe change triggers a rolling update, and the rollout is itself gated by readiness: the new pod never becomes ready, so the old, healthy pods keep serving.
+That is the platform protecting users from a bad change.
+A 503 appears only when no pod is ready at all, which is why the demo scales to zero and back.
+
+*Why is there no error in the logs of the OOMKilled pod?*::
+Because the application never saw one.
+The kernel enforces the memory limit and stops the process outright when it crosses it, so the log simply ends.
+The evidence is the pod's last termination state: reason `OOMKilled`, exit code `137`.
+
+*Why does the autoscaler take a minute or two, not a few seconds?*::
+Its decision is instant; the wait is the measurement.
+CPU has to be sampled and reported before the HPA sees it over target, and the climb often goes 2 → 3 → 4 with a fresh sample before each step.
+
+*Should the liveness probe check the database?*::
+No.
+If the database blips, every pod fails liveness at once and the platform restarts all of them, turning a short outage into a restart storm.
+Readiness may reflect a dependency; liveness should only ask whether this process is healthy.
+
+*Why does scale-down take five minutes?*::
+The HPA holds the higher count through a 5-minute stabilization window by default, so a brief lull does not shrink the service just before the next burst.
+endif::demo[]
+
+// ============================================================================
+// WORKSHOP FLAVOR — hands-on exercise groups. Each opens with a one-line story beat and "You'll end
+// with" plus a picture; steps come next, the why follows as *What just happened* and collapsibles.
+// ============================================================================
+ifndef::demo[]
+
+Select your project once; every command below runs in it:
+
+[source,sh,role=execute,subs="attributes+"]
+----
+oc project {user}-dev
+----
+
+== 1. Readiness holds traffic away from a pod that cannot serve
+⏱ *~7 min* · the first deliberate break: a readiness gate drains the Service, then refills it
+
+A claims adjuster's request should never land on a pod that cannot answer it.
+Right now the claims service has no probes at all, so the platform treats it as ready the moment its process starts.
+
+*You'll end with:* a readiness probe on the claims app, and a `503` you caused and then fixed.
+
+[mermaid]
+....
+include::example$diagrams/health-resources-autoscaling/03-readiness-cycle.mmd[]
+....
+
+See for yourself that no probe is declared:
+
+[source,sh,role=execute]
+----
+oc get deploy parasol-claims -o jsonpath='startup={.spec.template.spec.containers[0].startupProbe.httpGet.path}{"\n"}readiness={.spec.template.spec.containers[0].readinessProbe.httpGet.path}{"\n"}liveness={.spec.template.spec.containers[0].livenessProbe.httpGet.path}{"\n"}'
+----
+
+.Expected output
+[source,texinfo]
+----
+startup=
+readiness=
+liveness=
+----
+
+Add a *readiness probe*, the platform's "can this pod serve traffic *right now*?" check, on the app's health endpoint:
+
+// Console path ported from config-multienv ex1 (verified live OCP 4.22.5, 2026-07-28 as user1): with
+// no probe on the Deployment, Actions offers "Add Health Checks". CLI beside it is authoritative.
+[tabs]
+====
+Console::
++
+--
+. Go to *Workloads* → *Deployments* → `parasol-claims` → *Actions* → *Add Health Checks*.
+. Add a *Readiness* probe — an *HTTP GET* on port `8080`, path `/q/health/ready` — and click *Save*.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc set probe deploy/parasol-claims --readiness \
+  --get-url=http://:8080/q/health/ready --period-seconds=10 --failure-threshold=3
+oc rollout status deploy/parasol-claims
+for i in $(seq 1 45); do [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ] && break; sleep 2; done
+----
+--
+====
+
+.What the `for` line does
+[%collapsible]
+====
+It waits for the pod the rollout replaced to finish shutting down: `rollout status` returns as soon as the new pod is ready, while the old one is still `Terminating` and still listed.
+Every rollout on this page ends with that line, so the next listing shows only the pods you mean.
+====
+
+Now break readiness: point it at a path that returns `404`.
+
+*Predict, then run:* the change starts a rolling update, with a new pod beside the old one. Will the Route still answer `200`?
+
+// UNVERIFIED until Part B: this in-place break as the attendee's own step (it was the demo FAQ's
+// explanation in config-multienv, not an exercise). Pod names below are illustrative.
+[source,sh,role=execute]
+----
+oc set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/typo
+# wait until both pods' containers are up (the new one will never become ready)
+for i in $(seq 1 30); do [ "$(oc get pods -l app=parasol-claims -o jsonpath='{range .items[*]}{.status.containerStatuses[0].started}{"\n"}{end}' | grep -c true)" -ge 2 ] && break; sleep 2; done
+oc get pods -l app=parasol-claims
+oc rollout status deploy/parasol-claims --timeout=15s
+curl -s -o /dev/null -w "Route: %{http_code}\n" "http://$(oc get route parasol-claims -o jsonpath='{.spec.host}')/api/claims"
+----
+
+.Expected output (sample — the new pod is held at `0/1` while the old one keeps serving)
+[source,texinfo]
+----
+NAME                              READY   STATUS    RESTARTS   AGE
+parasol-claims-6b8f7c9d5c-2xkqp   1/1     Running   0          3m10s
+parasol-claims-7d4c8b6f9d-q8w4n   0/1     Running   0          35s
+Waiting for deployment "parasol-claims" rollout to finish: 1 old replicas are pending termination...
+error: timed out waiting for the condition
+Route: 200
+----
+
+*What just happened:* the new pod never passes readiness, so it never joins the Service, and the rollout cannot retire the old pod.
+A broken change is *held back*, not shipped.
+
+[mermaid]
+....
+include::example$diagrams/health-resources-autoscaling/02-rollout-held.mmd[]
+....
+
+To see the gate *drain* traffic, every pod has to carry the broken check.
+*Predict, then run:* scale to zero and back to one, so the only pod is a new one. What will the Service's endpoints show?
+
+[source,sh,role=execute]
+----
+oc scale deploy/parasol-claims --replicas=0
+for i in $(seq 1 30); do [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 0 ] && break; sleep 2; done
+oc scale deploy/parasol-claims --replicas=1
+sleep 40
+oc get endpoints parasol-claims
+----
+
+// Ported from config-multienv ex4 (smoke 2026-07-31, verified with `od -c`): this OCP version renders
+// the drained ENDPOINTS column as a BLANK field; some server versions print the literal `<none>`.
+.Expected output (endpoints drained — no ready address; the ENDPOINTS column renders blank on some server versions and as the literal `<none>` on others)
+[source,texinfo]
+----
+Warning: v1 Endpoints is deprecated in v1.33+; use discovery.k8s.io/v1 EndpointSlice
+NAME             ENDPOINTS   AGE
+parasol-claims               ...
+----
+
+The deprecation warning is expected, above or below the table (EndpointSlice is the successor view).
+With no endpoints, the Route has nowhere to send traffic:
+
+[source,sh,role=execute]
+----
+curl -s -o /dev/null -w "Route: %{http_code}\n" "http://$(oc get route parasol-claims -o jsonpath='{.spec.host}')/api/claims"
+----
+
+.Expected output
+[source,texinfo]
+----
+Route: 503
+----
+
+// Shot on the Pods list, not the Service page: an unready Pod still matches the Service's selector,
+// so the Service page renders as though nothing were wrong. Blank line above image:: is load-bearing.
+.Running, but not Ready
+image::health-resources-autoscaling/health-resources-autoscaling-02-readiness-503.png["The Pods list for the dev project, two rows. The database Pod claims-db is Running with Ready 1/1. Directly below it the application Pod parasol-claims is also Running, with 0 restarts — but its Ready column reads 0/1. The container started fine; it simply never passes its readiness probe, and that one column is the whole reason the Service has no endpoints and the Route answers 503."]
+
+*What just happened:* the `503` is the platform *holding* the request instead of sending it to a pod that would fail it.
+Restore readiness and watch the pod return to rotation:
+
+[source,sh,role=execute]
+----
+oc set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/ready
+oc rollout status deploy/parasol-claims
+for i in $(seq 1 45); do [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ] && break; sleep 2; done
+sleep 10
+curl -sf --retry 30 --retry-all-errors --retry-delay 2 -o /dev/null -w "Route: %{http_code}\n" \
+  "http://$(oc get route parasol-claims -o jsonpath='{.spec.host}')/api/claims"
+----
+
+.Expected output (last two lines)
+[source,texinfo]
+----
+deployment "parasol-claims" successfully rolled out
+Route: 200
+----
+
+.Why `sleep 10` and `--retry`?
+[%collapsible]
+====
+The router refreshes its list of backends every few seconds, so a request sent the instant a rollout finishes can still reach the address of the pod that just left and come back `503`.
+The pause and the retries absorb that gap; they are not hiding a fault.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* with readiness broken, the rollout held the old pod in service (Route `200`); with no ready pod at all, `oc get endpoints parasol-claims` showed an empty ENDPOINTS column and the Route returned `503`; after the fix it returns `200`.
+****
+
+== 2. Liveness restarts a wedged container — and a wrong one restarts a healthy one
+⏱ *~6 min* · the second deliberate break: a mistyped liveness path, then the startup probe that protects boot
+
+Readiness keeps traffic away from a sick pod, but it never fixes one.
+A process that is wedged — alive, holding its port, answering nothing — needs a restart, and that is the *liveness* probe's job.
+
+*You'll end with:* liveness and startup probes on the claims app, after watching a mistyped liveness path restart a perfectly healthy container.
+
+[mermaid]
+....
+include::example$diagrams/health-resources-autoscaling/07-liveness-startup.mmd[]
+....
+
+Add liveness — with a typo in the path, `/q/health/alive` instead of `/q/health/live`:
+
+// Console label from config-multienv ex4 (grounded live on OCP 4.22.5, 2026-07-28 as user1): once a
+// probe exists, Actions reads "Edit Health Checks", not "Add". CLI beside it is authoritative.
+[tabs]
+====
+Console::
++
+--
+. Go to *Workloads* → *Deployments* → `parasol-claims` → *Actions* → *Edit Health Checks*.
+. Add a *Liveness* probe: *HTTP GET*, port `8080`, path `/q/health/alive`, period `10` seconds, failure threshold `3`. *Save*.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc set probe deploy/parasol-claims --liveness \
+  --get-url=http://:8080/q/health/alive --period-seconds=10 --failure-threshold=3
+----
+--
+====
+
+*Predict, then run:* readiness still passes, so the rollout completes. What happens to the new pod half a minute later?
+
+// UNVERIFIED until Part B: time to the first liveness restart (expected ~30-40 s from container
+// start: three failures 10 s apart) and the exact event wording below (standard kubelet messages).
+[source,sh,role=execute]
+----
+# wait until the newest claims pod has been restarted at least once (about a minute)
+for i in $(seq 1 40); do
+  R=$(oc get pods -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].status.containerStatuses[0].restartCount}')
+  [ "${R:-0}" -ge 1 ] && break; sleep 3
+done
+oc get pods -l app=parasol-claims
+oc describe pod -l app=parasol-claims | grep -E 'Liveness probe failed|failed liveness probe'
+----
+
+.Expected output (sample — `RESTARTS` keeps climbing for as long as the typo stays)
+[source,texinfo]
+----
+NAME                              READY   STATUS    RESTARTS     AGE
+parasol-claims-5c9d8f7b6d-hx2lm   0/1     Running   1 (5s ago)   48s
+  Warning  Unhealthy  10s (x3 over 30s)  kubelet  Liveness probe failed: HTTP probe failed with statuscode: 404
+  Normal   Killing    10s                kubelet  Container parasol-claims failed liveness probe, will be restarted
+----
+
+*What just happened:* the app was healthy the whole time; the *probe* was wrong.
+Three failed checks ten seconds apart told the kubelet the container was wedged, so it restarted it — and it will keep doing so, each restart a few seconds of `503` for anyone calling the service.
+
+.Liveness is the probe that can hurt you
+[%collapsible]
+====
+A failing readiness probe only takes a pod out of rotation; a failing liveness probe *kills* it.
+That makes liveness the one to point at the narrowest possible question — "is this process able to make progress?" — and never at something outside the process.
+If liveness checked the database, a database blip would fail every pod at once and the platform would restart all of them together, turning a short outage into a restart storm.
+After several restarts in a row, the kubelet also starts waiting longer between them, and the pod shows `CrashLoopBackOff`.
+====
+
+Fix the path, and add the third probe, *startup*:
+
+[tabs]
+====
+Console::
++
+--
+. *Actions* → *Edit Health Checks* again.
+. Change the *Liveness* path to `/q/health/live`.
+. Add a *Startup* probe: *HTTP GET*, port `8080`, path `/q/health/started`, period `3` seconds, failure threshold `30`. *Save*, then wait for the rollout to finish.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc set probe deploy/parasol-claims --liveness --get-url=http://:8080/q/health/live    --period-seconds=10 --failure-threshold=3
+oc set probe deploy/parasol-claims --startup  --get-url=http://:8080/q/health/started --period-seconds=3  --failure-threshold=30
+oc rollout status deploy/parasol-claims
+for i in $(seq 1 45); do [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ] && break; sleep 2; done
+----
+--
+====
+
+*What just happened:* until `/q/health/started` answers, the platform runs neither readiness nor liveness, so a slow boot is never mistaken for a wedged process.
+This one allows up to 3 seconds × 30 = *90 seconds* to boot; once it passes, the other two take over.
+
+.Why not just give liveness a long initial delay?
+[%collapsible]
+====
+A long `initialDelaySeconds` on liveness delays *every* check by the slowest boot you ever expect, so a container that wedges five seconds after a fast start goes unnoticed for minutes.
+A startup probe gives the boot as much time as it needs and then hands over immediately, so liveness can stay strict for the rest of the container's life.
+====
+
+Confirm all three are set:
+
+[source,sh,role=execute]
+----
+oc get deploy parasol-claims -o jsonpath='startup={.spec.template.spec.containers[0].startupProbe.httpGet.path}{"\n"}readiness={.spec.template.spec.containers[0].readinessProbe.httpGet.path}{"\n"}liveness={.spec.template.spec.containers[0].livenessProbe.httpGet.path}{"\n"}'
+oc get pods -l app=parasol-claims
+----
+
+.Expected output (sample)
+[source,texinfo]
+----
+startup=/q/health/started
+readiness=/q/health/ready
+liveness=/q/health/live
+NAME                              READY   STATUS    RESTARTS   AGE
+parasol-claims-84f6d9c7b5-m2t7t   1/1     Running   0          40s
+----
+
+[.checkpoint]
+****
+✔ *Verify:* you saw `Liveness probe failed` and a climbing `RESTARTS` count with the typo, and now all three probe paths are set and the claims pod runs `1/1` with `0` restarts.
+****
+
+== 3. Requests, limits and Quality of Service — and an `OOMKilled` container
+⏱ *~7 min* · right-size the app, then the third deliberate break: a memory limit too small to start in
+
+Parasol's teams share one cluster: the scheduler places a pod by what it *asks* for, and the kernel holds it to what it is *allowed*.
+So far the claims app has declared neither.
+
+*You'll end with:* explicit requests and limits on the claims app, its QoS class read back, and an `OOMKilled` container you caused and fixed.
+
+[mermaid]
+....
+include::example$diagrams/health-resources-autoscaling/06-requests-limits.mmd[]
+....
+
+See what the app runs with today — the Deployment declares nothing, yet the pod has numbers:
+
+// UNVERIFIED until Part B: the exact rendering of these two lines. The LimitRange values were read
+// live on 2026-11-14 (user21-dev: default 1500m/1Gi, defaultRequest 100m/256Mi).
+[source,sh,role=execute]
+----
+oc get deploy parasol-claims -o jsonpath='deployment={.spec.template.spec.containers[0].resources}{"\n"}'
+oc get pod -l app=parasol-claims -o jsonpath='pod={.items[0].spec.containers[0].resources}{"\n"}qos={.items[0].status.qosClass}{"\n"}'
+----
+
+.Expected output
+[source,texinfo]
+----
+deployment={}
+pod={"limits":{"cpu":"1500m","memory":"1Gi"},"requests":{"cpu":"100m","memory":"256Mi"}}
+qos=Burstable
+----
+
+*What just happened:* the namespace's *LimitRange* filled in defaults when the pod was created.
+They keep a container from running unbounded, but they are nobody's sizing decision.
+Set values chosen for this app instead:
+
+// Console path ported from config-multienv ex5 (verified live OCP 4.22.5, 2026-07-28 as user1: the
+// Deployment Actions menu carries "Edit resource limits"). CLI beside it is authoritative.
+[tabs]
+====
+Console::
++
+--
+. *Workloads* → *Deployments* → `parasol-claims` → *Actions* → *Edit resource limits*.
+. Set CPU request `200m` / limit `500m` and Memory request `256Mi` / limit `512Mi`, and *Save*.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc set resources deploy/parasol-claims \
+  --requests=cpu=200m,memory=256Mi \
+  --limits=cpu=500m,memory=512Mi
+oc rollout status deploy/parasol-claims
+for i in $(seq 1 45); do [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ] && break; sleep 2; done
+----
+--
+====
+
+Read them back, with the QoS class:
+
+[source,sh,role=execute]
+----
+oc get pod -l app=parasol-claims -o jsonpath='pod={.items[0].spec.containers[0].resources}{"\n"}qos={.items[0].status.qosClass}{"\n"}'
+----
+
+.Expected output
+[source,texinfo]
+----
+pod={"limits":{"cpu":"500m","memory":"512Mi"},"requests":{"cpu":"200m","memory":"256Mi"}}
+qos=Burstable
+----
+
+*What just happened:* the request is now `200m` CPU — the number exercise 4's autoscaler measures against — and the pod is *Burstable*: guaranteed its requests, allowed to burst up to its limits.
+
+.The three QoS classes, and why they matter
+[%collapsible]
+====
+[cols="1,2,2",options="header"]
+|===
+| Class | When | Under node memory pressure
+
+| *Guaranteed* | every container's requests equal its limits, for CPU and memory | evicted last
+| *Burstable* | requests set, but not equal to limits (this app) | evicted after BestEffort, starting with pods using most over their request
+| *BestEffort* | no requests or limits at all | evicted first
+|===
+
+You cannot produce BestEffort in this namespace: the LimitRange gives every container defaults.
+Guaranteed is the right choice for a latency-critical service whose memory use is well known; Burstable suits most applications, whose use varies.
+====
+
+Now the third break.
+A Java application needs memory beyond its heap — class metadata, compiled code, threads — before it serves anything.
+
+*Predict, then run:* lower the memory limit to `128Mi`. The rollout starts a new pod beside the old one. What will the new pod's status say, and will the old pod keep serving?
+
+// UNVERIFIED until Part B: 128Mi on the cluster image. Local proxy only (2026-11-14: same app build,
+// Temurin 21, podman --memory): 64/96/128/160 MiB all OOMKilled with exit 137 ~4 s after start,
+// 192 MiB started at ~173 MB working set, 256 MiB at ~173 MB, 512 MiB at ~188 MB. The cluster runs
+// the Red Hat OpenJDK 21 runtime image; re-measure there and adjust if 128Mi survives.
+[source,sh,role=execute]
+----
+oc set resources deploy/parasol-claims --requests=memory=128Mi --limits=memory=128Mi
+# wait for the new pod to appear, then for its container to be killed and restarted once
+for i in $(seq 1 15); do [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -ge 2 ] && break; sleep 2; done
+BAD=$(oc get pods -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')
+for i in $(seq 1 30); do [ -n "$(oc get pod "$BAD" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}')" ] && break; sleep 2; done
+oc get pods -l app=parasol-claims
+oc get pod "$BAD" -o jsonpath='reason={.status.containerStatuses[0].lastState.terminated.reason} exitCode={.status.containerStatuses[0].lastState.terminated.exitCode}{"\n"}'
+----
+
+.Expected output (sample — `STATUS` alternates between `OOMKilled` and `CrashLoopBackOff` as the container restarts)
+[source,texinfo]
+----
+NAME                              READY   STATUS             RESTARTS     AGE
+parasol-claims-84f6d9c7b5-m2t7t   1/1     Running            0            4m
+parasol-claims-6f7b9c8d4f-zr5wq   0/1     CrashLoopBackOff   1 (9s ago)   21s
+reason=OOMKilled exitCode=137
+----
+
+[mermaid]
+....
+include::example$diagrams/health-resources-autoscaling/08-oomkilled.mmd[]
+....
+
+*What just happened:* the container crossed `128Mi` while starting, and the kernel killed it outright — exit code `137` is 128 + 9, signal 9 being `SIGKILL`.
+The new pod never became ready, so readiness held the rollout and the old pod kept serving.
+
+.Why the logs do not help here
+[%collapsible]
+====
+`oc logs --previous` on that pod shows a startup that simply *stops* — no exception, no stack trace — because a `SIGKILL` gives the process no chance to write one.
+That is the signature of an out-of-memory kill: when a pod restarts with nothing in its logs, read `lastState.terminated.reason` first.
+In the console, the pod's details page shows the same reason under its container's last state.
+====
+
+Put the memory back to what the app needs:
+
+[source,sh,role=execute]
+----
+oc set resources deploy/parasol-claims --requests=memory=256Mi --limits=memory=512Mi
+oc rollout status deploy/parasol-claims
+for i in $(seq 1 45); do [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ] && break; sleep 2; done
+oc get deploy parasol-claims -o jsonpath='{.spec.template.spec.containers[0].resources}{"\n"}'
+----
+
+.Expected output (last two lines)
+[source,texinfo]
+----
+deployment "parasol-claims" successfully rolled out
+{"limits":{"cpu":"500m","memory":"512Mi"},"requests":{"cpu":"200m","memory":"256Mi"}}
+----
+
+.Work *with* the namespace guardrails
+[%collapsible]
+====
+Your namespace also carries a *ResourceQuota* that caps the *total* every pod in it may request.
+Right-sizing requests is what keeps you inside it: a request is a reservation, and asking for more than you use wastes the namespace's headroom.
+Authoring that quota, and seeing what happens when a workload asks for more than its share, is xref:multi-tenancy-workload-security/lab.adoc[Multi-Tenancy & Workload Security].
+====
+
+[.checkpoint]
+****
+✔ *Verify:* `oc get deploy parasol-claims -o jsonpath='{.spec.template.spec.containers[0].resources}'` shows CPU `200m`/`500m` and memory `256Mi`/`512Mi`, you read `reason=OOMKilled exitCode=137` from the too-small limit, and one claims pod runs `1/1`.
+****
+
+== 4. Autoscale under load with an HPA
+⏱ *~8 min* · add replicas automatically when CPU climbs, and watch it happen
+
+Monday, 9 a.m.: every adjuster signs in at once, and the claims service runs at a fixed replica count.
+Let it add its own replicas instead of paging someone to scale it.
+
+*You'll end with:* a *HorizontalPodAutoscaler (HPA)* that grew `parasol-claims` from 2 to 4 pods under load.
+
+.Where Topology actually shows the scale-out — the Resources panel, not the ring
+image::health-resources-autoscaling/health-resources-autoscaling-05-topology-hpa-scale.png["OpenShift Topology view for the attendee's dev project with the Resources side panel open for the parasol-claims Deployment. The Pods section is headed \"View all 4\" and lists three pod rows, each reading Running, then a HorizontalPodAutoscalers section listing the parasol-claims HPA, followed by Services and Routes sections below."]
+
+The HPA compares CPU use with the container's CPU *request* — the `200m` you set in exercise 3 — and adds or removes replicas to hold its target:
+
+[mermaid]
+....
+include::example$diagrams/health-resources-autoscaling/05-hpa-loop.mmd[]
+....
+
+Create an HPA that targets *60% CPU utilization*, floor *2* replicas, ceiling *4*:
+
+[tabs]
+====
+Console::
++
+--
+. Open *Workloads* → *Deployments* → `parasol-claims` → *Actions* → *Add HorizontalPodAutoscaler*.
+// Ported from observability-health-scale ex6 (grounded 2026-07-30 on OCP 4.22.5 as user1): the item
+// opens a full page with Form view default and fields Name, Minimum Pods, Maximum Pods, CPU
+// Utilization, Memory Utilization.
+. Set *Minimum Pods* `2`, *Maximum Pods* `4`, *CPU Utilization* `60%`, and *Save*.
+For about a minute it shows `<unknown>` and no replicas of its own while it waits for its first CPU sample: not a fault.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc autoscale deploy/parasol-claims --cpu=60% --min=2 --max=4
+oc get hpa parasol-claims
+----
+
+// Settled reading measured in observability-health-scale (2026-08-14, user5): idle utilization read
+// 4-13% across five floors against the same 200m request. UNVERIFIED for this module's entry state
+// (no OpenTelemetry export here, so the idle reading may be a little lower).
+.Expected output, once settled (TARGETS shows current/target utilization)
+[%collapsible]
+=====
+[source,texinfo]
+----
+horizontalpodautoscaler.autoscaling/parasol-claims autoscaled
+NAME             REFERENCE                   TARGETS       MINPODS   MAXPODS   REPLICAS
+parasol-claims   Deployment/parasol-claims   cpu: 9%/60%   2         4         2
+----
+=====
+
+.First reading shows `<unknown>` and `0`?
+[%collapsible]
+=====
+That is normal for a brand-new HPA: it has no metrics sample yet, so the first `oc get hpa` typically shows `TARGETS <unknown>/60%` and `REPLICAS 0`.
+It settles to a real percentage with 2 replicas in about a minute — re-run the `oc get hpa` line then.
+If it *stays* `<unknown>`, the container has no CPU request to measure against: check exercise 3's values.
+=====
+--
+====
+
+Now *drive load*: the built-in trickle from the `claims-load` generator does not move CPU, so add a short burst of concurrent traffic (you delete it after):
+
+// IMAGE REFERENCE — do not "simplify" this back to a tag: the el8 `openshift4/ose-cli` repository's
+// only short tag, `latest`, has been frozen on v4.15.0 since 2025-09-25. The string below is
+// byte-identical to this module's own entry-state load generator (templates/load-generator.yaml).
+[source,sh,role=execute]
+----
+oc run claims-burst --restart=Never \
+  --image=registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19 \
+  -- /bin/bash -c 'for i in $(seq 1 20); do ( while true; do \
+    curl -s -o /dev/null http://parasol-claims:8080/api/claims/CLM-1001/history; \
+    curl -s -o /dev/null http://parasol-claims:8080/api/claims; done ) & done; wait'
+----
+
+.Why the long `@sha256:…`?
+[%collapsible]
+====
+It is the same *digest-pinned* `oc` image the load generator in your namespace already runs, so your burst is the exact same bytes as everyone else's.
+A floating `:latest` would be whatever the registry served that minute.
+====
+
+Watch it scale, in either lane:
+
+[tabs]
+====
+Console::
++
+--
+Open *Topology*, click the `parasol-claims` node, and watch the *Resources* panel's *Pods* list grow from 2 to 4 (pictured above); the status ring does not change with the pod count.
+// Ported from observability-health-scale ex6 (grounded 2026-07-30/31 on OCP 4.22.5): the Topology
+// ring is pixel-identical at 2 and 4 replicas; only the Resources panel's Pods list shows the count.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc get hpa parasol-claims -w
+----
+
+// Transcript from observability-health-scale ex6, run 5 (2026-08-14, user5, OCP 4.22.8), same burst
+// and same 200m request. UNVERIFIED for this module — re-capture in Part B.
+.Expected output (sample; Ctrl-C to stop — utilization spikes well past 60%, replicas climb to the ceiling)
+[%collapsible]
+=====
+[source,texinfo]
+----
+NAME             REFERENCE                   TARGETS       MINPODS   MAXPODS   REPLICAS   AGE
+parasol-claims   Deployment/parasol-claims   cpu: 9%/60%   2         4         2          7m18s
+parasol-claims   Deployment/parasol-claims   cpu: 100%/60%   2         4         2          7m49s
+parasol-claims   Deployment/parasol-claims   cpu: 167%/60%   2         4         4          8m4s
+parasol-claims   Deployment/parasol-claims   cpu: 174%/60%   2         4         4          8m19s
+parasol-claims   Deployment/parasol-claims   cpu: 132%/60%   2         4         4          8m34s
+----
+=====
+--
+====
+
+*What just happened:* CPU shot well past 60% of the request and the HPA added pods up to its *ceiling of 4*.
+Its *decision* is instant, but it waits on the CPU measurement and then on the new pods, so give it a couple of minutes before you decide something is wrong.
+
+// Ported numbers: observability-health-scale ex6, five timed runs as user5 on OCP 4.22.8,
+// 2026-08-14 (42/47/70/83/115 s to 4 replicas; 24-40 s before CPU first read over 60%; peaks
+// 132-250%). UNVERIFIED for this module's entry state — re-measure in Part B and update both this
+// block and instructor.adoc's timing row.
+.Where the minute or two goes
+[%collapsible]
+====
+Measured with the same burst against the same `200m` request, reaching 4 replicas took between *42* and *115 seconds* from pressing enter, and CPU peaked between *132%* and *250%* of the request.
+The burst image does not pull — every node already has it — so the time is the *metrics* path: CPU has to be sampled and handed to the autoscaler, which took *24–40 seconds* before it first read above 60%.
+The climb is also often a *staircase*, 2 → 3 → 4, and each step waits on a fresh sample.
+====
+
+Stop the load and clean up the burst pod:
+
+[source,sh,role=execute]
+----
+oc delete pod claims-burst
+----
+
+[NOTE]
+.Scale-down is deliberately slow
+====
+`TARGETS` falls below 60% while `REPLICAS` stays at 4 for several minutes: the HPA holds them for a *5-minute stabilization window* by default, so a brief lull does not trigger a shrink-then-grow flap.
+That is correct behavior, not a stuck autoscaler.
+====
+
+Grade the whole module:
+
+[source,sh,role=execute]
+----
+ws verify health-resources-autoscaling
+----
+
+[.checkpoint]
+****
+✔ *Verify:* `oc get hpa parasol-claims` shows a CPU-targeted HPA (min 2, max 4), you watched `REPLICAS` climb to 4 while `TARGETS` spiked past 60% — or saw the *Resources* panel list the new pods — and `ws verify health-resources-autoscaling` ends with every check ✅.
+****
+
+== Challenge (optional)
+
+Take the claims *database* away — scale `claims-db` to `0` — and keep sending requests to the claims Route.
+
+* Which probe fails on the claims pods: readiness, liveness, or both?
+* Do the claims pods restart?
+* What does the Route return, and when does it change?
+
+Then bring it back. Hint: the database alone is not enough — the claims pods hold on to their broken database connections until they restart.
+
+.One answer
+[%collapsible]
+====
+// UNVERIFIED until Part B as this module's step. Behavior ported from observability-health-scale
+// ex4 (2026-07-11 / 2026-07-19): requests 500 while the pool drains, then 503 about a minute in once
+// readiness pulls the pod; the app kept erroring until `oc rollout restart` after the DB returned.
+Readiness fails — the claims service's `/q/health/ready` includes its database connection — so the pods leave the Service and the Route turns from `500` to `503` within about a minute.
+Liveness keeps passing, so *nothing restarts*: the platform waits for the dependency instead of killing healthy processes.
+
+[source,sh,role=execute]
+----
+oc scale deploy/claims-db --replicas=1
+oc rollout status deploy/claims-db
+oc rollout restart deploy/parasol-claims
+oc rollout status deploy/parasol-claims
+----
+====
+
+endif::demo[]

@@ -1,0 +1,139 @@
+= Health, Resources & Autoscaling: Troubleshooting
+:module-id: health-resources-autoscaling
+include::partial$version-attributes.adoc[]
+
+// Format: Symptom / Cause / Fix. Entries ported from config-multienv and observability-health-scale
+// troubleshooting (3c3215e6) keep their measured provenance in the footer; the OOMKilled and liveness
+// entries are new and UNVERIFIED until Part B.
+
+Every entry below is a failure mode the lab produces on purpose, or one that came up while building the exercises it is made from.
+
+== I broke the readiness probe but the Route stayed `200`
+
+Symptom:: After `oc set probe … --readiness --get-url=http://:8080/q/health/typo`, a new pod sits at `0/1`, the old one keeps running, and the Route still answers `200`.
+Cause:: Nothing is wrong. The probe change started a rolling update, and the rollout is gated by readiness: the new pod never becomes ready, so it never replaces the old one.
+Fix:: To see the `503`, every pod has to carry the broken probe — scale to zero and back, as the lab does:
++
+[source,sh,role=execute]
+----
+oc scale deploy/parasol-claims --replicas=0
+oc scale deploy/parasol-claims --replicas=1
+----
++
+Deleting a pod does not do it: the old ReplicaSet recreates a ready one.
+
+== The Route returns `503`, or the router's error page, right after a probe or resource change
+
+Symptom:: `oc rollout status` says `successfully rolled out`, but the next `curl` returns `503` or an HTML error page.
+Cause:: The old pod is still shutting down, and the router refreshes its list of backends only every few seconds, so a request can still be routed to the address that just left.
+Fix:: Wait for one pod and a few seconds, then retry — the lab's blocks already do:
++
+[source,sh,role=execute]
+----
+for i in $(seq 1 45); do [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ] && break; sleep 2; done
+sleep 10
+curl -sf --retry 30 --retry-all-errors --retry-delay 2 -o /dev/null -w "Route: %{http_code}\n" \
+  "http://$(oc get route parasol-claims -o jsonpath='{.spec.host}')/api/claims"
+----
+
+== The claims pod keeps restarting, and its logs show nothing wrong
+
+Symptom:: `RESTARTS` climbs every half minute or so; `oc logs` shows a normal startup each time.
+Cause:: A liveness probe on a path the app does not serve — exercise 2's typo `/q/health/alive`, left in place.
+The kubelet reads three `404`s as "wedged" and restarts a healthy container.
+`oc describe pod -l app=parasol-claims` shows `Liveness probe failed: HTTP probe failed with statuscode: 404` and `failed liveness probe, will be restarted`.
+Fix:: Point liveness at the real endpoint:
++
+[source,sh,role=execute]
+----
+oc set probe deploy/parasol-claims --liveness --get-url=http://:8080/q/health/live --period-seconds=10 --failure-threshold=3
+oc rollout status deploy/parasol-claims
+----
+
+== A new pod shows `OOMKilled` or `CrashLoopBackOff` after I changed resources
+
+Symptom:: After `oc set resources`, the new pod never becomes ready; its `STATUS` alternates between `OOMKilled` and `CrashLoopBackOff`, and `oc logs --previous` ends mid-startup with no error.
+Cause:: The memory limit is below what the Java runtime needs to start, so the kernel kills the container (exit code `137`).
+That is exercise 3's deliberate break; outside it, a limit typed as `128M` instead of `512Mi` does the same.
+Confirm it:
++
+[source,sh,role=execute]
+----
+BAD=$(oc get pods -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')
+oc get pod "$BAD" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason} {.status.containerStatuses[0].lastState.terminated.exitCode}{"\n"}'
+----
+Fix:: Put the memory back to what the app needs:
++
+[source,sh,role=execute]
+----
+oc set resources deploy/parasol-claims --requests=memory=256Mi --limits=memory=512Mi
+oc rollout status deploy/parasol-claims
+----
+
+// UNVERIFIED until Part B: whether a start attempt killed at 128Mi gets far enough to drop the schema.
+== The claims API returns `500` while the `OOMKilled` pod is crash-looping
+
+Symptom:: During exercise 3's break, the old pod is still `1/1`, but `curl …/api/claims` sometimes returns `500`.
+Cause:: The claims service recreates and re-seeds its database schema every time it starts, and every replica shares the one `claims-db`.
+A start attempt that is killed partway through that step can leave the tables missing until the next start completes it.
+Fix:: Restore the memory limit (previous entry). The rollout's new pod finishes the schema and seed on start, and the `500`s stop.
+
+== `must be less than or equal to memory limit`
+
+Symptom:: `oc set resources` fails with `Invalid value: "256Mi": must be less than or equal to memory limit`.
+Cause:: A request may never exceed its limit. Lowering only `--limits=memory=128Mi` leaves the `256Mi` request above it.
+Fix:: Set both together, as the lab does: `--requests=memory=128Mi --limits=memory=128Mi`.
+
+== My HPA shows `<unknown>/60%` and is not scaling
+
+Symptom:: Just after `oc autoscale`, `oc get hpa` shows `TARGETS` as `<unknown>/60%` and `REPLICAS 0`.
+Cause:: Either the metrics pipeline has not reported CPU for the new HPA yet (it takes about a minute), or the container has no CPU *request*, so utilization cannot be computed.
+Fix:: Wait a minute and re-check.
+If it stays `<unknown>`, confirm the request exercise 3 sets:
++
+[source,sh,role=execute]
+----
+oc get deploy parasol-claims -o jsonpath='{.spec.template.spec.containers[0].resources.requests.cpu}{"\n"}'
+----
++
+It should print `200m`; if it is empty, run exercise 3's `oc set resources` again.
+
+== The burst is running but `REPLICAS` is still 2
+
+Symptom:: `claims-burst` is `Running`, but `oc get hpa` still shows `REPLICAS 2` after a minute.
+Cause:: Almost always, not enough time yet.
+In five measured runs `REPLICAS` reached 4 between *42 and 115 seconds* after the burst started: CPU has to be sampled before the HPA sees it over target (*24–40 s*), and the climb often steps 2 → 3 → 4.
+Fix:: Watch rather than re-run — `oc get hpa parasol-claims -w` — and give it two minutes.
+If `TARGETS` is still at its idle reading after that, check that the burst is actually sending traffic:
++
+[source,sh,role=execute]
+----
+oc get pod claims-burst
+oc adm top pod claims-burst
+----
++
+A working burst reads hundreds of millicores. Single digits means it is not driving load: delete it and run the lab's `oc run` block again by clicking it rather than retyping it.
+
+== `claims-burst` is stuck in `ImagePullBackOff`
+
+Symptom:: `claims-burst` never starts; `oc get pods` shows `ErrImagePull` or `ImagePullBackOff`.
+Cause:: The burst pulls its image from `registry.redhat.io`, which needs the cluster's pull secret — or the image reference was cut short when copied by hand.
+Fix:: Check the `claims-load` generator, which runs the very same image:
++
+[source,sh,role=execute]
+----
+oc get pods -l app=claims-load
+----
++
+If `claims-load` is `Running`, the image is fine: delete the burst (`oc delete pod claims-burst`) and run the lab's block again by clicking it.
+If `claims-load` is also stuck pulling, the cluster's pull secret is the problem — tell your instructor.
+
+== The HPA will not scale back down after I stop the load
+
+Symptom:: `TARGETS` fell below 60%, but `REPLICAS` stays at 4 for minutes.
+Cause:: The default *5-minute scale-down stabilization window*, which keeps a brief lull from shrinking the service just before the next burst.
+Fix:: Nothing — this is correct. It steps back toward the floor of 2 after about five minutes.
+
+'''
+
+_Last verified: the readiness, rollout-timing and burst entries on the build cluster in the modules these exercises came from — readiness on OCP 4.21.22 (2026-07-09, re-proven on OCP 4.22.22 on 2026-11-12), HPA timing on OCP 4.22.8 (five runs, 2026-08-14). The liveness, `OOMKilled`, `500`-during-OOM and request-over-limit entries are new on 2026-11-14 and not yet confirmed on a cluster._
