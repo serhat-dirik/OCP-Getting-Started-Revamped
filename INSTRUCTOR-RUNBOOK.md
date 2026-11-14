@@ -52,6 +52,8 @@ export PATH="$PWD/tools/ws:$PATH"
    a numbered list where each attendee claims a user, so no two people take the same one.
    - Showroom: `https://ogsr-showroom.<apps>`. Log in as `userN` with the workshop password on the
      Keycloak sign-in page. That one sign-in covers the Console, Dev Spaces and Argo CD tabs.
+   - To switch user: **Sign out** (instructions header, beside `You are userN`), confirm on the Keycloak
+     page, then sign in as the other user. Gitea, Dev Hub and SonarQube keep their own sign-in.
 4. **Check the cohort:** `tools/ws/adm status` must end with
    `shared cockpit showroom-shared ✅ 1/1 · terminal pods ✅ N/N` and `platform all-Synced ✅`.
 5. **Last check:** `tools/ws/adm ready` must end with `✅ workshop ready`.

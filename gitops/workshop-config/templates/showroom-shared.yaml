@@ -212,6 +212,11 @@ rules:
   - apiGroups: ["oauth.openshift.io"]
     resources: ["oauthclients"]
     verbs: ["create"]
+  # Read-only, one object: the cockpit's Sign out must end the IdP's own session (see the Job).
+  - apiGroups: ["config.openshift.io"]
+    resources: ["oauths"]
+    verbs: ["get"]
+    resourceNames: ["cluster"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -252,6 +257,14 @@ rules:
     resourceNames: [{{ $clientSecretName | quote }}]
   - apiGroups: [""]
     resources: ["secrets"]
+    verbs: ["create"]
+  # The sign-out IdP hint (not a secret): `oc apply` needs get + patch, or create the first time.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "patch"]
+    resourceNames: [{{ printf "%s-idp" $name | quote }}]
+  - apiGroups: [""]
+    resources: ["configmaps"]
     verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -316,6 +329,8 @@ spec:
               value: {{ $clientId | quote }}
             - name: REDIRECT_URI
               value: {{ $redirectUri | quote }}
+            - name: IDP_CM
+              value: {{ printf "%s-idp" $name | quote }}
           volumeMounts:
             # Memory-backed: the plaintext client secret touches this filesystem and nothing else, and
             # a tmpfs never reaches a disk or a node-local layer. Same choice as the credential handoff
@@ -494,6 +509,24 @@ spec:
               FILE_H="$(sha256sum < "$TMPD/clientSecret" | cut -d' ' -f1)"
               [[ "$LIVE_H" == "$FILE_H" ]] || die "OAuthClient/${CLIENT_ID}.secret does not match ${NS}/${SECRET_NAME} after converging — every login would fail. fix: oc delete oauthclient ${CLIENT_ID} && re-sync workshop-config"
               ok "OAuthClient/${CLIENT_ID} and ${NS}/${SECRET_NAME} agree (sha256 compared, neither value printed)"
+
+              # SIGN-OUT: WHICH IdP SESSION TO END. OpenShift's logout cannot end the identity
+              # provider's own SSO session, and while that lives the next sign-in is silently the same
+              # user (RHDP: Keycloak). The cockpit's sign-out page reads "<issuer> <clientID>" from
+              # this ConfigMap at /ogsr/idp and finds the end-session endpoint by OIDC discovery in the
+              # browser. First OpenID IdP only; none (htpasswd) stores "" = no IdP hop.
+              # NOT FATAL: a failure here degrades Sign out to "same user again"; the cockpit still runs.
+              # ponytail: first OpenID IdP only — several OpenID IdPs would need a chooser on the page.
+              if IDP="$(oc get oauths.config.openshift.io cluster -o jsonpath='{range .spec.identityProviders[?(@.type=="OpenID")]}{.openID.issuer} {.openID.clientID}{"\n"}{end}' 2>"$TMPD/err")" \
+                 && IDP="${IDP%%$'\n'*}" \
+                 && oc create configmap "$IDP_CM" -n "$NS" --from-literal=idp="$IDP" --dry-run=client -o yaml \
+                    | oc label --local -f - workshop.redhat.com/layer=workshop-config workshop.redhat.com/owner=ogsr -o yaml \
+                    | oc apply -f - >/dev/null 2>>"$TMPD/err"; then
+                ok "sign-out IdP hop: ${IDP:-none (no OpenID identity provider; Sign out ends the cockpit and OpenShift sessions)}"
+              else
+                err "sign-out IdP hint not stored: $(tr '\n' ' ' < "$TMPD/err")"
+                err "Sign out will not end the IdP session, so the next sign-in may be the same user. fix: re-sync workshop-config"
+              fi
       volumes:
         - name: scratch
           emptyDir:
@@ -594,6 +627,13 @@ data:
         # X-Forwarded-User here and be routed to that attendee's shell.
         listen 127.0.0.1:8080;
         absolute_redirect off;
+        # SIGN OUT — the "Sign out" link in the instructions header (page-signout below) opens
+        # /ogsr/sign-out; sign-out.html (this ConfigMap) holds the chain. /ogsr/signed-out is the same
+        # file as the landing page, and the ONE path oauth-proxy serves without a sign-in
+        # (--skip-auth-regex). /ogsr/idp is the Job's IdP hint; absent = no IdP hop.
+        location = /ogsr/sign-out   { alias /etc/ogsr/sign-out.html; default_type text/html; add_header Cache-Control no-store; }
+        location = /ogsr/signed-out { alias /etc/ogsr/sign-out.html; default_type text/html; add_header Cache-Control no-store; }
+        location = /ogsr/idp        { alias /etc/ogsr-idp/idp; default_type text/plain; add_header Cache-Control no-store; }
         location / {
           if ($ws_identity_missing) {
             return 503 "cockpit: no authenticated identity (X-Forwarded-User absent) - refusing to serve content with an empty username";
@@ -659,6 +699,60 @@ data:
         }
       }
     }
+  # The cockpit's Sign out (owner ask 2026-11-14). THREE sessions keep a browser signed in, and
+  # ending only the first just signs the attendee straight back in as the same user:
+  #   1 oauth-proxy's cookie      GET /oauth/sign_out — fetched, not followed: it ignores ?rd= and
+  #                               always redirects to /, which would start a fresh sign-in at once;
+  #   2 OpenShift OAuth's session POST <oauth-openshift>/logout — POST only (GET is 405), and its
+  #                               ?then= accepts relative paths only, so it cannot chain onward;
+  #   3 the IdP's SSO session     OIDC RP-initiated logout as a top-level navigation, returning to
+  #                               /ogsr/signed-out. Keycloak asks "Do you want to log out?" because
+  #                               no id_token_hint exists here (OpenShift keeps the ID token).
+  # Measured on 4.22 / RHBK 2026-11-14. Tool tabs: see the landing text.
+  sign-out.html: |
+    <!doctype html>
+    <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Cockpit sign-out</title>
+    <style>
+      body{font:16px/1.5 "Red Hat Text",system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem;color:#151515}
+      a.btn{display:inline-block;background:#e00;color:#fff;padding:.5rem 1.5rem;border-radius:4px;text-decoration:none;font-weight:600}
+    </style></head>
+    <body>
+    <p id="busy">Signing out&hellip;</p>
+    <main id="out" hidden>
+      <h1>You are signed out</h1>
+      <p><a class="btn" href="/oauth/start">Sign in</a></p>
+      <p>Sign in as the same user or a different one. The OCP Console, Dev Spaces and Argo CD tabs follow the new sign-in by themselves.</p>
+      <p>Gitea, Developer Hub and SonarQube remember their own sign-in. To switch user there, sign out inside those tabs too, or use a private browser window.</p>
+    </main>
+    <script>
+    (async () => {
+      const landing = location.origin + '/ogsr/signed-out';
+      if (location.pathname === '/ogsr/signed-out') {
+        document.getElementById('busy').hidden = true;
+        document.getElementById('out').hidden = false;
+        return;
+      }
+      let next = landing;
+      try { // read BEFORE hop 1: /ogsr/idp sits behind the cookie hop 1 clears
+        const r = await fetch('/ogsr/idp', { cache: 'no-store' });
+        const [issuer, client] = r.ok ? (await r.text()).trim().split(/\s+/) : [];
+        if (issuer && client) {
+          const d = await (await fetch(issuer.replace(/\/$/, '') + '/.well-known/openid-configuration')).json();
+          if (d.end_session_endpoint) {
+            next = d.end_session_endpoint + '?client_id=' + encodeURIComponent(client) +
+                   '&post_logout_redirect_uri=' + encodeURIComponent(landing);
+          }
+        }
+      } catch (e) { console.warn('cockpit sign-out: no IdP hop', e); }
+      await Promise.allSettled([
+        fetch('/oauth/sign_out', { redirect: 'manual' }),
+        fetch('https://oauth-openshift.{{ $domain }}/logout', { method: 'POST', mode: 'no-cors', credentials: 'include' }),
+      ]);
+      location.replace(next);
+    })();
+    </script>
+    </body></html>
 ---
 # Build-time attributes for the ONE build. Every environment value is real; only the identity is a
 # sentinel, because it is the only one that differs per reader.
@@ -675,6 +769,9 @@ metadata:
 data:
   user_data.yml: |
 {{- include "workshop-config.showroomUserData" (dict "user" "__WS_USER__" "domain" $domain "giteaHost" $giteaHost "disabledModules" $disabledModules "root" $) }}
+    # Shows "Sign out" beside "You are <user>" (content/supplemental-ui/partials/header-content.hbs).
+    # Only this cockpit sets it: per-user cockpits and Pages builds have no sign-in to end.
+    page-signout: /ogsr/sign-out
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -793,7 +890,8 @@ spec:
                 --cookie-expire=24h \
                 --cookie-refresh=4h \
                 --pass-access-token=true \
-                --pass-user-headers=true
+                --pass-user-headers=true \
+                --skip-auth-regex='^/ogsr/signed-out$'
           # Every flag above was read out of THIS image's own `--help` on 2026-08-16, not recalled:
           #   -client-id string / -client-secret-file string "a file containing the client-secret"
           #   -scope string "OAuth scope specification"
@@ -865,6 +963,13 @@ spec:
             - name: nginx-config
               mountPath: /etc/nginx/nginx.conf
               subPath: nginx.conf
+            # sign-out.html, served at /ogsr/sign-out and /ogsr/signed-out.
+            - name: nginx-config
+              mountPath: /etc/ogsr
+              readOnly: true
+            - name: idp
+              mountPath: /etc/ogsr-idp
+              readOnly: true
             - name: nginx-cache
               mountPath: /var/cache/nginx
             - name: nginx-pid
@@ -910,7 +1015,7 @@ spec:
                   # removed and every route answers CSP frame-ancestors 'self' https://*.<apps>, so the console, Gitea,
                   # Dev Spaces, Argo CD, Developer Hub and SonarQube render inside the cockpit and keep their logins
                   # (same apps domain, so their cookies are same-site).
-                  # Dev Spaces and Argo CD point at their sign-in START endpoints, not their landing pages: every
+                  # The Console, Dev Spaces and Argo CD point at their sign-in START endpoints, not their landing pages: every
                   # tab loads when the cockpit loads, right after the cockpit sign-in, while the OpenShift OAuth
                   # session (sessionMaxAgeSeconds 300) is still valid, so their sign-in completes silently. A
                   # landing page waits for a click, and a click after 5 min hits the login page, which no frame shows.
@@ -935,6 +1040,11 @@ spec:
           configMap:
             name: {{ $name }}-proxy
             defaultMode: 420
+        # Written by the bootstrap Job (sign-out IdP hint). Optional: absent = Sign out skips the IdP hop.
+        - name: idp
+          configMap:
+            name: {{ $name }}-idp
+            optional: true
         - name: nginx-cache
           emptyDir: {}
         - name: nginx-pid

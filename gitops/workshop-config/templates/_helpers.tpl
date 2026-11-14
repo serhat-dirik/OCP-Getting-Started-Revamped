@@ -146,7 +146,10 @@ showroom.toolTabs (bootstrap/vars.yaml cockpit_tool_tabs, resolved by bootstrap/
             OpenShift OAuth, and on this cluster oauth-openshift renders its own chooser/login page,
             which (passthrough route) no browser shows in a frame. Gitea, Dev Hub and SonarQube have
             their own logins and stay embedded.
-Dev Spaces and Argo CD point at their sign-in START endpoints, which work as new-tab links too.
+The Console, Dev Spaces and Argo CD point at their sign-in START endpoints, which work as new-tab links
+too. Each cockpit load therefore re-signs them in as whoever just signed in to the cockpit: after the
+cockpit's Sign out and a sign-in as someone else they follow the new user, where a landing page would
+keep the previous user's session cookie.
 */}}
 {{- define "workshop-config.toolTabs" -}}
 {{- $mode := .Values.showroom.toolTabs | default "embedded" -}}
@@ -155,7 +158,7 @@ Dev Spaces and Argo CD point at their sign-in START endpoints, which work as new
 {{- end -}}
 {{- $d := .Values.clusterDomain -}}
 {{- range $t := list
-  (list "OCP Console" (printf "https://console-openshift-console.%s" $d) true)
+  (list "OCP Console" (printf "https://console-openshift-console.%s/auth/login" $d) true)
   (list "Gitea" (printf "https://gitea-%s.%s" $.Values.giteaNamespace $d) false)
   (list "Dev Spaces" (printf "https://devspaces.%s/oauth/start?rd=%%2Fdashboard%%2F" $d) true)
   (list "Argo CD" (printf "https://student-gitops-server-student-gitops.%s/auth/login?return_url=https%%3A%%2F%%2Fstudent-gitops-server-student-gitops.%s%%2Fapplications" $d $d) true)

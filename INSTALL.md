@@ -202,6 +202,9 @@ Both floors exist for one module, `deployment-targets-scheduling`:
    | Showroom (attendees) | `https://ogsr-showroom.<apps>` |
    | Etherpad (shared notes) | `https://ogsr-pad.<apps>/p/workshop` |
 
+   To switch the cockpit to another user, use **Sign out** in the instructions header. It ends the
+   cockpit, OpenShift and identity-provider sessions, so the next sign-in asks for credentials.
+
    Then spot-check one module:
 
    ```bash
