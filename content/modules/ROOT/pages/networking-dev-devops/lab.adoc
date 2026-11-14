@@ -33,7 +33,7 @@ include::partial$prereq-ws-start.adoc[]
 .Highlighted: what you build in this module
 image::solution-map/networking-dev-devops.svg["The Parasol solution map with this module's pieces highlighted: Routes & gateways, Network isolation, Users, parasol-web, parasol-claims and claims-db.",width=900]
 
-Set two shortcuts you will reuse throughout the lab — your app namespace and your partner namespace:
+Set two shortcuts for the whole lab, your app and partner namespaces:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -42,18 +42,19 @@ PARTNER={user}-partner
 echo "app: $NS   partner (UDN): $PARTNER"
 ----
 
-You are the platform engineer for Parasol's *claims* application.
-It is three tiers living in `{user}-dev` — `parasol-web` (the front end), `parasol-claims` (the API), and `claims-db` (Postgres) — plus a `demo-client` pod you will use as a *probe*, standing in for "some other workload that happens to share the namespace."
-Right now the network is flat and open: everything can reach everything, and nothing is reachable from outside.
-In this lab you expose the front end deliberately, lock the namespace down to only the flows the app needs, prove an unauthorized pod can no longer reach the database, and finally meet a *partner* namespace that is isolated *natively* — with no policy at all.
+You run the network for Parasol's *claims* app: `parasol-web` (front end), `parasol-claims` (API) and `claims-db` (Postgres) in `{user}-dev`, plus a `demo-client` *probe* pod standing in for "some other workload that happens to share the namespace."
+Today the network is flat: everything reaches everything, and nothing is reachable from outside.
+By the end, the front end is the one door in, the database answers only the API, and a *partner* namespace is isolated with no policy at all.
 
-[TIP]
-.Two ways for most steps; a few are terminal-only
+TIP: Most steps have *Console* and *CLI* tabs. Terminal reconnected? Re-run your exercise's first block: it sets `$NS` and `$PARTNER`.
+
+.Console or CLI, and the terminal-only steps
+[%collapsible]
 ====
-Most steps below are offered two ways: the *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`), the *CLI* tab uses `oc` in the *Terminal* tab beside these instructions.
+The *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`); the *CLI* tab uses `oc` in the *Terminal* tab beside these instructions.
 Pick a path once — the tabs stay in sync across the page.
 A few steps are *terminal-only* because the console adds nothing: the throwaway NodePort/LoadBalancer asides, the in-pod reachability probes, and the Gateway API reads are quickest in the terminal.
-The `$NS`/`$PARTNER` shortcuts live only in this terminal, so every exercise sets them again in its first block: *if your terminal reconnects, run the first block of the exercise you are in again* — in exercise 1 that is the block above.
+The `$NS`/`$PARTNER` shortcuts live only in this terminal, so every exercise sets them again in its first block — in exercise 1 that is the block above.
 ====
 endif::demo[]
 
@@ -300,8 +301,16 @@ ifndef::demo[]
 == 1. Map the network and trace a packet
 ⏱ *~4 min* · see the flat network, then break a Service selector and fix it
 
-Start by seeing what you have.
-Three Services front the three tiers, and all of them are *ClusterIP* — in-cluster only, nothing exposed:
+A security review will ask "what can reach the claims database?" Map the network first.
+
+*You'll end with:* each Service traced to its pods, proof the network is flat, and one Service broken and fixed.
+
+[mermaid]
+....
+include::example$diagrams/networking-dev-devops/07-service-to-pod.mmd[]
+....
+
+List the Services — all three are *ClusterIP*, in-cluster only:
 
 // Console path verified live on OCP 4.22.5, 2026-07-26. NOTE the list does NOT carry Type or Cluster IP
 // columns (it is Name / Labels / Pod selector / Location); the type lives on the Service detail page.
@@ -310,9 +319,9 @@ Three Services front the three tiers, and all of them are *ClusterIP* — in-clu
 Console::
 +
 --
-In the {ocp_console_url}[web console^] (project `{user}-dev`), open *Networking* → *Services*.
-You see `claims-db`, `parasol-claims`, and `parasol-web`. The *Location* column gives each one an internal address and port — and that is the only address on the page. Nothing here is reachable from outside the cluster.
-Click `parasol-claims` and read the *Service address* table: *Type* is *Cluster IP*, annotated *"Accessible within the cluster only"*. The *Hostname* above it is the in-cluster DNS name other pods use, `parasol-claims.{user}-dev.svc.cluster.local`.
+. In the {ocp_console_url}[web console^] (project `{user}-dev`), open *Networking* → *Services*.
+. *Location* gives each Service one internal address and port, and nothing else.
+. Click `parasol-claims`: in the *Service address* table, *Type* is *Cluster IP*, "Accessible within the cluster only"; *Hostname* is the in-cluster DNS name, `parasol-claims.{user}-dev.svc.cluster.local`.
 
 image::networking-dev-devops/networking-dev-devops-01-services-clusterip.png["The project's Services list: claims-db, parasol-claims and parasol-web, with columns Name, Labels, Pod selector and Location. There is no Type column on this page — the Location column is the evidence. Each Service shows one internal address and port (a 172.x cluster IP on 5432 or 8080) and nothing else. No external address exists anywhere on the page, which is exactly what ClusterIP means; the word itself is on each Service's own detail page, one click further in."]
 --
@@ -335,8 +344,7 @@ parasol-claims   ClusterIP   172.231.17.243    <none>        8080/TCP   2m
 parasol-web      ClusterIP   172.231.158.209   <none>        8080/TCP   2m
 ----
 
-A Service is only half the story — behind it are *endpoints*, the actual pod IPs it load-balances to.
-The endpoints are what a packet is really delivered to:
+Behind each Service sit *endpoints*, the pod IPs a packet is actually delivered to:
 
 [source,sh,role=execute]
 ----
@@ -353,8 +361,7 @@ parasol-claims   10.233.0.44:8080   2m
 parasol-web      10.234.0.29:8080   2m
 ----
 
-Now feel how *flat* this network is.
-The `demo-client` pod is not part of the app — but it can open a TCP connection to *every* tier, including the database:
+Probe every tier from `demo-client`, a pod that is not part of the app:
 
 [source,sh,role=execute]
 ----
@@ -371,11 +378,10 @@ demo-client -> parasol-claims:8080 : OPEN
 demo-client -> parasol-web:8080    : OPEN
 ----
 
-Every port on every tier is reachable from a pod that has nothing to do with the app.
-That is the default, and it is what you will fix.
+*What just happened:* an unrelated pod reached every port on every tier, the database included.
+That is the default, and what you will fix.
 
-First, though, meet the *most common networking bug there is* — deliberately.
-A Service finds its pods by a *label selector*; point it at a label no pod has, and the Service still "exists" but resolves to *nothing*:
+*Now break it on purpose.* A Service finds its pods by *label selector*; point it at a label no pod has:
 
 // Grounded 2026-07-30 on OCP 4.22.5, signed in as an attendee (user1), viewport 1600x1000.
 // Service `parasol-claims` (user1-dev) detail Actions menu: Edit Pod selector · Edit labels ·
@@ -387,9 +393,9 @@ A Service finds its pods by a *label selector*; point it at a label no pod has, 
 Console::
 +
 --
-Open *Networking* → *Services* → `parasol-claims` → *Actions* → *Edit Service* (YAML).
-Under `spec.selector`, change `app: parasol-claims` to `app: parasol-claims-TYPO` and *Save*.
-Open the *Pods* / *Details* view — the Service now has *no* endpoints.
+. Open *Networking* → *Services* → `parasol-claims` → *Actions* → *Edit Service* (YAML).
+. Under `spec.selector`, change `app: parasol-claims` to `app: parasol-claims-TYPO` and *Save*.
+. Open the *Pods* / *Details* view: the Service has *no* endpoints.
 --
 CLI::
 +
@@ -420,9 +426,10 @@ parasol-claims   <none>      3m
 demo-client -> parasol-claims:8080 now: NO ENDPOINTS — connection refused
 ----
 
-`ENDPOINTS <none>` — the Service is green, the DNS name resolves, and every connection fails.
-No firewall did this; a one-character selector typo did.
-Now *fix it* by restoring the correct selector:
+*What just happened:* `ENDPOINTS <none>`. The Service exists and its name resolves, yet every connection fails — a one-character typo, no firewall.
+Remember that shape the next time "the Service is up but nothing connects."
+
+Fix it by restoring the correct selector:
 
 [source,sh,role=execute]
 ----
@@ -440,16 +447,22 @@ NAME             ENDPOINTS          AGE
 parasol-claims   10.233.0.44:8080   3m
 ----
 
-The endpoints are back.
-Remember this shape — `<none>` endpoints — the next time "the Service is up but nothing connects."
-
 [.checkpoint]
 ****
-✔ *Verify:* You saw three `ClusterIP` Services with pod-IP endpoints, confirmed a non-app `demo-client` pod could reach *every* tier on the flat network, then broke `parasol-claims` by mistargeting its selector (endpoints `<none>`, connections refused) and fixed it (endpoints restored).
+✔ *Verify:* `demo-client` reached all three `ClusterIP` tiers, and `oc get endpoints parasol-claims -n $NS` went from `<none>` (connection refused) back to a pod IP.
 ****
 
 == 2. Expose the front end to the world
 ⏱ *~11 min* · an edge Route (the workhorse), the honest NodePort and LoadBalancer asides, then a re-encrypt Route that encrypts the last hop
+
+Adjusters need the claims portal from outside; auditors will ask if it is encrypted all the way to the pod.
+
+*You'll end with:* `parasol-web` behind an *edge* Route and a *re-encrypt* Route, and a different certificate on each hop.
+
+[mermaid]
+....
+include::example$diagrams/networking-dev-devops/08-edge-vs-reencrypt.mmd[]
+....
 
 Set this exercise's shortcuts first:
 
@@ -458,8 +471,7 @@ Set this exercise's shortcuts first:
 NS={user}-dev; PARTNER={user}-partner
 ----
 
-Only `parasol-web` should be reachable from outside, and the deterministic way to do that on OpenShift is a *Route*.
-Create an *edge*-terminated Route so the router terminates TLS and forwards to the Service (always `oc create route edge` with `--insecure-policy=Allow`, never a plain expose, so both HTTP and HTTPS answer cleanly):
+Create an *edge* Route: the router terminates TLS and forwards to the Service.
 
 // Verified live OCP 4.22.5, 2026-07-26 and RE-CONFIRMED 2026-07-29 as an attendee (user1): Create
 // Route offers "Configure via: Form view | YAML view"; the form is Name* · Hostname · Path · Service* ·
@@ -479,9 +491,10 @@ Create an *edge*-terminated Route so the router terminates TLS and forwards to t
 Console::
 +
 --
-Open *Networking* → *Routes* → *Create Route*.
-Name it `parasol-web`, *Service* = `parasol-web`, *Target port* = `8080 → 8080`, tick *Secure Route*, *TLS termination* = *Edge*, *Insecure traffic* = *Allow*, then *Create*.
-The Route list shows a `\https://parasol-web-{user}-dev.{cluster_domain}` *Location* — click it.
+. Open *Networking* → *Routes* → *Create Route*.
+. Name `parasol-web`, *Service* `parasol-web`, *Target port* `8080 → 8080`.
+. Tick *Secure Route*; *TLS termination* *Edge*; *Insecure traffic* *Allow*; *Create*.
+. In the Route list, click the `\https://parasol-web-{user}-dev.{cluster_domain}` *Location*.
 
 // media-pass: screenshot networking-dev-devops-02-create-edge-route.png — the Create Route form
 // filled in for parasol-web (Service = parasol-web, Secure Route ticked, TLS termination = Edge,
@@ -510,8 +523,7 @@ route.route.openshift.io/parasol-web created
 host=parasol-web-{user}-dev.apps.example.com
 ----
 
-Now reach it *from outside the cluster* — the front end serves its claims.
-The router takes a few seconds to load a new Route and answers `503` until it has, so the `--retry` flags keep asking until the JSON arrives:
+Reach it from outside the cluster:
 
 [source,sh,role=execute]
 ----
@@ -525,12 +537,16 @@ curl -sfk --retry 30 --retry-all-errors --retry-delay 2 --max-time 10 "https://$
 [{"id":"CLM-1001","policyholder":"Alice Nguyen","type":"Auto","status":"Under Review","amount":4200.0,"filedDate":"2026-05-14"},{"id":"CLM-1002", ...
 ----
 
-One command, and the front end is public — no provider, no external IP to wait for.
-That is why the Route is the workhorse.
+*What just happened:* one command, and the front end is public — no provider, no external IP. That is why the Route is the workhorse.
 
-Now the two asides — *understand them once*.
-A *NodePort* opens the same port on *every* node.
-Create one, read the port it grabbed, and delete it — you rarely want this in production:
+.Why `oc create route edge`, and why the `--retry` flags
+[%collapsible]
+====
+Always use `oc create route edge` with `--insecure-policy=Allow`, never a plain expose, so both HTTP and HTTPS answer cleanly.
+The router takes a few seconds to load a new Route and answers `503` until it has, so the `--retry` flags keep asking until the JSON arrives.
+====
+
+*Two asides, understood once.* Create a *NodePort*, read its port, delete it:
 
 [source,sh,role=execute]
 ----
@@ -547,8 +563,7 @@ type=NodePort  nodePort=32408
 service "parasol-web-np" deleted from {user}-dev namespace
 ----
 
-And a *LoadBalancer* asks the platform for an external IP — which only appears if a *provider* answers.
-Most workshop clusters have none, so expect it to hang at `<pending>` (then delete it):
+Then a *LoadBalancer*, which asks the platform for an external IP:
 
 [source,sh,role=execute]
 ----
@@ -567,12 +582,24 @@ parasol-web-lb   LoadBalancer   172.231.9.80   <pending>     8080:32207/TCP   5s
 service "parasol-web-lb" deleted from {user}-dev namespace
 ----
 
+[cols="2,3,3"]
+|===
+|Exposure |What you saw |Use it for
+
+|*Route* |Public HTTPS at once |Web traffic: the default
+|*NodePort* |One port opened on *every* node |Rarely in production
+|*LoadBalancer* |An external IP only if a *provider* answers |Non-HTTP traffic, where a provider exists
+|===
+
+.What `<pending>` means
+[%collapsible]
+====
+Most workshop clusters have no LoadBalancer provider, so expect the Service to hang at `<pending>`.
 `EXTERNAL-IP <pending>` (if that's what you see) means "unprovided," not broken — it stays that way forever without a provider.
 On a cloud a load balancer would answer; on bare metal you would add one (such as MetalLB) or, as here, *use a Route*.
+====
 
-Now look at what your *edge* Route is doing on the inside.
-The router terminated TLS at the edge — and it is forwarding *plaintext* to the pod.
-See it from inside the cluster:
+*Now look inside the edge Route.* What does the pod receive?
 
 [source,sh,role=execute]
 ----
@@ -585,15 +612,19 @@ oc exec deploy/demo-client -n $NS -- curl -s -o /dev/null -w "plain HTTP to para
 plain HTTP to parasol-web:8080 -> HTTP 200
 ----
 
-The pod answers *unencrypted* HTTP, and unencrypted HTTP is exactly what the router sends it.
-Inside a trusted cluster network that is normal.
-When policy says "encrypted end to end," it is an audit finding — and the answer is a *re-encrypt* Route: the router still terminates (so it keeps routing on host and path) and then opens a *second, fresh* TLS session to the pod.
+*What just happened:* the router sends the pod *unencrypted* HTTP.
+Normal inside a trusted network; an audit finding when policy says "encrypted end to end."
+The fix is a *re-encrypt* Route, and the pod needs its own certificate for it.
 
-For that the pod needs its own certificate — and you are not going to stand up a certificate authority to get one.
-You are going to ask the cluster for it.
+.How re-encrypt differs from edge
+[%collapsible]
+====
+A re-encrypt Route still terminates TLS at the router, so the router keeps routing on host and path.
+It then opens a *second, fresh* TLS session to the pod, so the last hop is encrypted too.
+For that the pod needs its own certificate — and you are not going to stand up a certificate authority to get one. You are going to ask the cluster for it.
+====
 
-*First, ask the platform for a certificate.*
-One annotation on the Service, and the cluster's service CA operator mints a key pair into a Secret for you:
+*First, ask the platform for a certificate* — one annotation on the Service:
 
 // Grounded 2026-07-30 on OCP 4.22.5, signed in as an attendee (user1), viewport 1600x1000.
 // `parasol-web` is not staged in user1-dev at this point in the lab; grounded instead against
@@ -605,9 +636,9 @@ One annotation on the Service, and the cluster's service CA operator mints a key
 Console::
 +
 --
-Open *Networking* → *Services* → `parasol-web` → *Actions* → *Edit annotations*.
-Add the key `service.beta.openshift.io/serving-cert-secret-name` with the value `parasol-web-tls`, then *Save*.
-Open *Workloads* → *Secrets* — `parasol-web-tls` appears within a few seconds, of type `kubernetes.io/tls`.
+. Open *Networking* → *Services* → `parasol-web` → *Actions* → *Edit annotations*.
+. Add key `service.beta.openshift.io/serving-cert-secret-name`, value `parasol-web-tls`; *Save*.
+. In *Workloads* → *Secrets*, `parasol-web-tls` (type `kubernetes.io/tls`) appears within seconds.
 --
 CLI::
 +
@@ -629,12 +660,9 @@ NAME              TYPE                DATA   AGE
 parasol-web-tls   kubernetes.io/tls   2      4s
 ----
 
-You did not generate a key, sign a request, or install a CA — you asked, and the platform issued.
-The Secret holds a `tls.crt` and `tls.key` issued for the Service's internal DNS name, and the operator rotates it for you.
+*What just happened:* the cluster's service CA operator minted a `tls.crt` and `tls.key` for the Service's internal DNS name, and rotates them — no CA of your own.
 
-*Next, make the pod actually serve TLS with it.*
-Mount the Secret, tell the application where its certificate is, and publish the HTTPS port on the Service.
-The front end is a Quarkus application, so it takes the certificate paths as environment variables — every runtime has its own equivalent, and this is the part of re-encrypt that is genuinely on you:
+*Next, make the pod serve TLS* — mount the Secret, point the app at it, publish the HTTPS port:
 
 // Verified live OCP 4.22.5, 2026-07-26: the Deployment YAML tab renders the complete resource and is
 // editable in place, so the volume + volumeMount + env edit lands in one save.
@@ -643,9 +671,9 @@ The front end is a Quarkus application, so it takes the certificate paths as env
 Console::
 +
 --
-Open *Workloads* → *Deployments* → `parasol-web` → *YAML*.
-Add a `volume` sourced from the `parasol-web-tls` Secret, mount it at `/etc/tls` in the container, and add the two `QUARKUS_HTTP_SSL_*` environment variables from the *CLI* tab, then *Save* — the deployment rolls out a new pod.
-Then open *Networking* → *Services* → `parasol-web` → *YAML* and add a second port named `https` on `8443` targeting `8443`.
+. Open *Workloads* → *Deployments* → `parasol-web` → *YAML*.
+. Add a `volume` from the `parasol-web-tls` Secret mounted at `/etc/tls`, plus the two `QUARKUS_HTTP_SSL_*` variables from the *CLI* tab; *Save*. A new pod rolls out.
+. In *Networking* → *Services* → `parasol-web` → *YAML*, add a port named `https` on `8443` targeting `8443`.
 --
 CLI::
 +
@@ -670,7 +698,14 @@ deployment "parasol-web" successfully rolled out
 service/parasol-web patched
 ----
 
-Confirm the pod really opened a TLS listener — this is the step people skip and then debug for twenty minutes:
+.Why environment variables?
+[%collapsible]
+====
+The front end is a Quarkus application, so it takes the certificate paths as environment variables.
+Every runtime has its own equivalent, and this is the part of re-encrypt that is genuinely on you.
+====
+
+Confirm the TLS listener (the step people skip, then debug for twenty minutes):
 
 [source,sh,role=execute]
 ----
@@ -687,10 +722,9 @@ NAME          TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)             AGE
 parasol-web   ClusterIP   172.231.54.213   <none>        8080/TCP,8443/TCP   7m
 ----
 
-Both listeners are up: the plaintext `8080` your edge Route uses, and the new TLS `8443`.
+Both are up: plaintext `8080` for the edge Route, TLS `8443` for the next one.
 
-*Now the re-encrypt Route.*
-Point it at the `https` port — and note what you are *not* supplying: any certificate authority material at all.
+*Now the re-encrypt Route*, on the `https` port — with no CA material at all:
 
 // Verified live OCP 4.22.5, 2026-07-26: the Create Route form reaches TLS termination via the
 // "Secure Route" tick under Security (form fields: Name* · Hostname · Path · Service* · Service weight).
@@ -701,8 +735,9 @@ Point it at the `https` port — and note what you are *not* supplying: any cert
 Console::
 +
 --
-Open *Networking* → *Routes* → *Create Route*.
-Name it `parasol-web-secure`, *Service* = `parasol-web`, *Target port* = `8443 → 8443`, tick *Secure Route*, set *TLS termination* = *Re-encrypt*, and leave *Destination CA certificate* *empty*, then *Create*.
+. Open *Networking* → *Routes* → *Create Route*.
+. Name `parasol-web-secure`, *Service* `parasol-web`, *Target port* `8443 → 8443`.
+. Tick *Secure Route*; *TLS termination* *Re-encrypt*; leave *Destination CA certificate* *empty*; *Create*.
 --
 CLI::
 +
@@ -725,7 +760,7 @@ route.route.openshift.io/parasol-web-secure created
 termination=reencrypt  host=parasol-web-secure-{user}-dev.apps.example.com
 ----
 
-Reach it from outside, exactly as you did the edge Route — the same `--retry` flags ride out the router loading the new Route:
+Reach it from outside:
 
 [source,sh,role=execute]
 ----
@@ -739,8 +774,7 @@ curl -sfk --retry 30 --retry-all-errors --retry-delay 2 --max-time 15 "https://$
 [{"id":"CLM-1001","policyholder":"Alice Nguyen","type":"Auto","status":"Under Review","amount":4200.0,"filedDate":"2026-
 ----
 
-Same application, same router, same claims JSON — but now *two* TLS sessions carried that request instead of one.
-Prove it by reading the certificate at each hop:
+Two TLS sessions carried that JSON. Read the certificate at each hop:
 
 [source,sh,role=execute]
 ----
@@ -758,13 +792,18 @@ hop 2  router -> pod    : subject=CN=parasol-web.{user}-dev.svc
 hop 2  issued by        : issuer=CN=openshift-service-serving-signer@1784922828
 ----
 
-*Two different certificates, from two different authorities, on one request.*
-The outside hop uses the router's wildcard certificate — issued by whichever CA signed your cluster's ingress certificate, and trusted by browsers.
-The inside hop uses `CN=parasol-web.{user}-dev.svc`, issued by the cluster's own `openshift-service-serving-signer` and trusted only inside the cluster.
-That is re-encrypt: the router still gets to be a router, and no part of the path is in the clear.
+*What just happened:* two certificates from two authorities, on one request — and no hop in the clear.
 
-[NOTE]
+[cols="2,4,2"]
+|===
+|Hop |Certificate |Trusted by
+
+|Client → router |The router's wildcard, from whichever CA signed your cluster's ingress certificate |Browsers
+|Router → pod |`CN=parasol-web.{user}-dev.svc`, from the cluster's `openshift-service-serving-signer` |The cluster only
+|===
+
 .Why you never supplied a destination CA certificate
+[%collapsible]
 ====
 A re-encrypt Route usually expects a `destinationCACertificate` so the router can verify the backend.
 You omitted it, and it still worked — deliberately.
@@ -775,11 +814,20 @@ Supply a `destinationCACertificate` when the backend's certificate comes from *y
 
 [.checkpoint]
 ****
-✔ *Verify:* You exposed `parasol-web` with an *edge* Route and reached `\https://parasol-web-{user}-dev.{cluster_domain}/api/claims` from outside the cluster; you created and deleted a NodePort (seeing its assigned `3xxxx` port) and a LoadBalancer Service (seeing `EXTERNAL-IP <pending>` if your cluster has no LoadBalancer provider, or a real IP if it does); and you proved the edge Route's last hop was plaintext, then fixed it with a *re-encrypt* Route — a service serving certificate minted by annotation, a TLS listener on the pod, and two different certificates on the two hops of one request.
+✔ *Verify:* both Routes return claims from outside, `parasol-web-secure` with a different certificate per hop; the NodePort (`3xxxx`) and LoadBalancer (`<pending>` or a real IP) are deleted.
 ****
 
 == 3. Lock the namespace down with default-deny
 ⏱ *~5 min* · apply the baseline and watch the app — and DNS — break
+
+Least privilege starts from nothing allowed. Close the namespace and watch what breaks.
+
+*You'll end with:* a namespace where nothing talks: the API at `0/1`, even DNS blocked.
+
+[mermaid]
+....
+include::example$diagrams/networking-dev-devops/09-default-deny.mmd[]
+....
 
 Set this exercise's shortcuts first:
 
@@ -788,9 +836,7 @@ Set this exercise's shortcuts first:
 NS={user}-dev; PARTNER={user}-partner
 ----
 
-Now the east-west half.
-The pattern is *default-deny first, precise allows second*.
-Apply a policy that selects *every* pod (`podSelector: {}`) and denies *all* ingress and egress:
+Apply a policy that selects *every* pod (`podSelector: {}`) and denies all ingress and egress:
 
 // Verified live OCP 4.22.5, 2026-07-26: Create NetworkPolicy opens a YAML/JSON editor with a schema
 // sidebar — "Create by manually entering YAML or JSON definitions, or by dragging and dropping a file
@@ -800,8 +846,8 @@ Apply a policy that selects *every* pod (`podSelector: {}`) and denies *all* ing
 Console::
 +
 --
-Open *Networking* → *NetworkPolicies* → *Create NetworkPolicy* → *YAML view*, paste the manifest from the *CLI* tab, and *Create*.
-(The form view can build this too: empty pod selector, deny all ingress and egress.)
+. Open *Networking* → *NetworkPolicies* → *Create NetworkPolicy* → *YAML view*.
+. Paste the manifest from the *CLI* tab and *Create* (the form view can build it too).
 
 image::networking-dev-devops/networking-dev-devops-03-networkpolicy-yaml.png["The default-deny-all NetworkPolicy on its YAML tab. The spec is four lines and both of them matter: podSelector is an empty pair of braces, which means every pod in the project rather than none, and policyTypes lists Ingress and Egress, which is what turns the empty selector into a deny. Above them the console has folded managedFields into a single line, and the long last-applied-configuration annotation runs off the right edge — neither is part of the lesson."]
 --
@@ -825,8 +871,7 @@ EOF
 --
 ====
 
-Give the data plane a few seconds to program, then watch what broke.
-The API tier — `parasol-claims` — can no longer reach the database, so its readiness probe fails and it drops to `0/1`:
+Watch what broke (the loop waits a few seconds for the data plane to program):
 
 [source,sh,role=execute]
 ----
@@ -843,14 +888,11 @@ parasol-claims-5bf7bdb78-gw7dh   0/1     Running   1 (9m ago)    9m
 ... Reporting health down status: {"status":"DOWN","checks":[{"name":"Database connections health check","status":"DOWN","data":{"<default>":"Unable to execute the validation check for the default DataSource: Acquisition timeout while waiting for new connection"}}]}
 ----
 
-The container is still *Running* — it did not crash — but it is *not Ready*, because it cannot open its database connection.
+*What just happened:* `parasol-claims` cannot reach its database, so its readiness probe fails: still `Running`, but `0/1`, *not Ready*.
 
-[NOTE]
-====
-`0/1` proves default-deny *only if* `STATUS` says `Running`. A pod in `ImagePullBackOff`/`ErrImagePull` is also `0/1` — but that means the image never pulled, an environment problem, not your policy working (see the instructor pre-flight / troubleshooting). Read the `STATUS` column before you credit the NetworkPolicy.
-====
+NOTE: `0/1` proves default-deny *only if* `STATUS` says `Running`. `ImagePullBackOff`/`ErrImagePull` is also `0/1`, but means the image never pulled, not that your policy works (see the instructor pre-flight / troubleshooting).
 
-And it is not only the app: default-deny on *egress* also killed *DNS*, so nothing in the namespace can even resolve a name:
+*Predict, then run:* you denied *traffic*. Can `demo-client` still look up the name `claims-db`?
 
 [source,sh,role=execute]
 ----
@@ -867,23 +909,27 @@ demo-client DNS lookup of claims-db: DNS BLOCKED (timed out)
 demo-client -> claims-db:5432      : BLOCKED (timed out)
 ----
 
-Total lockdown — which is *correct*.
-The namespace is now a blank canvas: nothing talks until you *say* it may.
+*What just happened:* default-deny on *egress* also blocks *DNS*.
+Total lockdown is *correct*: nothing talks until you *say* it may.
 
 [.checkpoint]
 ****
-✔ *Verify:* After applying `default-deny-all`, `parasol-claims` fell to `0/1` with a database health-check `DOWN` ("Acquisition timeout"), and the `demo-client` pod could neither resolve DNS nor open `claims-db:5432` — the baseline denies everything, including DNS.
+✔ *Verify:* `parasol-claims` is `0/1 Running` with its database check `DOWN` ("Acquisition timeout"), and `demo-client` can neither resolve DNS nor open `claims-db:5432`.
 ****
 
 == 4. Re-open only what the app needs, then prove the isolation
 ⏱ *~10 min* · DNS (the gotcha), the db-from-api and api-from-web allows, and the payoff
 
-Now add back *only* the flows the app genuinely needs — least privilege, for the network.
+Give back only the flows the claims app needs: least privilege, for the network.
 
-*First, DNS* — the thing default-deny broke that surprises everyone.
-Re-open egress to the cluster DNS service.
-The subtlety: name the CoreDNS pods' *named ports* `dns`/`dns-tcp`, *not* port `53`.
-OpenShift's DNS Service listens on `53` but forwards to CoreDNS pods on port `5353`, and a NetworkPolicy is evaluated against the *destination pod's* port — so a rule for `53` silently fails to admit DNS:
+*You'll end with:* a database that answers only the API, and a front end still public through the router.
+
+[mermaid]
+....
+include::example$diagrams/networking-dev-devops/06-one-allowed-path.mmd[]
+....
+
+*First, DNS.* Allow egress to CoreDNS on its *named ports* `dns`/`dns-tcp` — *not* `53`:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -919,18 +965,24 @@ echo -n "demo-client DNS lookup of claims-db: "; oc exec deploy/demo-client -n $
 demo-client DNS lookup of claims-db: RESOLVED
 ----
 
-[NOTE]
+*What just happened:* names resolve, because the rule names the *destination pod's* port:
+
+[mermaid]
+....
+include::example$diagrams/networking-dev-devops/10-dns-port.mmd[]
+....
+
 .Why named ports, not port 53
+[%collapsible]
 ====
+OpenShift's DNS Service listens on `53` but forwards to CoreDNS pods on port `5353`, and a NetworkPolicy is evaluated against the *destination pod's* port — so a rule for `53` silently fails to admit DNS.
 Try the "obvious" version with `port: 53` and DNS *stays broken* — verified live on this cluster.
 OVN-Kubernetes matches the egress port against the pod behind the Service (after the Service's `53 → 5353` translation), so the rule must name the pod's port.
 The named ports `dns`/`dns-tcp` track the CoreDNS container regardless of the number and are exactly what OpenShift's own platform operators use.
 This is the single most common reason a "correct-looking" DNS allow does nothing.
 ====
 
-DNS resolves now — but the database is still unreachable (you only allowed DNS).
-*Next, the one real east-west hop:* the API tier to the database.
-That needs *two* rules — an *ingress* allow on `claims-db` ("accept 5432 from `parasol-claims` pods") and the matching *egress* allow on `parasol-claims` (egress is default-denied too):
+*Next, the API-to-database hop.* It takes *two* rules: ingress on `claims-db` from `parasol-claims`, and egress on `parasol-claims` to `claims-db`, because egress is denied too:
 
 // Grounded 2026-07-29 on OCP 4.22.5, signed in as an attendee (user1), viewport 1600x1000:
 //   · the masthead button is labelled "Quick create" (exact aria-label) and renders as a ⊕ icon,
@@ -957,8 +1009,15 @@ That needs *two* rules — an *ingress* allow on `claims-db` ("accept 5432 from 
 Console::
 +
 --
-Use the masthead *+* (*Import YAML*) in project `{user}-dev`, paste *both* policies from the *CLI* tab (the Import YAML page accepts a multi-document paste), and *Create*.
-(The resource-scoped *Create NetworkPolicy* YAML editor expects a *single* object — the generic Import YAML page is the one that takes both at once.)
+. Use the masthead *+* (*Import YAML*) in project `{user}-dev`.
+. Paste *both* policies from the *CLI* tab and *Create*.
+
+.Why Import YAML, not Create NetworkPolicy?
+[%collapsible]
+=====
+The Import YAML page accepts a multi-document paste.
+The resource-scoped *Create NetworkPolicy* YAML editor expects a *single* object — the generic Import YAML page is the one that takes both at once.
+=====
 --
 CLI::
 +
@@ -1017,9 +1076,9 @@ networkpolicy.networking.k8s.io/allow-claims-to-db-egress created
 deployment "parasol-claims" successfully rolled out
 ----
 
-`parasol-claims` is back to `1/1` — the API can reach the database again, because you allowed exactly that flow.
-Now the *payoff*.
-Probe the database from the API (allowed) and from the `demo-client` (which got *no* database allow):
+`parasol-claims` is back to `1/1`: it reaches the database because you allowed exactly that.
+
+*The payoff:* probe the database from the API and from `demo-client`:
 
 // Verified live OCP 4.22.5, 2026-07-26: Pod detail tabs are Details · Metrics · YAML · Environment ·
 // Logs · Events · Terminal — the Terminal tab is present and is the in-pod shell.
@@ -1028,8 +1087,8 @@ Probe the database from the API (allowed) and from the `demo-client` (which got 
 Console::
 +
 --
-Open *Workloads* → *Pods* → a `demo-client-…` pod → the *Terminal* tab, and run `timeout 5 bash -c '</dev/tcp/claims-db/5432 && echo OPEN'` — it hangs and times out.
-Do the same in a `parasol-claims-…` pod terminal — it prints `OPEN`.
+. In *Workloads* → *Pods* → a `demo-client-…` pod → *Terminal*, run `timeout 5 bash -c '</dev/tcp/claims-db/5432 && echo OPEN'`: it times out.
+. In a `parasol-claims-…` pod terminal, the same command prints `OPEN`.
 
 // media-pass: screenshot networking-dev-devops-04-pod-terminal-blocked.png — a demo-client pod's
 // Terminal tab with the `</dev/tcp/claims-db/5432>` probe hanging/timing out, alongside (or compared
@@ -1057,11 +1116,10 @@ parasol-claims (API, ALLOWED)     -> claims-db:5432 : OPEN
 demo-client (unauthorized)        -> claims-db:5432 : BLOCKED (timed out — no allow rule admits this pod)
 ----
 
-*Same database, same namespace, two different pods, two different answers.*
-The database now answers *only* the API.
+*What just happened:* same database, same namespace, two pods, two answers.
 That is micro-segmentation, and the allow rules *are* the documentation of what may talk to what.
 
-Finish the app's policy set so the front end works end-to-end under default-deny — the `parasol-web` ↔ `parasol-claims` pair, and an ingress allow so the *router* can still reach `parasol-web` (your Route would otherwise be denied):
+*Finish the set:* web ↔ API, plus an ingress allow for the *router* so your Route keeps working:
 
 [source,sh,role=execute]
 ----
@@ -1113,7 +1171,7 @@ networkpolicy.networking.k8s.io/allow-web-from-router created
 NetworkPolicies now in {user}-dev: 7
 ----
 
-Confirm the Route still works through the locked-down namespace — the router is allowed in, so the front end still answers from outside (the `--retry` flags cover the few seconds a new policy takes to program):
+Confirm the Route still answers (`--retry` covers the seconds a new policy takes to program):
 
 [source,sh,role=execute]
 ----
@@ -1127,22 +1185,44 @@ curl -sfk --retry 30 --retry-all-errors --retry-delay 2 --max-time 10 "https://$
 [{"id":"CLM-1001","policyholder":"Alice Nguyen","type":"Auto","status":"Under Review", ...
 ----
 
-Seven policies: one default-deny, one DNS allow, and five precise allows that spell out the app's entire east-west and ingress surface.
+.All seven policies at a glance
+[%collapsible]
+====
+One default-deny, one DNS allow, and five precise allows spell out the app's entire east-west and ingress surface:
+
+[cols="3,2,4"]
+|===
+|Policy |Type |Allows
+
+|`default-deny-all` |Ingress, Egress |Nothing: the baseline
+|`allow-dns-egress` |Egress |Every pod to CoreDNS on `dns`/`dns-tcp`
+|`allow-db-from-claims` |Ingress |`claims-db:5432`, from `parasol-claims` only
+|`allow-claims-to-db-egress` |Egress |`parasol-claims` out to `claims-db:5432`
+|`allow-claims-from-web` |Ingress |`parasol-claims:8080`, from `parasol-web` only
+|`allow-web-to-claims-egress` |Egress |`parasol-web` out to `parasol-claims:8080`
+|`allow-web-from-router` |Ingress |`parasol-web`, from the ingress router
+|===
+====
 
 [.checkpoint]
 ****
-✔ *Verify:* DNS resolved once you allowed the CoreDNS *named* ports; `parasol-claims` returned to `1/1` after the db-from-api allow pair; the API reaches `claims-db:5432` while `demo-client` is *blocked*; and the edge Route still serves the front end through the default-deny namespace (thanks to the router-ingress allow).
+✔ *Verify:* DNS resolves, `parasol-claims` is `1/1`, only the API opens `claims-db:5432`, and the edge Route still serves claims.
 ****
 
 == 5. Native isolation with a UserDefinedNetwork
 ⏱ *~7 min* · a partner namespace isolated with zero policy — proven with your own policies opened up
 
-You just wrote seven NetworkPolicies to segment one namespace.
-Sometimes you want a whole namespace isolated and you want it *for free* — no policy to write or maintain.
-That is a *UserDefinedNetwork*.
+Seven policies segmented one namespace.
+Parasol's partner namespace needs isolating as a whole, with no policy to maintain: a *UserDefinedNetwork*.
 
-Your `{user}-partner` namespace was created with a *Layer 2 Primary UDN*: it has its *own* pod network, so its workloads are isolated from `{user}-dev` *natively*.
-First, confirm the partner namespace holds *no NetworkPolicy* and read its network:
+*You'll end with:* proof that `{user}-partner`, with no policy at all, cannot reach your app even when its door is open to everyone.
+
+[mermaid]
+....
+include::example$diagrams/networking-dev-devops/11-udn-isolation.mmd[]
+....
+
+`{user}-partner` has a *Layer 2 Primary UDN*, its own pod network. Confirm it holds *no NetworkPolicy*:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -1158,8 +1238,7 @@ No resources found in {user}-partner namespace.
 topology=Layer2  role=Primary  subnet=10.20.0.0/16
 ----
 
-Now look at the partner workload's *interfaces*.
-Unlike an app pod (one interface on the default pod network), a Primary-UDN pod's *default* network is `ovn-udn1`, on the UDN's own `10.20.0.0/16` segment:
+Read the partner workload's interfaces:
 
 // Verified live OCP 4.22.5, 2026-07-26: the Pod Terminal tab is present (Details · Metrics · YAML ·
 // Environment · Logs · Events · Terminal), so the in-pod ip/route probe runs there.
@@ -1168,8 +1247,8 @@ Unlike an app pod (one interface on the default pod network), a Primary-UDN pod'
 Console::
 +
 --
-Open *Workloads* → *Pods* → a `partner-workload-…` pod → *Terminal*, and run `ip -brief addr` and `ip route show`.
-Note the `ovn-udn1` interface on a `10.20.x.x` address and the *default route* leaving through it.
+. Open *Workloads* → *Pods* → a `partner-workload-…` pod → *Terminal*.
+. Run `ip -brief addr` and `ip route show`: `ovn-udn1` holds a `10.20.x.x` address, and the *default route* leaves through it.
 --
 CLI::
 +
@@ -1189,12 +1268,9 @@ ovn-udn1@if66    UP             10.20.0.4/16 fe80::858:aff:fe14:4/64
 default via 10.20.0.1 dev ovn-udn1
 ----
 
-The pod's *default route* leaves through `ovn-udn1` — this workload lives on the UDN, not the shared pod network.
+*What just happened:* an app pod sits on the shared pod network; this pod's *default* network is `ovn-udn1`, the UDN's own `10.20.0.0/16` segment.
 
-Now prove the isolation — and prove it is not *your* policies.
-`parasol-web` sits behind your exercise-3 default-deny, which admits only the router, so a blocked connection on its own proves nothing.
-For one block, open `parasol-web` port `8080` to *every* source, then probe it from two places: your terminal, which runs in another namespace on the cluster network, and the partner workload.
-The block removes the opening again at the end:
+*Now prove the isolation is not your policies.* This block opens `parasol-web:8080` to *every* source, probes from your terminal and the partner workload, then closes it:
 
 [source,sh,role=execute]
 ----
@@ -1232,22 +1308,36 @@ partner-workload (own UDN)      -> parasol-web:8080 : BLOCKED (isolated network)
 networkpolicy.networking.k8s.io "allow-web-from-anywhere" deleted from {user}-dev namespace
 ----
 
-*Same open door, two answers.*
-Your terminal got in, so no NetworkPolicy stood in the way.
-The partner workload resolved the name but could not connect: it is on a different Layer 2 network and cannot route to your app's pods.
-The partner namespace holds no policy at all — the isolation is a property of the *network*, decided when the namespace was created.
+*What just happened:* same open door, two answers.
+Your terminal got in, so no policy stood in the way. The partner workload resolved the name but has no route to your pods: its *network* isolates it, decided when the namespace was created.
 
-[NOTE]
-.NetworkPolicy or UDN — which to reach for
+.Why open the door first?
+[%collapsible]
+====
+`parasol-web` sits behind your exercise-3 default-deny, which admits only the router, so a blocked connection on its own would prove nothing.
+Opening port `8080` to every source takes your policies out of the picture: your terminal runs in another namespace on the cluster network, so if it connects and the partner workload does not, the difference is the partner's network.
+====
+
+[cols="1,3,3"]
+|===
+| |UserDefinedNetwork |NetworkPolicy
+
+|Isolates |A *whole namespace*: a partner, a regulated tenant |*Selective* flows: "the database from the API, nothing else"
+|Upkeep |None, no policy to write |One rule per flow
+|Decided |Before the namespace's first pod — a platform-team call |Any time
+|===
+
+.Why a UDN is decided up front
+[%collapsible]
 ====
 Reach for a *UserDefinedNetwork* when isolation is a property of the *whole namespace* (a partner, a regulated tenant, a "this never talks to anything else" workload) and you want it native and maintenance-free.
-Reach for *NetworkPolicy* when you need *selective* flows — "the database from the API, the API from the web, and nothing else" — within a namespace or across namespaces.
-The catch that makes UDN a platform-team decision: a Primary UDN must exist *before* the namespace's first pod (you cannot convert a populated namespace), which is exactly why `{user}-partner` was built this way for you.
+Reach for *NetworkPolicy* when you need *selective* flows within a namespace or across namespaces.
+A Primary UDN must exist *before* the namespace's first pod (you cannot convert a populated namespace), which is exactly why `{user}-partner` was built this way for you.
 ====
 
 [.checkpoint]
 ****
-✔ *Verify:* `{user}-partner` has *no* NetworkPolicy, yet its `partner-workload` sits on `ovn-udn1` (`10.20.0.0/16`, the Layer 2 Primary UDN) with its default route through that interface; with `parasol-web` open to every source, your terminal connected while the partner workload resolved the name but *could not connect* — native isolation with zero policy, and `allow-web-from-anywhere` is gone again.
+✔ *Verify:* `{user}-partner` has no NetworkPolicy, its workload routes through `ovn-udn1`, and it could *not* reach `parasol-web` while your terminal could; `allow-web-from-anywhere` is gone again.
 ****
 
 == 6. Expose the front end through the Gateway API
@@ -1262,13 +1352,27 @@ The catch that makes UDN a platform-team decision: a Primary UDN must exist *bef
 // (measured on the Deployment), limits.cpu 2.2 of 8 with the whole lab applied. Cluster domain
 // scrubbed to apps.example.com.
 
-The Route you built in exercise 2 is the workhorse today.
-The *Gateway API* is where portable, multi-tenant ingress is heading, and it is GA on OpenShift.
-It splits exposure across three objects with three owners: a *GatewayClass* (the platform's implementation), a *Gateway* (a listener), and *HTTPRoutes* (the routing rules an app team attaches).
-You read the first one and build the other two.
+Parasol's platform team wants to try the *Gateway API*: where portable, multi-tenant ingress is heading, and GA on OpenShift.
 
-*First, see what the platform offers.*
-A GatewayClass is cluster-wide and set up by the platform team; you only read it:
+*You'll end with:* the claims front end reached through your own Gateway and HTTPRoute, proven by the Gateway's access log.
+
+[mermaid]
+....
+include::example$diagrams/networking-dev-devops/12-gateway-path.mmd[]
+....
+
+Three objects, three owners:
+
+[cols="1,3,1"]
+|===
+|Object |Role |You
+
+|*GatewayClass* |The platform's implementation, cluster-wide |Read it
+|*Gateway* |A listener |Build it
+|*HTTPRoute* |Routing rules an app team attaches |Build it
+|===
+
+*First, see what the platform offers:*
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -1285,12 +1389,15 @@ istio-remote        istio.io/unmanaged-gateway           True       12h
 openshift-default   openshift.io/gateway-controller/v1   True       12h
 ----
 
-The row that matters is `openshift-default`: OpenShift's own Gateway API implementation, `Accepted`.
-`istio` and `istio-remote` appear only where the Service Mesh module's stack is installed — one API, several implementations, each advertising itself with its own GatewayClass.
+*What just happened:* `openshift-default`, OpenShift's own implementation, is `Accepted`.
 
-*Next, the honest boundary.*
-The Gateway API here routes HTTP(S) and gRPC.
-Its experimental layer-4 route types are deliberately not installed:
+.Seeing `istio` and `istio-remote` too?
+[%collapsible]
+====
+`istio` and `istio-remote` appear only where the Service Mesh module's stack is installed — one API, several implementations, each advertising itself with its own GatewayClass.
+====
+
+*Next, the honest boundary.* This Gateway API routes HTTP(S) and gRPC. Check for the layer-4 route types:
 
 [source,sh,role=execute]
 ----
@@ -1307,21 +1414,17 @@ tlsroutes: ABSENT (not on the supported channel)
 udproutes: ABSENT (not on the supported channel)
 ----
 
-Raw TCP, UDP and TLS passthrough for arbitrary protocols belong to the service mesh (a separate module), not to a Route or to this Gateway.
+*What just happened:* they are deliberately not installed. Raw TCP, UDP and TLS passthrough belong to the service mesh (a separate module), not to a Route or this Gateway.
 
-*Now build your own Gateway — the listener.*
-One annotation decides how it is reached.
-By default this implementation fronts every Gateway with a `type=LoadBalancer` Service, which waits for a provider exactly like the one you created in exercise 2.
-Asking for a `ClusterIP` Service instead keeps the Gateway in-cluster, and you publish it with a Route in a moment.
-The `parametersRef` points at a ConfigMap the workshop placed in your namespace, sizing the Gateway's proxy for a lab — one replica, small limits — instead of the platform default of two:
+*Now build your Gateway, the listener:*
 
 [tabs]
 ====
 Console::
 +
 --
-Use the masthead *+* (*Import YAML*) in project `{user}-dev`, paste the YAML between the two `EOF` lines of the *CLI* tab, and *Create*.
-Then open *Home* → *Search*, choose the *Gateway* resource type, and open `parasol-gateway`: within a few seconds its *Conditions* list `Programmed` as `True`.
+. Masthead *+* (*Import YAML*) in project `{user}-dev`: paste the YAML between the two `EOF` lines of the *CLI* tab, and *Create*.
+. In *Home* → *Search*, resource type *Gateway*, open `parasol-gateway`: within seconds its *Conditions* show `Programmed` `True`.
 --
 CLI::
 +
@@ -1359,20 +1462,27 @@ NAME              CLASS               ADDRESS                                   
 parasol-gateway   openshift-default   parasol-gateway-openshift-default.{user}-dev.svc.cluster.local   True         3s
 ----
 
-`PROGRAMMED True`, with an in-cluster address.
-To get there the implementation created a Deployment running one Envoy proxy and a Service, both named `parasol-gateway-openshift-default` — in *your* namespace.
-Keep that in mind.
+*What just happened:* `PROGRAMMED True`, with an in-cluster address. The implementation created a Deployment running one Envoy proxy and a Service, both named `parasol-gateway-openshift-default` — in *your* namespace. Keep that in mind.
 
-*Then attach a route — the app team's half.*
-An HTTPRoute names the Gateway it attaches to and the Service that receives the traffic:
+.The annotation and the `parametersRef`
+[%collapsible]
+====
+One annotation decides how the Gateway is reached.
+By default this implementation fronts every Gateway with a `type=LoadBalancer` Service, which waits for a provider exactly like the one you created in exercise 2.
+Asking for a `ClusterIP` Service instead keeps the Gateway in-cluster, and you publish it with a Route in a moment.
+On a cluster with a load-balancer provider you would drop the annotation and the Route — the Gateway would get an external address of its own.
+The `parametersRef` points at a ConfigMap the workshop placed in your namespace, sizing the Gateway's proxy for a lab — one replica, small limits — instead of the platform default of two.
+====
+
+*Then attach a route, the app team's half* — it names the Gateway and the backend Service:
 
 [tabs]
 ====
 Console::
 +
 --
-Use *Import YAML* again in project `{user}-dev`, paste the YAML between the two `EOF` lines of the *CLI* tab, and *Create*.
-Find it the same way (*Home* → *Search*, resource type *HTTPRoute*) and open its *YAML* tab: under `status.parents`, `Accepted` and `ResolvedRefs` are both `True`.
+. *Import YAML* again in project `{user}-dev`: paste the YAML between the two `EOF` lines of the *CLI* tab, and *Create*.
+. In *Home* → *Search*, resource type *HTTPRoute*, open its *YAML* tab: under `status.parents`, `Accepted` and `ResolvedRefs` are `True`.
 --
 CLI::
 +
@@ -1406,11 +1516,10 @@ httproute.gateway.networking.k8s.io/parasol-web condition met
 Accepted=True  ResolvedRefs=True
 ----
 
-`Accepted` means the Gateway took the route; `ResolvedRefs` means the backend Service exists.
-This rule has one backend — add a second `backendRefs` entry with a `weight` and the same object splits traffic between two versions.
+*What just happened:* `Accepted` means the Gateway took the route; `ResolvedRefs` means the backend Service exists.
+A second `backendRefs` entry with a `weight` would split traffic between two versions.
 
-*Publish the Gateway.*
-Expose the Gateway's Service with an edge Route — the exercise-2 command, pointed at the Gateway instead of at the app:
+*Publish the Gateway* with the exercise-2 edge Route command, pointed at the Gateway:
 
 // Console Gateway/HTTPRoute status paths: no dedicated Gateway API pages exist on this cluster (the
 // networking-console-plugin manifest carries none, read 2026-11-12), so status is read through Home →
@@ -1424,8 +1533,9 @@ Expose the Gateway's Service with an edge Route — the exercise-2 command, poin
 Console::
 +
 --
-Open *Networking* → *Routes* → *Create Route*.
-Name it `parasol-gw`, *Service* = `parasol-gateway-openshift-default`, *Target port* = `80 → 80`, tick *Secure Route*, *TLS termination* = *Edge*, *Insecure traffic* = *Allow*, then *Create*.
+. Open *Networking* → *Routes* → *Create Route*.
+. Name `parasol-gw`, *Service* `parasol-gateway-openshift-default`, *Target port* `80 → 80`.
+. Tick *Secure Route*; *TLS termination* *Edge*; *Insecure traffic* *Allow*; *Create*.
 --
 CLI::
 +
@@ -1438,7 +1548,7 @@ oc create route edge parasol-gw --service=parasol-gateway-openshift-default --po
 --
 ====
 
-Now reach the app through it:
+*Predict, then run:* the Gateway is `Programmed`, its route `Accepted`. What does a request through it return?
 
 [source,sh,role=execute]
 ----
@@ -1456,23 +1566,32 @@ NAME                                                 READY   STATUS    RESTARTS 
 parasol-gateway-openshift-default-6b6f6b4f8d-kfh92   0/1     Running   0          19s
 ----
 
-`503`, and the Gateway's pod is not Ready.
-Nothing is wrong with the Gateway or the route — this is your exercise 3 at work.
-The Envoy pod runs in `{user}-dev`, so `default-deny-all` applies to it too: it cannot reach its control plane, `istiod` in `openshift-ingress` on port `15012`, to fetch its configuration, so it never becomes Ready.
+*What just happened:* `503`, and the Gateway's pod is not Ready — your exercise 3 at work.
+The Envoy pod runs in `{user}-dev`, so `default-deny-all` starves it too.
+
+.Why default-deny starves the Gateway
+[%collapsible]
+====
+Nothing is wrong with the Gateway or the route.
+The Envoy pod cannot reach its control plane, `istiod` in `openshift-ingress` on port `15012`, to fetch its configuration, so it never becomes Ready.
 Even once Ready, nothing would let the router in or let it out to `parasol-web`.
+====
 
-(An `HTTP 200` here means `{user}-dev` has no `default-deny-all` — exercises 3 and 4 were skipped. Apply the fix below anyway; it changes nothing until a default-deny exists.)
+.Got `HTTP 200` instead?
+[%collapsible]
+====
+An `HTTP 200` here means `{user}-dev` has no `default-deny-all` — exercises 3 and 4 were skipped. Apply the fix below anyway; it changes nothing until a default-deny exists.
+====
 
-*Fix it the way you fixed the app: name the flows.*
-The Gateway needs three — in from the router, out to `istiod`, out to `parasol-web` — and `parasol-web` must accept it in turn:
+*Fix it as you fixed the app: name the flows* — router in, `istiod` and `parasol-web` out, and `parasol-web` accepting the Gateway:
 
 [tabs]
 ====
 Console::
 +
 --
-Use *Import YAML* in project `{user}-dev`, paste *both* policies from the *CLI* tab, and *Create*.
-Then watch *Workloads* → *Pods*: the `parasol-gateway-openshift-default-…` pod turns `1/1` within a minute.
+. *Import YAML* in project `{user}-dev`: paste *both* policies from the *CLI* tab, and *Create*.
+. In *Workloads* → *Pods*, the `parasol-gateway-openshift-default-…` pod turns `1/1` within a minute.
 --
 CLI::
 +
@@ -1540,7 +1659,7 @@ Waiting for deployment "parasol-gateway-openshift-default" rollout to finish: 0 
 deployment "parasol-gateway-openshift-default" successfully rolled out
 ----
 
-Reach the app through the Gateway again — the router takes a few seconds to notice the proxy is Ready, and answers `503` until it does, so the `--retry` flags ride that out:
+Reach the app through the Gateway again (`--retry` rides out the router's `503` until it sees the proxy Ready):
 
 [source,sh,role=execute]
 ----
@@ -1554,8 +1673,7 @@ curl -sfk --retry 30 --retry-all-errors --retry-delay 2 --max-time 10 "https://$
 [{"id":"CLM-1001","policyholder":"Alice Nguyen","type":"Auto","status":"Under Re
 ----
 
-The claims JSON.
-For proof of the path, read the Gateway's own access log — the request, its status, and the backend Envoy sent it to:
+Prove the path with the Gateway's own access log — request, status, and the backend Envoy chose:
 
 [source,sh,role=execute]
 ----
@@ -1568,26 +1686,20 @@ oc logs -n $NS -l gateway.networking.k8s.io/gateway-name=parasol-gateway --tail=
 "GET /api/claims HTTP/1.1" 200 outbound|8080||parasol-web.{user}-dev.svc.cluster.local
 ----
 
-That backend is exactly what your HTTPRoute named.
-Two paths now front the same Service: `parasol-web` (Route → app) and `parasol-gw` (Route → Gateway → HTTPRoute → app).
-On a cluster with a load-balancer provider you would drop the annotation and the Route — the Gateway would get an external address of its own.
+*What just happened:* the backend is what your HTTPRoute named. Two paths now front one Service: `parasol-web` (Route → app) and `parasol-gw` (Route → Gateway → HTTPRoute → app).
 
 [.checkpoint]
 ****
-✔ *Verify:* You read the platform's `openshift-default` GatewayClass (`Accepted`) and confirmed the layer-4 route types are absent; created a ClusterIP-backed `Gateway` (`PROGRAMMED True`) and an `HTTPRoute` to `parasol-web` (`Accepted`, `ResolvedRefs`); saw the Gateway answer `503` because your default-deny starved its Envoy pod; opened exactly the three flows it needs; and reached the claims JSON through `parasol-gw`, with the Gateway's access log naming `parasol-web` as the backend.
+✔ *Verify:* `parasol-gateway` is `PROGRAMMED True` and its Envoy pod `1/1`; `curl` through `parasol-gw` returns the claims JSON, and the access log names `parasol-web` as the backend.
 ****
 
 == Challenge (optional)
 ⏱ *no hand-holding*
 
-You have the mechanics.
-Try these on your own:
+* *Add a third-party allow.* A new `reporting` pod (label `app=reporting`) must read the database directly. Write the *two* NetworkPolicies that let *only* it reach `claims-db:5432` (ingress on the db, egress on the reporting pod), deploy a throwaway pod with that label, and prove it connects while `demo-client` still cannot.
+* *Prove the DNS gotcha yourself.* Delete `allow-dns-egress`, re-create it with `port: 53` instead of the named ports, and confirm DNS *stays broken*; then switch back to `dns`/`dns-tcp` and watch it recover.
+* *Compare the two exposure paths.* Read the Route straight to `parasol-web` and the Gateway + HTTPRoute in front of it (`oc get route parasol-web -n {user}-dev -o yaml`, `oc get gateway,httproute -n {user}-dev -o yaml`). Map each Route field — `host`, `tls.termination`, `to.kind/name` — to where the Gateway `listener` or the `HTTPRoute` `backendRef` expresses the same intent, then sketch where a weighted second `backendRefs` entry would split traffic between two versions.
+* *Diff your two Routes.* Compare the edge and re-encrypt Routes' `spec.tls` and `spec.port` (`oc get route parasol-web parasol-web-secure -n {user}-dev -o custom-columns='NAME:.metadata.name,TERMINATION:.spec.tls.termination,PORT:.spec.port.targetPort'`) and explain, without re-reading the lab, why only one of them needs an `https` target port — and what would break if you swapped them.
 
-* *Add a third-party allow.* Suppose a new `reporting` pod (label `app=reporting`) must read the database directly. Write the *two* NetworkPolicies that let *only* it reach `claims-db:5432` (ingress on the db, egress on the reporting pod), deploy a throwaway pod with that label, and prove it connects while `demo-client` still cannot.
-* *Prove the DNS gotcha yourself.* Delete `allow-dns-egress`, re-create it with `port: 53` instead of the named ports, and confirm DNS *stays broken*; then switch back to `dns`/`dns-tcp` and watch it recover. Now you will never lose an afternoon to it.
-* *Compare the two exposure paths.* You have a Route straight to `parasol-web` and a Gateway + HTTPRoute in front of it. Read both (`oc get route parasol-web -n {user}-dev -o yaml`, `oc get gateway,httproute -n {user}-dev -o yaml`) and map each Route field — `host`, `tls.termination`, `to.kind/name` — to where the Gateway `listener` or the `HTTPRoute` `backendRef` expresses the same intent. Then sketch where a second `backendRefs` entry with a `weight` would go to split traffic between two versions.
-* *Diff your two Routes.* You now have an edge Route and a re-encrypt Route in front of the *same* Service. Compare their `spec.tls` and `spec.port` (`oc get route parasol-web parasol-web-secure -n {user}-dev -o custom-columns='NAME:.metadata.name,TERMINATION:.spec.tls.termination,PORT:.spec.port.targetPort'`) and explain, without re-reading the lab, why only one of them needs an `https` target port — and what would break if you swapped them.
-
-When you are done, run `ws verify {module-id}` in the Terminal — or run `ws prep {module-id} --yes` to return your world to the flat entry state (no policy, no Route).
-
+When you are done, run `ws verify {module-id}` in the Terminal — or `ws prep {module-id} --yes` to return your world to the flat entry state (no policy, no Route).
 endif::demo[]
