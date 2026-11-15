@@ -11,6 +11,8 @@ include::partial$version-attributes.adoc[]
 // went with them; the two rows below that remain are the ones still measured in this module.
 // 2026-11-15: the claims image now emits a span per JDBC statement; exercise 5's row, Q4 and the Tempo watchout were
 // re-measured as user21 on gn67x (cockpit terminal for every step, Tempo search API read as admin).
+// 2026-11-15 (later): each attendee's service is named parasol-claims-<user>; exercise 5 is menu picks in the Traces
+// screen. Its row and the shared-Tempo watchout were re-proved as user21 with the plugin's own queries.
 
 This module is console-heavy and its drama is *live*, not narrated: an alert that goes red while the room watches, and a dashboard whose error panel jumps with it.
 The signature beat is exercise 4 — *break the database, watch the alert fire* — and the closer is the dashboard the attendees wrote in exercise 3 showing the same outage.
@@ -32,7 +34,7 @@ The two long poles are the alert's fire delay (mostly waiting, filled with the l
 | 2 | Alert on what matters | ~5 min | `oc apply` the PrometheusRule instant; the thanos-ruler reports it `inactive` within *~40s*, and it appears in the attendee's *project-scoped* Observe view (`/dev-monitoring/ns/<user>-dev/alertrules?alert-source=user`) with an empty *State* column — the cluster-wide *Observe → Alerting* page shows them nothing (see Q1)
 | 3 | Build the claims dashboard as code | ~7 min | `oc apply` of the four-panel `PersesDashboard` instant (`Available=True` within ~3s); Perses served it to the attendee's token at once, and each panel's query answered `200` through the `thanos-tenancy` datasource; the one-line edit and re-apply landed the new query in Perses within ~3s (measured 2026-11-14 as user13 in the cockpit terminal). The time is reading and opening the console, not waiting
 | 4 | Break it, watch the alert catch it | ~6 min | DB scale-to-0 *plus a 20-worker concurrent burst* → 5-min 5xx rate peaks ~*1.1/s* → alert *Pending* at *~50s*, *Firing* at *~170s* (~3 min total); deterministic with the *10s* scrape (the ~30s 5xx window spans ≥3 scrapes, so `rate()` sees a rising counter) — a gentle trickle or an edited-down serial loop banks too few 5xx to cross the line; recovery needs DB back *plus* an app restart (poisoned connection pool)
-| 5 | Follow a request with a trace | ~8 min | a request is searchable in Tempo *10–20 s* after it is sent; a `CLM-1001` history trace is *15 spans* (the HTTP span, 7 `SELECT` spans of which the last 5 are the per-event loads, each after a `DataSource.getConnection`) and takes 12–43 ms; exercise 4's outage left *274* error traces on the attendee's Route host, most *~2 s* long, each with a failing `DataSource.getConnection` span (measured 2026-11-15 as user21; the console reading itself was not timed, so the ~8 min is the old ~7 plus one more trace to open)
+| 5 | Follow a request with a trace | ~6 min | `parasol-claims-<user>` is in the *Service Name* menu as soon as `ws prep` finishes; each filter pick answers in *1–3 s*; with *Status* `error`, the chart holds exercise 4's failed requests (*~300* on the build run, slowest *2.0 s*, each a 2-span trace whose `DataSource.getConnection` span carries `Connection to claims-db:5432 refused`); with *Span Name* `GET /api/claims/\{claimNumber}/history`, 20 of 20 listed traces were *15 spans*, 12–49 ms (measured 2026-11-15 as user21 with the plugin's own Tempo queries; the ~6 min is five clicks and the reading, not a timed console run)
 |===
 
 [NOTE]
@@ -234,11 +236,12 @@ Say the dash out loud before anyone reports it as a bug.
 If it is missing, exercise 2 fails for *everyone* and so does attendee-run `ws verify observability-metrics-traces` (it reads the ServiceMonitor and the rule).
 Confirm pre-flight item 2 prints `yes` for a real attendee id before you start.
 * *Tempo runs a monolithic in-memory backend on the shared cluster.*
-Traces are *recent-only* — there is no long retention.
-If exercise 5 shows an empty trace list, drive a request first (the load generator does this continuously) and refresh; do not go hunting for hours-old traces.
-* *Every attendee's traces share one Tempo tenant and one service name.*
-`{ resource.service.name = "parasol-claims" }` returns the whole room's requests, so exercise 5 filters on the attendee's own Route host (`span.server.address`), which matches only requests they sent through their Route — their own history request and exercise 4's burst.
-The load generator calls the in-cluster Service, so its spans carry `server.address = "parasol-claims"` and never match.
+Traces are *recent-only* — there is no long retention, and the Traces screen opens on the *last 30 minutes*.
+An attendee who ran exercise 4 longer ago than that widens *Time range*; the load generator keeps the history traces coming.
+* *Every attendee shares one Tempo tenant, and each attendee's service has its own name.*
+The entry state sets `QUARKUS_OTEL_SERVICE_NAME=parasol-claims-<user>`, so the *Service Name* menu lists the whole room's services and each attendee picks their own.
+The second pick matters: the screen lists *20 traces* by default (*Max traces*), and with the service alone Tempo returned the 20 earliest in the window (the pod's startup `INSERT` spans), not the outage.
+*Status* `error` and *Span Name* bring the right traces forward; that is why the lab has both.
 * *`parasol-web` is not OpenTelemetry-instrumented*, so there is no web → claims → db distributed trace yet — the real trace is claims → db, and the objectives' "through web→claims→db" is a future enhancement.
 Do not demo a front-end hop that does not exist.
 * *The break-fix leaves the app needing a restart.*
@@ -260,6 +263,7 @@ Built fresh for this workshop; no content was ported from stale material.
 Every command, output, and timing that remains on this page was produced performing the lab as `user2` on OpenShift 4.21.22 against the shared Cluster Observability Operator 1.5.1 / Tempo 0.21.0-2 / Red Hat build of OpenTelemetry 0.152.0-1 stack on 2026-07-11 — the golden signals and `claims_created_total` in user-workload monitoring, the PrometheusRule's inactive → pending → firing progression, the `parasol-claims` traces in Tempo — with the alert beat re-measured against the 10s-scrape entry state on 2026-07-19 (the 10s scrape makes the fire deterministic; a 30s scrape flaked at G3).
 The dashboard-as-code beat (exercise 3) was performed as `user13` in the real cockpit terminal on 2026-11-14: the `PersesDashboard` applied and re-applied as the attendee, the Perses API returned it to the attendee's token, every panel query answered `200` through the `thanos-tenancy` datasource, and the panels' series were read back during the database break (5xx panel peaking near *6/s*).
 The console view, its *Observe → Dashboards (Perses)* nav entry and the deep link were confirmed signed in as `user11` the same day.
-The trace beat (exercise 5) was re-performed as `user21` in the cockpit terminal on 2026-11-15, after the shared claims image was rebuilt to emit a span per JDBC statement: `ws prep`, exercises 1–4 including the database break (alert *Firing* 3m20s after the break), then the history request; the trace structure, the outage's failing `DataSource.getConnection` span with its `Connection to claims-db:5432 refused` exception, and the Route-host filter were read back from the Tempo search API.
-The console's trace waterfall was not re-captured; the labels the lab names come from the tracing plugin's own bundle on the cluster.
+The trace beat (exercise 5) was re-performed as `user21` in the cockpit terminal on 2026-11-15, after the shared claims image was rebuilt to emit a span per JDBC statement: `ws prep`, exercises 1–4 including the database break (alert *Firing* 3m20s after the break), then the history request; the trace structure and the outage's failing `DataSource.getConnection` span with its `Connection to claims-db:5432 refused` exception were read back from the Tempo search API.
+Later that day the service became `parasol-claims-<user>` and exercise 5 became menu picks; it was re-proved as `user21` after a fresh `ws prep` and exercise 4's break, sending the plugin's own queries (service list, *Status* `error`, *Span Name*) to Tempo, and the attendee's own token returned the same service list.
+The menu and tab labels the lab names come from the tracing plugin's bundle on the cluster; the console screens are captured separately.
 The alerting *console surface* was re-grounded as `user1` in an authenticated console on 2026-07-28: the cluster-scoped *Observe → Alerting* page is `Forbidden` for an attendee and lists *0 - 0 of 0*, while the project-scoped `/dev-monitoring/ns/<user>-dev/alertrules?alert-source=user` view lists the rule (severity *Warning*, source *User*, *State* `-` at the healthy baseline).

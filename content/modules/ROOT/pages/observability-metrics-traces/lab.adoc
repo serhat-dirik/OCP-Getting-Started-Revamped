@@ -42,9 +42,8 @@ include::partial$version-attributes.adoc[]
 // plus a recap. Nothing here assumes more than one claims replica. Exercise timings are the surviving
 // per-exercise estimates (the alert/fire timings were measured 2026-07-11 / 2026-07-19); the demo timing
 // is re-timed arithmetically from them, and demo beat 3 (dashboard) was proved on gn67x on 2026-11-15 (see the Verified comment in that beat).
-// 2026-11-15, as user21 on gn67x: exercise 5 rewritten for the claims image that now emits a span per JDBC statement;
-// the history staircase, the outage's failing getConnection span and the route-host filter were all read back from Tempo
-// (see the PROVEN comment in exercise 5).
+// 2026-11-15, as user21 on gn67x: exercise 5 reads database spans, and the service is named parasol-claims-{user} so
+// the attendee picks it from the Traces screen's menus (no query to type); see the PROVEN comment in exercise 5.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -769,7 +768,7 @@ While it climbs, read the *three signals* on the same fault — the whole module
 
 |*Traces* say *where*
 |*Observe → Traces* (next exercise)
-|The failing requests, each recorded with its status.
+|The failing requests, each recorded with its status and the database call that failed.
 |===
 
 *What just happened:* the cause was in the logs all along, but they did not notice, count or page anything; the metric and the alert sent you there.
@@ -838,120 +837,75 @@ That "restart to drop the poisoned connection pool" step is the fix worth rememb
 ****
 
 == 5. Follow a request with a trace
-⏱ *~8 min* · see every database call a request makes, and the call that failed during the outage
+⏱ *~6 min* · open the slowest request, read its steps, then see every database call a request makes
 
 Metrics told you the 5xx rate was up; they cannot tell you *which* request failed, or *where* inside it the time went.
 A *trace* does: one request, drawn as a timeline of every step it took, down to each database query.
 
-*You'll end with:* a history request open in *Observe → Traces* with its database queries listed one by one, and a request from exercise 4's outage whose failing database call names the error.
+*You'll end with:* the slowest request from exercise 4's outage open in *Observe → Traces*, with its failing database call named, and a history request with its database queries listed one by one.
 
 [mermaid]
 ....
 include::example$diagrams/observability-metrics-traces/09-trace-path.mmd[]
 ....
 
-Every request's OpenTelemetry trace reaches *Tempo* through the shared collector, and the *Cluster Observability Operator*'s distributed-tracing plugin shows it in the console.
-The claims service records one span for each HTTP request, and under it one *child span* for every SQL statement that request sends to `claims-db`.
-A trace waterfall has no terminal equivalent, so you read it in the console; the terminal only sends the request.
+Your claims service sends a trace for every request to *Tempo*, under the service name `parasol-claims-{user}`, and *Observe → Traces* shows them.
+Each trace holds one span for the HTTP request and, under it, one span for every SQL statement that request sent to `claims-db`.
+A new request appears within about 15 seconds.
 
-Set this exercise's shortcuts (re-run this block after a reconnect):
-
-[source,sh,role=execute,subs="attributes+"]
-----
-NS={user}-dev
-CLAIMS=http://parasol-claims-{user}-dev.{cluster_domain}
-----
-
-Send one request to the claims *history* endpoint yourself, through your own Route:
-
-[source,sh,role=execute]
-----
-curl -s -o /dev/null -w 'GET /api/claims/CLM-1001/history -> HTTP %{http_code}\n' "${CLAIMS:?is empty - run the first block of this exercise again}/api/claims/CLM-1001/history"
-----
-
-.Expected output
-[%collapsible]
-====
-[source,texinfo]
-----
-GET /api/claims/CLM-1001/history -> HTTP 200
-----
-====
-
-Now find that request's trace:
+// PROVEN 2026-11-15 on gn67x as user21 (chart 0.1.4, cockpit terminal for every attendee step, Tempo API read as
+// admin with the same queries the plugin sends; the attendee's own token returned the same service list):
+//   * Service Name menu = tag values of resource.service.name: ["parasol-claims","parasol-claims-user21"].
+//   * Service Name alone, Max traces 20: Tempo returned the pod's 20 earliest traces (startup DROP/INSERT spans), not
+//     the outage, which is why the steps pick Status `error` and then a Span Name. Default time range: last 30 min.
+//   * + Status error: ~300 GET /api/claims 500s from the exercise 4 burst, slowest 2041 ms; every trace >= 1.5 s in the
+//     window was one of them except the restarted pod's first request (1584 ms). Each is 2 spans: GET /api/claims
+//     (500, error) and DataSource.getConnection (error, ~2 s), exception "Connection to claims-db:5432 refused. ...".
+//   * Span Name GET /api/claims/{claimNumber}/history: 20 of 20 traces had 15 spans (12-49 ms): SELECT claim, SELECT
+//     event ids, 5 identical by-id SELECTs (db.statement ... where ce1_0.id=?), each after a DataSource.getConnection.
+//   * Labels (Filter, Service Name, Span Name, Status, Max traces, Spans, Attributes, Events) come from the plugin's
+//     bundle on the cluster. Each filter pick answered in 1-3 s.
+// UNBLOCKED 2026-07-26 (task #86): the TempoMonolithic runs multitenancy mode openshift behind tempo-traces-gateway;
+// the collector exports through the gateway with x-scope-orgid workshop; attendees hold the tenant grant (resource
+// "workshop", resourceName "traces") and list/get on tempomonolithics so the instance menu fills.
 
 . In the {ocp_console_url}[OpenShift web console^], open *Observe* → *Traces*, and select the `traces` *Tempo instance* and the `workshop` *Tenant*.
+. In the filter bar, leave the *Filter* menu on *Service Name* and pick `parasol-claims-{user}` in *Filter by Service Name*.
+. Switch the *Filter* menu to *Status* and pick `error`.
 +
-// media-pass: screenshot/gif observability-metrics-traces-02-observe-traces.png — Observe -> Traces: select the traces instance (TempoMonolithic `traces` in ogsr-observability-workshop; its pods and services carry the tempo-traces prefix), run the history TraceQL query below, and open the trace to its staircase of SELECT spans (HIGH; prefer a <30s gif of the search->open flow). Alt: "Observe Traces view with a TraceQL query for the attendee's own history requests, and one trace open: the GET /api/claims/{claimNumber}/history span with seven SELECT spans under it, the last five identical." The committed PNG predates database spans (2026-07-28: it showed only the empty "No Tempo instance selected" landing state) — do not re-embed that asset; re-shoot the completed search->open flow.
-// UNBLOCKED 2026-07-26 (task #86) — the platform fix landed in three stages:
-//   1. spec.multitenancy {enabled: true, mode: openshift} on the TempoMonolithic. The operator
-//      then fronts Tempo with tempo-traces-gateway (+ an OPA sidecar) and repoints the JaegerUI
-//      route at it. Before this the page refused outright: "Instances without multi-tenancy are
-//      not supported."
-//   2. The OTel collector now exports THROUGH that gateway — endpoint tempo-traces-gateway:4317,
-//      header x-scope-orgid: workshop, its ServiceAccount token via bearertokenauth, TLS verified
-//      against the service-CA. The old direct tempo-traces:4317 path carries no tenant.
-//   3. TWO separate grants for attendees, which is the part that is easy to miss: the tenant
-//      query grant (apiGroup tempo.grafana.com, resource "workshop", resourceName "traces") AND
-//      list/get on tempomonolithics so the page's instance dropdown is populated at all.
-// PROVEN 2026-08-02 with the module's own traffic as user2, querying the Tempo tenant gateway with the
-// attendee's own token: /api/services returned {"data":["parasol-claims"]}, and a trace ID lifted from a
-// /q/metrics exemplar returned full span data.
-// PROVEN 2026-11-15 on gn67x as user21 (cockpit terminal for every step, Tempo search API read as admin):
-// the claims image now carries JDBC spans. A CLM-1001 history trace = 15 spans: the HTTP span, 7 SELECTs
-// (claim, event ids, then 5 identical by-id loads) each preceded by a DataSource.getConnection span;
-// 12-43 ms end to end. The route-host filter below matched only user21's own request (the load generator
-// calls the in-cluster Service, so its spans carry server.address "parasol-claims"); traces were
-// searchable 10-20 s after the request. Console labels (Tempo instance, Tenant, Show query, TraceQL Query,
-// Run query, Attributes, Events) are taken from the plugin's own bundle and en locale file on the
-// cluster, not from a screenshot.
-. Paste this query into the *TraceQL Query* box (click *Show query* if the box is hidden), and click *Run query*:
+Your service records several requests every second and the screen lists 20 at a time (*Max traces*), so this brings exercise 4's failed requests forward.
+Each dot in the chart is one request: across is when it ran, up is how long it took, and red means it ended in an error.
 +
-[.copy]
-`{ span.server.address = "parasol-claims-{user}-dev.{cluster_domain}" && span.http.route = "/api/claims/\{claimNumber}/history" }`
+image::observability-metrics-traces/observability-metrics-traces-07-traces-service-filter.png["Observe, Traces with the traces Tempo instance and the workshop tenant selected, filtered to the attendee's own parasol-claims service and to Status error: a duration chart of red dots near 2 seconds from the database outage, and below it the list of GET /api/claims traces with their span counts and durations."]
+. Click the highest dot.
+The trace opens with two spans: `GET /api/claims`, marked as an error with status `500`, and under it `DataSource.getConnection`, also an error, which takes almost the whole 2 seconds.
+. Click the `DataSource.getConnection` span and open its *Events* tab: an `exception` whose message begins `Connection to claims-db:5432 refused`.
 +
-Every attendee's traces land in the same Tempo, all under the service name `parasol-claims`.
-This filter keeps only requests that came in through *your* Route; the load generators call their claims service from inside the cluster, so theirs do not match.
-A request appears 10 to 20 seconds after you send it; if the list is empty, wait a moment and run the query again.
-. Open the trace.
-Under the `GET /api/claims/\{claimNumber}/history` span sit its database calls, in the order the app made them:
-+
-* one `SELECT parasol.claim`: load the claim itself
-* one `SELECT parasol.claim_event`: fetch the *ids* of the claim's events
-* then *five* more `SELECT parasol.claim_event` spans, identical, stepping down one after another: one per event
-+
-Each query is preceded by a short `DataSource.getConnection` span, where the app borrows a connection from its pool.
-The whole request is 15 spans and takes a few tens of milliseconds.
-. Click one of the five identical spans and read its *Attributes*: `db.statement` is `select … from claim_event ce1_0 where ce1_0.id=?`.
-Click the next one: the same statement, for the next id.
-
-*What just happened:* that staircase is the *N+1 query* pattern, made visible.
-To show one claim's history, the endpoint asks the database once for the list of event ids, then once more *for each event*.
-For a claim with N events that is 1 + N queries, where a single query could return all of them: `CLM-1001` has five events, so six queries (plus the one that loads the claim).
-At this warm, in-cluster database each query takes a millisecond or so, so the endpoint still answers quickly.
-Against a busy or distant database every one of those round trips costs real time, and the cost grows with the number of events; the trace shows you that before a user reports a slow claim.
-The fix is one query that loads every event at once, and the trace would then show one `SELECT` where it now shows five.
-Every other endpoint shows its own statements the same way: a `POST /api/claims` trace, for example, carries the `INSERT parasol.claim` that stored the new claim.
-
-Now go back to exercise 4's outage.
-The burst sent its requests through your Route as well, so the same filter finds them:
-
-. Replace the query with this one, and click *Run query*:
-+
-[.copy]
-`{ span.server.address = "parasol-claims-{user}-dev.{cluster_domain}" && status = error }`
-+
-The list fills with `GET /api/claims` traces, most of them about *2 seconds* long: the slowest requests of the whole session.
-If it is empty, widen the *Time range* so it reaches back to exercise 4.
-. Open one.
-It holds two spans: the `GET /api/claims` request, marked as an error with status `500`, and under it a `DataSource.getConnection` span, also an error, which takes almost the whole 2 seconds.
-. Click the `DataSource.getConnection` span and read its *Events*: an `exception` whose message is `Connection to claims-db:5432 refused. Check that the hostname and port are correct and that the postmaster is accepting TCP/IP connections.`
+image::observability-metrics-traces/observability-metrics-traces-08-outage-trace-error-span.png["An outage trace open in Observe, Traces: the GET /api/claims span marked as an error, and under it the DataSource.getConnection span, also an error, lasting about 2 seconds; the span is selected and its Events tab shows an exception with the message Connection to claims-db:5432 refused."]
 
 *What just happened:* the trace located the fault.
 The request never reached a query: it spent two seconds trying to get a connection to a database that was not there, then failed.
-It is the same `Connection refused` you found in the logs in exercise 4, but attached to the exact request, with its timing, and found without searching a log.
-A few traces from the first seconds of the outage read differently: `FATAL: the database system is shutting down` on the connection, or a `SELECT` span that failed mid-query with `terminating connection due to unexpected postmaster exit`.
-That is the same outage, caught at an earlier moment.
+It is the same `Connection refused` you found in the logs in exercise 4, attached to the exact request, with its timing.
+
+Now look at a request that worked.
+The load generator calls the claims *history* endpoint for `CLM-1001` every few seconds.
+
+. Go back to the trace list, remove the `error` chip (click its *×*), switch the *Filter* menu to *Span Name*, and pick `GET /api/claims/\{claimNumber}/history`.
+. In the list, click a trace whose *Spans* column reads `15`.
+Under the request span sit its database calls, in the order the app made them:
++
+* one `SELECT parasol.claim`: load the claim
+* one `SELECT parasol.claim_event`: fetch the ids of the claim's events
+* then *five* more `SELECT parasol.claim_event` spans, stepping down one after another: one per event
++
+Before each query sits a short `DataSource.getConnection` span, where the app borrows a connection from its pool.
+Click two of the five: their *Attributes* show the same `db.statement`, `select … from claim_event ce1_0 where ce1_0.id=?`.
++
+image::observability-metrics-traces/observability-metrics-traces-09-history-trace-n-plus-one.png["A history trace open in Observe, Traces: the history request span with 14 spans under it: a SELECT parasol.claim, a SELECT parasol.claim_event for the event ids, then five identical SELECT parasol.claim_event spans stepping down one after another, each after a short DataSource.getConnection span."]
+
+*What just happened:* that staircase is the *N+1 query* pattern.
+To show one claim's history, the endpoint asks the database once for the list of event ids, then once more for each event: 1 + N queries, where a single query could return them all.
+Each query is a round trip, so the endpoint gets slower as a claim gathers events or the database gets busier, and the trace shows the pattern long before anyone reports a slow page.
 
 [NOTE]
 .The metric that points at its own trace
@@ -967,7 +921,7 @@ curl -s http://parasol-claims-{user}-dev.{cluster_domain}/q/metrics | grep -m1 '
 
 [.checkpoint]
 ****
-✔ *Verify (understanding):* in *Observe → Traces* you opened a history trace and counted its `SELECT` spans (one for the claim, one for the list of event ids, and one per event), and you opened an outage trace whose `DataSource.getConnection` span carries the `Connection to claims-db:5432 refused` error.
+✔ *Verify (understanding):* in *Observe → Traces* you picked `parasol-claims-{user}`, opened the slowest request from exercise 4's outage and read the `Connection to claims-db:5432 refused` error on its `DataSource.getConnection` span, and opened a 15-span history trace with one `SELECT` per event.
 You can say what a trace tells you that a metric cannot: *which* request, and *where* inside it the time went or the failure happened.
 ****
 
@@ -1085,7 +1039,7 @@ done
 *On screen* — while the rule arms, walk the three signals against the live fault:
 
 * *Observe → Metrics* with `sum(rate(http_server_requests_seconds_count{status=~"5.."}[5m]))` — the error rate climbing off zero. The metric noticed.
-* *Observe → Traces* with the query `{ resource.service.name = "parasol-claims" && span.db.system = "postgresql" && status = error }` — open a failing request: under it, the `DataSource.getConnection` span carries the error `Connection to claims-db:5432 refused`. The trace located it.
+* *Observe → Traces*, filtered to *Service Name* `parasol-claims-{user}` and *Status* `error` — click the highest dot: under the failing request, the `DataSource.getConnection` span carries the error `Connection to claims-db:5432 refused`. The trace located it.
 * The application's own logs — a stack trace ending in `Connection refused` from the database driver:
 
 [source,sh,role=execute,subs="attributes+"]
