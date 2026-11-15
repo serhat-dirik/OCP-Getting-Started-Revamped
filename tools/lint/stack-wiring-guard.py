@@ -9,7 +9,7 @@ is HAND-WRITTEN: a stack only reaches the cluster if someone also adds
     <NAME>="$(stack_toggle <name> <key>)"          # ~line 217
     [[ "$<NAME>" == "true" ]] && STACKS="...,<name>"  # ~line 981
 
-When M21 (platform-guardrails) shipped in 9b94ec8 it declared `stacks: [secrets]` and the stack
+When platform-guardrails shipped in 9b94ec8 it declared `stacks: [secrets]` and the stack
 existed on disk with a working kustomization — but neither hand-written line was added. The result
 was not a build failure or a red gate. It was a workshop that installs cleanly, reports
 `✅ workshop bootstrap complete`, lists module 20 in every attendee's cockpit, and then fails the
