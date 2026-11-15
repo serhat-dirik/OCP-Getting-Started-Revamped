@@ -283,7 +283,7 @@ if [[ "$ENTRY_ONLY" != "true" ]]; then
   case "$ws_rc" in
     0) check "$WS_DESC" true ;;
     1) check "$WS_DESC" false \
-         || hint "not done yet — the workspace is declared but has never run, which is exactly the state ws prep leaves it in: STARTING it is lab exercise 1. Open the Dev Spaces dashboard and click the parasol-claims workspace. Nothing is broken here — and note that a workspace you started for ANOTHER module lives in this same project and does not count for this one" ;;
+         || hint "not done yet — the workspace is declared but has never run, which is exactly the state ws prep leaves it in: STARTING it is lab exercise 1. Open the Dev Spaces dashboard and click Open beside the parasol-claims workspace. Nothing is broken here — and note that a workspace you started for ANOTHER module lives in this same project and does not count for this one" ;;
     *) warn "the end state is not gradeable from here — none of the parasol-claims workspace's signals in ${WS_NS} (its DevWorkspace, and the Deployments/Pods/PVCs the controller labels with its name) is readable as this identity"
        hint "usually this just means you have not opened Dev Spaces yet: it grants you these reads in ${WS_NS} when it adopts the project at your first dashboard sign-in, which is lab exercise 1 — so nothing is wrong, this check simply has no verdict yet. If you HAVE signed in and still land here, the API could not be asked or that grant is missing: retry, then show your instructor 'oc get rolebinding -n ${WS_NS}'. Either way, the dashboard tells you directly whether your parasol-claims workspace is running" ;;
   esac
