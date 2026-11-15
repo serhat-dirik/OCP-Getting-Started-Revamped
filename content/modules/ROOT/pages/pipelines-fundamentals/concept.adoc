@@ -22,36 +22,74 @@ include::partial$prep-while-you-read.adoc[]
 
 == What you'll learn
 
-* The *anatomy of a pipeline* — Tasks, a Pipeline, and a PipelineRun — and the three inputs/outputs that make Tasks reusable: *parameters*, *workspaces*, and *results*.
+* Where a pipeline fits: *continuous integration*, *continuous delivery*, and *continuous deployment*, and which part this module builds.
+* The *anatomy of a pipeline* — Steps, Tasks, and a Pipeline on the definition side; a PipelineRun, its TaskRuns, and their Pods on the run side — and the three inputs/outputs that make Tasks reusable: *parameters*, *workspaces*, and *results*.
 * The three *reuse layers* — shipped catalog Tasks, a curated *organization library*, and your app's own Pipeline — and how the *cluster resolver* wires them together.
 * *Why platform teams curate a task library*, shown by one concrete Task: `maven-jdk21`, which fixes the build container and Maven settings every Parasol Java service builds with.
 * That *how a pipeline runs is a set of deliberate choices* — who owns it, what triggers it (every push versus a nightly schedule), and where its definition lives — and you wire one of them, *Pipelines-as-Code*, where a Git push builds the pushed commit.
 * That *pipelines produce data, not just artifacts*: a Task can emit results (here, an image's size and whether it fits a budget) that surface at the run level.
 
+== Where a pipeline fits: CI and CD
+
+A pipeline automates the path a change takes from a commit to a running application.
+Each stretch of that path has a name:
+
+Continuous integration (CI):: Every change is built, tested, checked for security issues, and released as an image, automatically, soon after it is pushed.
+A broken change is caught within minutes, while its author still has the context.
+Continuous delivery:: The same change carries on to a staging environment and its acceptance tests, then stops.
+The release is always ready for production; a person approves the last step.
+Continuous deployment:: The same path with no manual step: a change that passes every check reaches production on its own.
+
+Both of the last two are abbreviated *CD*, which is why "CI/CD" can mean either.
+
+[mermaid]
+....
+include::example$diagrams/pipelines-fundamentals/11-ci-cd-spans.mmd[]
+....
+
+This module's pipeline is the CI stretch — build, test, and publish an image — plus a deploy into your own `{user}-cicd` namespace; the *GitOps Fundamentals* and *GitOps at Scale & Progressive Delivery* modules carry an image on to further environments.
+
 == Anatomy of a pipeline
 
-A pipeline is not magic; it is three plain Kubernetes objects, and once you see the shapes the rest follows.
+A pipeline is not magic; it is a handful of plain Kubernetes objects, and once you see the shapes the rest follows.
+They come in two halves: a *definition* that says what to run, and a *run* that does it.
 
-Task:: A single, reusable unit of work — clone a repository, run a Maven build, build an image, roll out a Deployment.
+The definition:
+
+Step:: One command or script, run in a container image the Step names.
+Task:: An ordered list of Steps that does one reusable job — clone a repository, run a Maven build, build an image, roll out a Deployment.
 A Task declares *what it needs* and *what it produces*, so it can be reused across many pipelines without editing.
 Pipeline:: An *ordered graph of Tasks*: "clone, then test, then build, then report, then deploy."
 The Pipeline itself runs nothing — it is the recipe.
+
+The run:
+
 PipelineRun:: *One execution* of a Pipeline.
-This is where the Pipeline meets reality: you hand it parameter values and a workspace, and it creates the Pods that do the work.
+This is where the Pipeline meets reality: you hand it parameter values and a workspace, and it runs the Tasks.
 Run the same Pipeline ten times and you get ten PipelineRuns.
+TaskRun:: *One execution* of one Task.
+A PipelineRun creates one TaskRun for each Task in the Pipeline.
+
+// GROUNDING (2026-11-15): the two Step names are maven-jdk21's (pipelines/tasks/maven-jdk21.yaml);
+// `container step-mvn-goals has failed` is tkn's own line, captured live in lab exercise 3 on
+// 2026-11-12 (see the provenance comment there). The per-run PVC is the lab's volumeClaimTemplate
+// binding; only fetch-source, unit-test and build-image map shared-workspace in pipeline.yaml.
+Each TaskRun runs as *one Pod*, and each Step runs as *one container* in that Pod, named `step-` plus the Step's name.
+The `unit-test` Task has two Steps, so its Pod has two containers: `step-generate-settings` and `step-mvn-goals`.
+That is why a failing test is reported as `container step-mvn-goals has failed`.
 
 The reason a Task is reusable — rather than a copy-pasted shell script — is three typed connection points:
 
 Parameters:: Typed *inputs* to a Task or Pipeline (the Git URL, the image tag, a size budget).
 The same Task builds *any* repository because the repository is a parameter, not a hardcoded value.
-Workspaces:: *Shared storage* attached at run time — usually a PersistentVolumeClaim.
+Workspaces:: *Shared storage* attached at run time — in this lab, a new PersistentVolumeClaim for each run.
+Every Task runs in its own Pod, so files do not pass from one Task to the next on their own: a workspace is how they do.
 The claims Pipeline clones the source into a workspace, and the test and build Tasks read that *same* checkout.
-A workspace is how one Task hands files to the next.
 Results:: Small typed *outputs* a Task publishes (a computed image size, a "within budget" verdict, a Git commit SHA).
 Results let a Task report a *fact* — and let later Tasks, or a human reading the run, act on it.
 
 This is the whole vocabulary.
-The claims Pipeline you run in the lab, `parasol-claims-build-test-deploy`, is exactly this: five Tasks in order, sharing one workspace, driven by a handful of parameters, publishing two results.
+The claims Pipeline you run in the lab, `parasol-claims-build-test-deploy`, is exactly this: five Tasks in order, three of them sharing one workspace, driven by four parameters, publishing two results.
 
 [mermaid]
 ....
@@ -259,7 +297,7 @@ ifdef::instructor[]
 .Presenter framing
 ====
 Spend no more than five minutes here before the live demo.
-Two ideas must land: (1) a pipeline is *Tasks → Pipeline → PipelineRun*, made reusable by *params, workspaces, results*; (2) the *library* is the platform team's leverage — `maven-jdk21`, Parasol's one definition of how its Java services build, is the memorable example.
+Two ideas must land: (1) a pipeline is a definition (*Steps → Tasks → Pipeline*) and a run (*PipelineRun → one TaskRun per Task → one Pod each, one container per Step*), made reusable by *params, workspaces, results*; (2) the *library* is the platform team's leverage — `maven-jdk21`, Parasol's one definition of how its Java services build, is the memorable example.
 The live demo (a Git push firing the pipeline, and the break-then-fix) is the payoff — keep the concept tight so there is time for it.
 ====
 endif::instructor[]
