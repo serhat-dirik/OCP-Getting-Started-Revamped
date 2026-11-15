@@ -154,7 +154,7 @@ Nothing is copied between the layers. Each step of the Pipeline carries a refere
 *In this demo*
 
 . A finished run of the claims pipeline, its five Tasks, and the data the run published
-. The one Task Parasol's platform team had to write, and the gap that forced it
+. The one Task Parasol's platform team owns in this pipeline, and what it decides for every Java build
 . A Git push that turns the pipeline red, with the build never started
 . The fix pushed, the run green, and the service rolled out with nobody touching the cluster
 
@@ -184,25 +184,25 @@ tkn pipelinerun describe --last -n $NS | sed -n '/Results/,$p' | head -n 5
 
 The right-hand column of the first output names the Task behind each step and the namespace it is resolved from. The second output is the run's *results*: the `image-report` step measured the freshly built image against a 500 MB budget and published the size and the verdict on the run itself. Pipelines produce data, not only images.
 
-=== 2 · The Task the platform team had to write — 3 min
+=== 2 · The Task the platform team owns — 3 min
 
-OpenShift Pipelines ships a `maven` Task, and this pipeline does not use it. The reason is concrete rather than a matter of taste: the shipped Task's build step is pinned to a Java 17 runner image, and `parasol-claims` is a Java 21 application.
+The pipeline takes its clone, image-build and deploy steps from the catalog that ships with OpenShift Pipelines. Its Maven step comes from Parasol's own library: `maven-jdk21`, the platform team's one definition of how Parasol's Java services build.
 
 image::pipelines-fundamentals/pipelines-fundamentals-05-pipeline-details-graph.png["Pipeline details for parasol-claims-build-test-deploy in the web console: the five-step graph above a Tasks list naming what each step resolves to — fetch-source (git-clone), unit-test (maven-jdk21), build-image (buildah), image-report (image-size-report), deploy (openshift-client) — and one shared workspace."]
 
 *Why it matters*
 
-The most valuable thing a platform team ships here is not a pipeline; it is the curated library every pipeline reuses. Publish the correct Task once and every team references the same blessed version — and when it needs an update, a CVE in a builder image or a newly required scan, one change reaches all of them.
+The most valuable thing a platform team ships here is not a pipeline; it is the library every pipeline reuses. The catalog supplies general-purpose building blocks; the library adds what is specific to the company, reviewed once and referenced by every team. When it needs an update, a newer JDK, a CVE fix in the builder image or a newly required scan, one change reaches all of them.
 
 [source,sh,role=execute]
 ----
-oc get tasks.tekton.dev maven -n openshift-pipelines -o jsonpath='shipped maven runs on: {.spec.steps[1].image}{"\n"}'
-oc get tasks.tekton.dev maven-jdk21 -n ogsr-parasol-tasks -o jsonpath='our maven-jdk21 runs on: {.spec.steps[0].image}{"\n"}'
+oc get tasks.tekton.dev maven-jdk21 -n ogsr-parasol-tasks \
+  -o jsonpath='{range .spec.steps[*]}{.name}: {.image}{"\n"}{end}params: {range .spec.params[*]}{.name}{" "}{end}{"\n"}'
 ----
 
 *What just happened*
 
-Java 17 against Java 21. The shipped Task advertises a `JAVA_VERSION` parameter, but it does not repoint that pinned image, so a Java 21 build fails with `release version 21 not supported` whatever the parameter is set to. The gap is not a missing knob — it is a missing guaranteed runtime. The alternative to curating one correct Task is every team patching its own copy, slightly differently.
+Both steps run one image, Red Hat's UBI 9 OpenJDK 21 builder, pinned by digest, and no parameter swaps it: the goals, the source subdirectory and the mirror address are all a pipeline can set. Every Parasol pipeline that references this Task builds on the same JDK with the same Maven settings, and updating that build image is one reviewed change to the library rather than one per team.
 
 === 3 · A push that should not ship, and does not — 3 min
 
@@ -274,7 +274,7 @@ The same mechanism, green this time: the test passed, the image built, the deplo
 It builds the service from source. Maven resolves the dependency tree twice, once for the test step and once inside the image build, and both pull from the platform team's in-cluster Maven mirror rather than the internet. What is left is compiling the Quarkus application and running its test suite, and that is the honest cost of a build that proves the code works. The pipeline machinery itself adds seconds.
 
 *Why curate a `maven-jdk21` Task when OpenShift ships a `maven` Task?*::
-Because the shipped one cannot build this application: its build step is pinned to a Java 17 runner image, and the `JAVA_VERSION` parameter it exposes does not repoint that image. Rather than have every team patch its own copy, the platform team publishes one correct Task into a shared library and every pipeline references it. That single, concrete gap is the argument for an organization library — fix it once, everyone inherits the fix.
+The catalog Task is written for every organization; `maven-jdk21` carries one organization's choices. It fixes the build container Parasol builds Java in (Red Hat's UBI 9 OpenJDK 21 image, pinned by digest), generates the Maven settings for the platform team's mirror on every run, and sets the default goals. Every pipeline references that one reviewed Task, so every team builds the same way and an upgrade lands in one place. The catalog still supplies the general-purpose steps — clone, image build, deploy. If a catalog Task already matches how your organization works, reference it directly; a library Task earns its place when it records a decision you want every team to share.
 
 *Where did `ClusterTask` go? Our pipelines use them.*::
 `ClusterTask` was removed from OpenShift Pipelines, so it does not exist on this cluster. The cluster resolver replaces it, and is better: Tasks live in ordinary namespaces under ordinary RBAC, and a pipeline references the exact one it wants by name and namespace.
@@ -408,7 +408,7 @@ deploy -> resolver=cluster openshift-client/openshift-pipelines
 ----
 
 *What just happened:* none. Every step is a `resolver: cluster` reference: three to the shipped catalog (`openshift-pipelines`), two to Parasol's curated library (`ogsr-parasol-tasks`).
-Those are the concept's three reuse layers; exercise 2 opens both libraries.
+Those are the concept's three reuse layers; exercise 2 opens the company library.
 
 image::pipelines-fundamentals/pipelines-fundamentals-05-pipeline-details-graph.png["Pipeline details page for parasol-claims-build-test-deploy: the topology graph showing fetch-source, unit-test, build-image, image-report and deploy left to right, and below it the Tasks list naming each resolved Task in parentheses — unit-test (maven-jdk21), image-report (image-size-report) — plus a Workspaces entry reading shared-workspace"]
 
@@ -615,12 +615,12 @@ curl -sk --retry 20 --retry-connrefused --retry-all-errors --retry-delay 3 --ret
 ****
 
 == 2. Explore the company task library
-⏱ *~5 min* · the three reuse layers, and why Parasol curates its own Tasks
+⏱ *~5 min* · the three reuse layers, and what Parasol puts in its own Tasks
 
 Two of your pipeline's five Tasks come from Parasol's own library, not from OpenShift.
-Find out why the platform team went to the trouble.
+Find out what a company library Task carries that a general-purpose catalog Task cannot.
 
-*You'll end with:* every Task in the pipeline traced to its layer, and the one concrete gap that made Parasol curate its own.
+*You'll end with:* Parasol's library listed, and `maven-jdk21` read end to end: the build container it pins, what it leaves to each pipeline, what your pipeline passes it, and where its definition lives.
 
 [mermaid]
 ....
@@ -630,7 +630,7 @@ include::example$diagrams/pipelines-fundamentals/01-anatomy-and-layers.mmd[]
 .Why this exercise stays in the terminal
 [%collapsible]
 ====
-The curated Tasks live in shared namespaces (`ogsr-parasol-tasks` and `openshift-pipelines`) that you can *read* but not *select* as a project in the console, so the console's *Pipelines → Tasks* view cannot scope to them.
+The curated Tasks live in a shared namespace (`ogsr-parasol-tasks`) that you can *read* but not *select* as a project in the console, so the console's *Pipelines → Tasks* view cannot scope to it.
 Reading a Task's inner fields (its image, its parameters) is also exactly what `oc get … -o jsonpath` does best.
 ====
 
@@ -661,68 +661,84 @@ zap-baseline              ...
 On a full-catalog cluster another operator also serves a bare `tasks`, so the short name can resolve to the *wrong* API — the same collision the packaging module flags for `subscriptions`.
 ====
 
-Several curated Tasks; two fill gaps in *this* pipeline: `maven-jdk21` and `image-size-report`.
+Several curated Tasks; two of them run in *this* pipeline: `maven-jdk21` and `image-size-report`.
 
-*Predict, then run:* OpenShift Pipelines ships its own `maven` Task, with a `JAVA_VERSION` parameter whose description lists `8, 11, 17, 21`.
-Can it build `parasol-claims`, a Java 21 application?
-
-[source,sh,role=execute]
-----
-echo "shipped maven task, build step image:"
-oc get tasks.tekton.dev maven -n openshift-pipelines -o jsonpath='  {.spec.steps[1].image}{"\n"}'
-echo "shipped maven task, parameters:"
-oc get tasks.tekton.dev maven -n openshift-pipelines -o jsonpath='  {range .spec.params[*]}{.name}{"  "}{end}{"\n"}'
-----
-
-.Expected output (parameter names vary by Pipelines version — the load-bearing fact is the build-step *image*)
-[source,texinfo]
-----
-shipped maven task, build step image:
-  registry.redhat.io/ubi9/openjdk-17@sha256:...
-shipped maven task, parameters:
-  GOALS  MAVEN_MIRROR_URL  JAVA_VERSION  SUBDIRECTORY  ENV_VARS
-----
-
-*What just happened:* no.
-The build-step image is pinned to *Java 17* (`ubi9/openjdk-17`), and `JAVA_VERSION` does not repoint it: Maven on JDK 17 fails with `release version 21 not supported`, whatever the parameter says.
-The gap is not a missing *knob* but a guaranteed *runtime*.
-Now read Parasol's answer:
+*Predict, then run:* the catalog that ships with OpenShift Pipelines is written for every organization; `maven-jdk21` is written for one.
+It is Parasol's definition of "how we build Java here."
+What does it decide on behalf of every team that references it?
 
 [source,sh,role=execute]
 ----
-echo "curated maven-jdk21, build step image:"
-oc get tasks.tekton.dev maven-jdk21 -n ogsr-parasol-tasks -o jsonpath='  {.spec.steps[0].image}{"\n"}'
+echo "maven-jdk21, step images:"
+oc get tasks.tekton.dev maven-jdk21 -n ogsr-parasol-tasks -o jsonpath='{range .spec.steps[*]}  {.name}: {.image}{"\n"}{end}'
+echo "maven-jdk21, what a pipeline can set:"
+oc get tasks.tekton.dev maven-jdk21 -n ogsr-parasol-tasks -o jsonpath='  params: {range .spec.params[*]}{.name}{" "}{end}{"\n"}  workspaces: {range .spec.workspaces[*]}{.name}{" "}{end}{"\n"}'
 ----
 
-.Expected output
+.Expected output (sample from a live run; the digest is whichever build image the platform team last approved)
 [source,texinfo]
 ----
-curated maven-jdk21, build step image:
-  registry.access.redhat.com/ubi9/openjdk-21@sha256:...
+maven-jdk21, step images:
+  generate-settings: registry.access.redhat.com/ubi9/openjdk-21@sha256:24dad82bd5d25d9b0c85f0e9c976e47ccce787cc73792355462bf54fe03d9a77
+  mvn-goals: registry.access.redhat.com/ubi9/openjdk-21@sha256:24dad82bd5d25d9b0c85f0e9c976e47ccce787cc73792355462bf54fe03d9a77
+maven-jdk21, what a pipeline can set:
+  params: GOALS SUBDIRECTORY MAVEN_MIRROR_URL
+  workspaces: source maven-cache
 ----
 
-[cols="1,2,2",options="header"]
+*What just happened:* the build container is the library's decision, not the pipeline's.
+Both steps run one image, Red Hat's UBI 9 OpenJDK 21 builder with Maven 3.9, pinned *by digest*, so two runs of the same pipeline cannot compile against two different JDK builds.
+The first step, `generate-settings`, writes the run's Maven settings file (the repository mirror, plus a persistent local repository when the optional `maven-cache` workspace is bound); the second, `mvn-goals`, runs Maven with it.
+A pipeline chooses only what the parameters expose, the goals, the source subdirectory and the mirror address, and there is no image parameter among them: a team that references this Task builds the way Parasol builds.
+
+Now see what *your* pipeline hands it, and where the Task's definition comes from:
+
+[source,sh,role=execute]
+----
+oc get pipeline parasol-claims-build-test-deploy -n $NS \
+  -o jsonpath='{range .spec.tasks[?(@.name=="unit-test")].params[*]}{.name}={.value}{"\n"}{end}'
+oc get tasks.tekton.dev maven-jdk21 -n ogsr-parasol-tasks \
+  -o jsonpath='kept in sync from Git by: {.metadata.annotations.argocd\.argoproj\.io/tracking-id}{"\n"}'
+----
+
+.Expected output (sample from a live run)
+[source,texinfo]
+----
+GOALS=["-B","-ntp","test"]
+MAVEN_MIRROR_URL=http://maven-mirror.ogsr-maven-mirror.svc:8080
+kept in sync from Git by: workshop-config:tekton.dev/Task:ogsr-parasol-tasks/maven-jdk21
+----
+
+*What just happened:* your pipeline passes two values, the Maven goals and the address of the platform team's in-cluster repository mirror, and says nothing about the JDK.
+Nobody applied the Task by hand: the `argocd.argoproj.io/tracking-id` annotation names the Argo CD application (`workshop-config`, owned by the platform team) that keeps it in sync with a reviewed file in Git.
+
+[cols="2,2,2",options="header"]
 |===
-| | Shipped `maven` | Curated `maven-jdk21`
+| Decision | Made by | In this pipeline
 
-| Lives in
-| `openshift-pipelines`, the shipped catalog
-| `ogsr-parasol-tasks`, Parasol's library
+| Build container (JDK and Maven)
+| The platform team, in `maven-jdk21`
+| `ubi9/openjdk-21`, pinned by digest
 
-| Build-step image
-| `ubi9/openjdk-17`
-| `ubi9/openjdk-21`
+| Maven settings file
+| `maven-jdk21`, generated on every run
+| Points Maven at the mirror
 
-| Builds `parasol-claims` (Java 21)
-| No: `release version 21 not supported`
-| Yes
+| Goals and mirror address
+| Each pipeline, through parameters
+| `-B -ntp test`; the in-cluster mirror
 
-| Who fixes it
-| Every team, in its own patched copy
-| The platform team, once, for every pipeline
+| Updating the build image (a patched JDK, a newer Maven)
+| The platform team, once, in Git
+| Every pipeline that references the Task picks it up on its next run
+
+| Adopting a newer Java release
+| The platform team, by publishing a new library Task beside this one
+| Each pipeline moves by changing one `taskRef` name
 |===
 
-*What just happened:* rather than paste a patched Maven Task into every Java 21 pipeline, the platform team curated `maven-jdk21` *once*, and every pipeline references it by cluster resolver, fetched fresh when each run starts:
+The catalog's general-purpose `maven` Task in `openshift-pipelines` serves every organization, so it cannot carry any one organization's choices; `maven-jdk21` is where Parasol records them.
+Every pipeline references it by cluster resolver, fetched fresh when each run starts:
 
 [mermaid]
 ....
@@ -757,8 +773,8 @@ The *cluster resolver* you have been reading — `resolver: cluster` with `name`
 
 [.checkpoint]
 ****
-✔ *Verify:* `ogsr-parasol-tasks` lists `maven-jdk21` and `image-size-report`; the shipped `maven` Task runs on a Java 17 image with no image parameter, `maven-jdk21` on Java 21; and you read the parameters and results of `image-size-report`.
-You can explain why the platform team curated the library.
+✔ *Verify:* `ogsr-parasol-tasks` lists `maven-jdk21` and `image-size-report`; both `maven-jdk21` steps run the same digest-pinned `ubi9/openjdk-21` image and the Task has no image parameter; your pipeline passes it only `GOALS` and `MAVEN_MIRROR_URL`; and you read the parameters and results of `image-size-report`.
+You can explain what the company library adds on top of the catalog.
 ****
 
 == 3. Break the build: a failing test stops the pipeline

@@ -18,7 +18,7 @@ replacement for the removed `ClusterTask` kind. No bundled-Task YAML is ever cop
 pipelines/
 ├── tasks/                             curated org library (installed into the ogsr-parasol-tasks namespace)
 │   ├── image-size-report.yaml         reports image pull-size + budget; emits results (flagship example, pipelines-fundamentals)
-│   ├── maven-jdk21.yaml                JDK 21 Maven runner (the shipped maven task is JDK 17, pipelines-fundamentals)
+│   ├── maven-jdk21.yaml                Parasol's Maven runner: its own digest-pinned UBI9 OpenJDK 21 build container (pipelines-fundamentals)
 │   ├── acs-image-check.yaml           RHACS build-time image check (trusted-supply-chain scan gate)
 │   ├── sonar-scan.yaml                SonarQube SAST gate (app-security-testing)
 │   ├── trivy-scan.yaml                Trivy SCA gate: dep CVEs + CycloneDX SBOM (app-security-testing)
@@ -84,8 +84,9 @@ tkn pipelinerun logs -Lf -n <user>-cicd
   historically they did, and a stale override is worse than none: the capstone run kept a 1536Mi cap
   written against the old 1Gi default, which after the raise silently gave `oc create -f` builds
   *less* memory than the console *Actions → Start* form. Size the namespace, not the run.
-- **JDK:** the bundled `maven` task is pinned to a JDK 17 image with no image param, so it cannot
-  build this JDK 21 app; the curated `maven-jdk21` library Task is why.
+- **JDK:** `maven-jdk21` is the org-standard Java build: it pins Parasol's own build container
+  (UBI9 OpenJDK 21 + Maven 3.9, by digest, no image param) and generates the Maven settings. The
+  module's lesson rests on that, never on which JDK the catalog `maven` task happens to ship.
 - **Maven cache:** `maven-jdk21` declares an **optional** `maven-cache` workspace holding the local
   repository (`<localRepository>` in a settings.xml the Task generates), because it used to keep the
   repository in the TaskRun container's filesystem — so it died with the Pod and every run
