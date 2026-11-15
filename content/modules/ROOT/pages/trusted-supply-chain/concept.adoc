@@ -11,20 +11,23 @@ include::partial$version-attributes.adoc[]
 // 2026-11-13: the keyless paragraph names the signer's identity — a SPIFFE workload identity from the
 // Zero Trust Workload Identity Manager (SPIRE), which Fulcio trusts as a `spiffe` issuer — performed
 // as user2 on OCP 4.22.22 / ZTWIM 1.1.3 / RHTAS 1.5.1 (lab exercise 4).
+// 2026-11-15 redesign (owner): one pipeline the attendee runs. Tekton Chains signs keyless as its own SPIFFE
+// identity (no cosign key, no attendee signer pod), Conforma checks before deploy, and the RHTAS policy
+// controller (an admission webhook) enforces on each attendee's -cicd project. "How the signing works" and its
+// diagrams follow the structure of the owner's supply-chain showcase page (credited in the README).
 
 [.lead]
 Parasol just failed a supplier security audit: nobody could prove which build produced the claims image running in production, or what was inside it.
 
 The pipeline from the previous work builds and deploys `parasol-claims` reliably — but "it builds" is not the same as "it is trustworthy."
 The auditor asked three questions Parasol could not answer: _what dependencies are in this image, who built it, and can you prove the running image is the one your pipeline produced?_
-In this module you add the controls that answer those questions — a *software bill of materials* (what is inside), *image signing with SLSA provenance* (who built it, and proof the running image is intact), and *signature admission* — so the cluster will *refuse to run* anything that is not signed.
+In this module you run one pipeline that answers those questions — a *software bill of materials* (what is inside), *image signing with SLSA provenance* (who built it, and proof the running image is intact), a *policy check* before deploy, and *signature admission* — so the cluster will *refuse to run* anything the pipeline did not build.
 
 [NOTE]
 .What "[ADS]" means, and what is actually included
 ====
-This module uses *Red Hat Trusted Artifact Signer* (RHTAS), part of the *Red Hat Advanced Developer Suite* (RHADS), a separate subscription from a base OpenShift subscription, and *Red Hat Advanced Cluster Security for Kubernetes* (RHACS), included with OpenShift Platform Plus.
-Two of the controls you use, though — *Tekton Chains* image signing and the native *signature-policy* admission gate (`ClusterImagePolicy`, `ImagePolicy`) — ship with OpenShift itself, so part of the trust story is included the moment you have Pipelines.
-The lab flags which control is which as you go.
+This module uses *Red Hat Trusted Artifact Signer* (RHTAS: the keyless signing service and its admission policy controller) and *Conforma*, part of the *Red Hat Advanced Developer Suite* (RHADS), a separate subscription from a base OpenShift subscription, and *Red Hat Advanced Cluster Security for Kubernetes* (RHACS), included with OpenShift Platform Plus.
+*Tekton Chains* ships with OpenShift Pipelines, and OpenShift has its own node-level signature policy (`ClusterImagePolicy` in `config.openshift.io`), so signing and verifying with a key are included the moment you have Pipelines.
 ====
 
 [NOTE]
@@ -42,9 +45,9 @@ include::partial$prep-while-you-read.adoc[]
 
 * The *supply-chain threat model* in plain words — "you ship your dependencies" — and what the *SLSA* (Supply-chain Levels for Software Artifacts) levels actually ask of your build _process_.
 * The *signature / attestation / SBOM* (software bill of materials) *triangle*: three different facts about an image, and why you need all three.
-* How *Tekton Chains* signs every pipeline-built image and emits *SLSA provenance* — with no per-build wiring — and how you verify it yourself with `cosign`.
-* *Key-based versus keyless* signing — and how a *transparency log* (Rekor, in *Red Hat Trusted Artifact Signer*) turns a signature into a public, tamper-evident record anyone can audit.
-* The difference between a *build-time gate* (fail the build) and *run-time admission* (refuse to run) — and how OpenShift's native signature policy enforces "only signed images run," so a signature is *checked*, not merely produced.
+* How *Tekton Chains* signs every pipeline-built image and emits *SLSA provenance* — outside the pipeline, with no step holding a key — and how you verify it yourself with `cosign`.
+* *Keyless* signing: a ten-minute certificate for a *workload identity* instead of a stored key, and a *transparency log* (Rekor, in *Red Hat Trusted Artifact Signer*) that turns a signature into a public, tamper-evident record anyone can audit.
+* The difference between a *build-time gate* (Conforma fails the release) and *run-time admission* (the policy controller refuses to run) — so a signature is *checked*, not merely produced.
 * Where trust ends and *scanning* begins: catching flaws with SAST, SCA, DAST, and image risk is a separate module (*Application Security Testing*); here you meet scanning as a single decisive gate and spend your time proving *provenance* and *signing and verifying* what you ship.
 
 == You ship your dependencies
@@ -78,28 +81,21 @@ People conflate them constantly, so pin the distinction now:
 |===
 | Artifact | Answers | Produced by (in this lab)
 
-| *Signature* | "This image is intact and came from us." A cryptographic signature over the image digest. | Tekton Chains (cosign key)
-| *Attestation (provenance)* | "Here is _how_ this image was built" — the builder, the build type, the build tool, the timestamps — and the source commit, when the build task reports it. A signed *SLSA provenance* statement. | Tekton Chains (in-toto / SLSA)
-| *SBOM* | "Here is _what is inside_" — every component and version. | The build (CycloneDX)
+| *Signature* | "This image is intact and came from us." A cryptographic signature over the image digest. | Tekton Chains, keyless, as its workload identity
+| *Attestation (provenance)* | "Here is _how_ this image was built" — the pipeline and task, the builder, the parameters, the results, the timestamps. A signed *SLSA provenance* statement. | Tekton Chains (in-toto / SLSA)
+| *SBOM* | "Here is _what is inside_" — every component and version. | The pipeline's `sbom` step (CycloneDX); its sha256 is in the signed provenance
 |===
 
 A signature with no SBOM tells you the image is authentic but not what is in it.
 An SBOM with no signature tells you what _a_ build contained but not that _this_ image is that build.
-You need all three, and they reinforce each other: the attestation is _signed_, the SBOM can be _attested_, and the signature is what an admission gate _checks_.
+You need all three, and they reinforce each other: the attestation is _signed_, it pins the SBOM by its hash, and the signature is what an admission gate _checks_.
 
-// 2026-11-15: "How the signing works" (components, table, keyless steps, Q&A) follows the structure of
-// the owner's supply-chain showcase page (credited in the README), redrawn for THIS module's design:
-// Chains signs the image with a key, the attendee's workload signs the SBOM keyless, the node checks
-// the image at pull. Every value below is from the lab (exercises 2, 4 and 5) as grounded there.
 == How the signing works
 
-This module signs two things, two ways, and the cluster checks one of them before anything runs:
-
-* *The image*, signed by *Tekton Chains* with a *key*.
-Chains is a controller beside the pipeline, not a step in it: when a build finishes, it signs the image and the *SLSA provenance* that says how it was built, and stores both next to the image (`.sig` and `.att`).
-No pipeline step holds the key or can sign for it.
-* *The SBOM*, signed *keyless* by *your own workload*.
-A pod in your project proves who it is to *Red Hat Trusted Artifact Signer* (RHTAS, the Red Hat build of the sigstore project), signs with a key that exists for one signature, and the signature lands in a public log.
+One signer: *Tekton Chains*, the build platform.
+It signs every image a pipeline builds, and the SLSA provenance that says how it was built, *keyless* through *Red Hat Trusted Artifact Signer* (RHTAS, the Red Hat build of the sigstore project).
+Conforma checks that signature and provenance before the pipeline deploys; the policy controller checks the same signature before every pod starts.
+Every component runs in this cluster.
 
 [mermaid]
 ....
@@ -112,11 +108,11 @@ include::example$diagrams/trusted-supply-chain/10-signing-components.mmd[]
 
 | *Tekton Chains*
 | `openshift-pipelines`
-| Watches every TaskRun. When a build finishes, it signs the image and its SLSA provenance with the cluster's cosign key and pushes both next to the image. It is part of the build platform, not a pipeline step.
+| Watches every TaskRun. When a build task reports the image it pushed, Chains signs the image and attaches the SLSA provenance (what was built, by which pipeline run and task, with which parameters and results), and stores both next to the image (`.sig`, `.att`). It is the build platform, not a pipeline step: no task holds a signing key or can sign for it.
 
 | *SPIRE* (Zero Trust Workload Identity Manager)
 | `zero-trust-workload-identity-manager`
-| Gives a pod a five-minute token naming its *SPIFFE* (Secure Production Identity Framework for Everyone) ID, `spiffe://<trust domain>/ns/<namespace>/sa/<service account>`, after checking on the node which namespace and service account the pod really runs as.
+| Gives the Chains controller a short-lived token naming its *SPIFFE* (Secure Production Identity Framework for Everyone) ID, `spiffe://<trust domain>/ns/openshift-pipelines/sa/tekton-chains-controller`, after checking on the node which namespace and service account it really runs as.
 
 | *Fulcio*
 | `trusted-artifact-signer`
@@ -124,57 +120,63 @@ include::example$diagrams/trusted-supply-chain/10-signing-components.mmd[]
 
 | *Rekor* and the *CT log*
 | `trusted-artifact-signer`
-| Append-only logs. Rekor records every keyless signature with the time it was made; the CT (certificate transparency) log records every certificate Fulcio issued. A signature cannot be made quietly, and its log time proves it was made while the certificate was valid.
+| Append-only logs. Rekor records every signature and attestation with the time it was made; the CT (certificate transparency) log records every certificate Fulcio issued. A signature cannot be made quietly, and its log time proves it was made while the certificate was valid.
 
 | *TUF*
 | `trusted-artifact-signer`
 | Hands out the trust roots (Fulcio, Rekor, the CT log) that signers and verifiers start from.
 
-| *The signature policy*
-| every node
-| A `ClusterImagePolicy` the platform team applied. Before a node pulls an image in one of the policy's scopes, the image must carry a valid Chains signature, or the pull is refused.
+| *Conforma*
+| the pipeline's `verify-conforma` step
+| Before deploy: Chains' signature and provenance verify (certificate identity and Rekor), the provenance says this pipeline's `build-image` built the image, and the image is pinned by digest. Any violation stops the run.
+
+| *Policy controller*
+| `policy-controller-operator`
+| The admission webhook. Before any pod starts in a namespace labelled `policy.rhtas.com/include=true`, an image a `ClusterImagePolicy` names must carry Chains' signature: a Fulcio certificate with Chains' identity and its Rekor entry.
 |===
 
-*Key-based* signing uses a cosign key pair: the private key stays in the cluster and signs, and the public key verifies, offline, anywhere.
-It needs no identity per build, which makes it the right default for a controlled build system and the path your pipeline uses.
-
-*Keyless* signing has no long-lived key at all.
-Trust comes from the identity in a short-lived certificate and from the log entry, not from guarding a secret:
+Keyless signing, step by step:
 
 [mermaid]
 ....
 include::example$diagrams/trusted-supply-chain/11-keyless-steps.mmd[]
 ....
 
-Who signed it?::
-The image: the holder of Chains' key, which is the build platform.
-Your SBOM: the workload the certificate names, `spiffe://…/ns/<your project>/sa/pipeline`, and Rekor holds the record.
+Who signed this image?::
+Tekton Chains, when `build-image` finished, as `spiffe://…/ns/openshift-pipelines/sa/tekton-chains-controller`.
+The certificate names that identity and Rekor holds the record; the provenance names the pipeline run and task that built it.
 How is it verified?::
-With public material only.
-The image: `cosign verify` with Chains' public key, and every node at pull.
-The SBOM: `cosign verify-blob` with the expected SPIFFE ID and the trust roots from TUF; the same check pinned to a neighbour's identity is refused.
+With public material only: the Fulcio and Rekor roots from TUF, and the expected identity.
+Conforma does it before deploy, the policy controller at admission, and you with `cosign verify` and `ec validate image`.
+What does keyless mean?::
+No stored private key. A key pair is made in memory for one signature and thrown away; trust comes from the identity in a 10-minute certificate and the log entry, not from guarding a secret.
 Why does it still verify after the certificate expires?::
 Rekor's entry time proves the signature was made inside the certificate's 10 minutes, so it stays verifiable long after.
 That is what an auditor means by "prove it": not just a signature, but a receipt on a log they can read without contacting you.
+Is the SBOM signed?::
+Its sha256 is a result of the pipeline's `sbom` step, so it is part of the run's provenance that Chains signs.
 Does it need the public Sigstore services?::
 No. SPIRE, Fulcio, Rekor, the CT log and TUF all run in this cluster.
 
-Reach for keyless when you need public verifiability or per-workload signing; a well-managed cosign key is often the simpler, sufficient choice for a closed build system.
+Chains can also sign with a stored cosign key, which needs no identity service; keyless trades guarding that key for an identity plane and a log, and gives every signature a public receipt.
 
 == Policy as a gate, and policy as an admission control
 
 There are two places to stop a bad image, and they are not interchangeable — a mature supply chain uses *both*.
 
 Policy-as-gate (build time)::
-A gate runs *inside the pipeline*: build the image, check it, and *fail the build* if it violates policy.
-Scanning gates — a vulnerable dependency, a hard-coded secret, an insecure manifest — are the subject of the Application Security Testing module (a separate module); the lab here includes one scan step only as the pipeline context that trust attaches to.
-The gate's value is *shift-left*: the flaw is caught in the developer's own pipeline run, not in production.
+A gate runs *inside the pipeline*: build the image, check it, and *fail the run* if it violates policy.
+In this module's pipeline there are two: the RHACS scan (a known, blocked flaw) and *Conforma* (signed by Chains, built by this pipeline, pinned by digest).
+Scanning gates in depth — a vulnerable dependency, a hard-coded secret, an insecure manifest — are the subject of the Application Security Testing module (a separate module).
+The gate's value is *shift-left*: the problem is caught in the developer's own pipeline run, with a reason, before anything deploys.
 
 Policy-as-admission (run time)::
-A gate only helps if _every_ image goes through the pipeline — and this run-time control is where *this* module lives.
-*Admission* closes the gap by enforcing a rule at the cluster: OpenShift's native signature policy — a `ClusterImagePolicy` for the whole cluster, or an `ImagePolicy` for one namespace — tells the node to *verify a signature before it will pull an image*.
-An unsigned image — one that never went through your signing pipeline — is *refused at pull time*.
+A gate only helps if _every_ image goes through the pipeline.
+*Admission* closes the gap by enforcing a rule at the cluster: the *Red Hat Trusted Artifact Signer policy controller* is an admission webhook that the API server asks about every pod, in every namespace that opts in with the label `policy.rhtas.com/include=true`.
+Its `ClusterImagePolicy` (in `policy.sigstore.dev`) names the images it guards and the one signer it accepts: Tekton Chains' keyless identity, with a Rekor entry.
+An image that never went through the pipeline is *refused before a pod exists*, whoever deploys it.
 The gate is a policy you _run_; admission is a policy the platform _enforces_ whether or not anyone remembered to run the gate.
+(OpenShift also has a node-level signature policy, `ClusterImagePolicy` in `config.openshift.io`, that the container runtime checks at pull time; the policy controller decides earlier, at the API, with a message the deployer reads.)
 Note this is a *different* check from a scanner's deploy-time policy: the Application Security Testing module gates an insecure _manifest_ with `roxctl deployment check`, while admission here verifies the image's _signature_ — is it provably ours? — not its configuration.
 +
 [mermaid]
@@ -182,7 +184,7 @@ Note this is a *different* check from a scanner's deploy-time policy: the Applic
 include::example$diagrams/trusted-supply-chain/12-admission-checks.mmd[]
 ....
 
-Both places on this module's pipeline: the gate refuses a bad build before it ships, and admission refuses an unsigned image before it runs.
+Both places in this module: Conforma refuses a release before the pipeline deploys it, and admission refuses an image the pipeline did not build before it runs.
 
 [mermaid]
 ....
@@ -190,10 +192,9 @@ include::example$diagrams/trusted-supply-chain/01-trust-triangle.mmd[]
 ....
 
 [NOTE]
-.The scan in this lab is one pre-scanned beat
+.The scan in this lab is one gate
 ====
-Your environment comes with a clean image RHACS has *already scanned*, so you read its verdict rather than wait on a build; you run the gate live *once*, against a seeded dependency, to watch it refuse a bad image.
-The gate is scoped to a single enforced policy so it fires *deterministically* on that known-bad dependency — just enough to give the trust controls a realistic pipeline to attach to.
+Your pipeline scans every image it builds with RHACS. The gate is scoped to the "Supply Chain Security" policies, so it fires *deterministically* on a known-bad dependency: the lab's optional challenge builds a branch carrying Log4Shell and watches the scan stop it before Conforma or the deploy run.
 Tuning scan gates so they fire on the right things without crying wolf — and the SAST/SCA/DAST layers that catch what an image scan cannot — is its own craft, and its own module (*Application Security Testing*).
 ====
 
@@ -213,10 +214,10 @@ After, you have a stored, itemized record of what every image contains — the S
 _Querying_ those records at scale to find an affected component is the scanning story (the Application Security Testing module, and Red Hat Trusted Profile Analyzer); the *trust* story is that the record exists, is accurate, and travels with a signed image.
 * *Signing is only half the story; enforcement is the other half.*
 Plenty of organizations sign their images and then never check the signature at run time.
-Admission control (a `ClusterImagePolicy` here, or RHACS's cluster-wide admission) is what turns "we sign our images" into "the cluster will not run an unsigned one" — the difference between a policy on a wiki and a policy the platform enforces.
+Admission control (the policy controller's `ClusterImagePolicy` here, or RHACS's cluster-wide admission) is what turns "we sign our images" into "the cluster will not run an unsigned one" — the difference between a policy on a wiki and a policy the platform enforces.
 * *Provenance is what an auditor actually asks for.*
 "Show me that the image in production came from this commit through this pipeline" is a real audit question.
-A signed SLSA attestation is a machine-checkable answer — and because Tekton Chains produces it automatically, you get the answer without anyone writing it up.
+A signed SLSA attestation is a machine-checkable answer — and because Tekton Chains produces it automatically, you get the answer without anyone writing it up. Conforma turns it into a rule the pipeline enforces.
 * *Trust and scanning are complementary, not the same thing.*
 A scanned-clean image that isn't signed can still be swapped for another; a signed image full of known CVEs is authentically vulnerable.
 This module makes an image *provably yours*; the Application Security Testing module (a separate module) makes it *provably free of known flaws* — you want both, and they run in the same pipeline.
@@ -225,7 +226,7 @@ This module makes an image *provably yours*; the Application Security Testing mo
 .Where this sits — pipelines, scanning, and GitOps
 ====
 The Pipelines Fundamentals module gave you a pipeline that produces an image and *data* (results).
-This module adds the *trust* controls to that pipeline — a signature and SLSA provenance on every image, an attestable SBOM, and admission that refuses anything unsigned.
+This module adds the *trust* controls to that pipeline — a keyless signature and SLSA provenance on every image, an SBOM pinned by the signed provenance, a Conforma check before deploy, and admission that refuses anything the pipeline did not build.
 Its sibling, *Application Security Testing* (a separate module), adds the *scanning* controls — SAST, SCA, DAST, and image-risk gates that prove the image is free of known flaws.
 The GitOps modules that follow take the *trustworthy, signed* image and reconcile it into each environment — so admission control (only-signed-runs) and GitOps promotion are the two halves of "the right image, and only the right image, reaches production" (all separate modules).
 ====
@@ -233,7 +234,7 @@ The GitOps modules that follow take the *trustworthy, signed* image and reconcil
 == The trust layer over the Parasol platform
 
 Everything you built in earlier modules — the namespace with its quota and RBAC, the app and its image build, the CI pipeline that produced it — has so far shipped on the strength of "the pipeline said it passed."
-This module adds the layer that makes that provable: the ACS scan gate, Tekton Chains signing every image and attesting its provenance, and the Rekor transparency log that makes the signature checkable by anyone.
+This module adds the layer that makes that provable: the scan and SBOM in the pipeline, Tekton Chains signing every image keyless and attesting its provenance in the Rekor transparency log, and Conforma and the admission webhook checking that signature before anything runs.
 
 [mermaid]
 ....
@@ -245,8 +246,8 @@ ifdef::instructor[]
 .Presenter framing
 ====
 Spend no more than five minutes here before the live demo.
-Two ideas must land: (1) *three artifacts, three questions* — signature (intact + ours), attestation (how it was built), SBOM (what is inside); (2) *sign in the pipeline, enforce at the cluster* — Tekton Chains signs every build automatically, and admission (the `ClusterImagePolicy`) refuses anything unsigned.
-The payoff is the *trust* beat — the signature and SLSA provenance sitting beside the image, the transparency-log receipt, and the cluster refusing an unsigned one.
-The demo shows the gate refusing a seeded build *once*, then spends its time on what makes the clean image *trustworthy*; scanning for flaws is the other module's show.
+Two ideas must land: (1) *three artifacts, three questions* — signature (intact + ours), attestation (how it was built), SBOM (what is inside); (2) *the build platform signs, the pipeline and the cluster check* — Tekton Chains signs every build keyless as its own identity, Conforma checks before deploy, and the admission webhook refuses anything the pipeline did not build.
+The payoff is the *trust* moment — one digest with its signature, provenance and Rekor receipt, verified by hand, and the cluster refusing an image built outside the pipeline.
+Scanning for flaws is the other module's show; here the scan is one gate in the run.
 ====
 endif::instructor[]

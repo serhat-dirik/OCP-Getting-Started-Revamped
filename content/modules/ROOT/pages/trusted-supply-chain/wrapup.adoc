@@ -4,11 +4,11 @@ include::partial$version-attributes.adoc[]
 
 == What you built
 
-You took Parasol's pipeline from "it builds" to "it is *trustworthy*" — and spent your time on *trust*, not scanning.
-Your environment came with a clean image the pipeline had already built, scanned, and *signed*.
-Against it you *verified with cosign* that the signature is intact and yours; you read the *SLSA provenance* attestation Tekton Chains attached (builder, build type, timestamps); you generated the *CycloneDX SBOM* and signed it *keylessly*, then found its permanent record in the *Rekor transparency log*; and you read the cluster's `ClusterImagePolicy`, then watched the node *refuse to pull an unsigned image* into your trusted repository while the signed one ran.
-The keyless signature came from your namespace's own *workload identity*: SPIRE gave a pod running as `pipeline` in `{user}-cicd` the SPIFFE ID `spiffe://…/ns/{user}-cicd/sa/pipeline` after attesting it on the node, so the certificate, the Rekor entry and your `verify-blob` all name the workload that signed, and nobody handed it a key.
-Scanning was one decisive beat: you built the *seeded* branch and watched the gate *refuse* it on a Log4Shell dependency (`CVE-2021-44228`, CVSS 10, in `log4j-core` 2.14.1) — while the clean image, already scanned green, stood beside it as the contrast.
+You took Parasol's pipeline from "it builds" to "it is *trustworthy*", and every piece of evidence came from a run you started yourself.
+One pipeline, `parasol-claims-trusted-build`, built `parasol-claims`, scanned it with RHACS, listed what is inside it in a CycloneDX *SBOM*, checked it with *Conforma*, and deployed it *pinned by digest*.
+*Tekton Chains* signed the image and its *SLSA provenance* from outside the pipeline, *keyless*, as its own SPIFFE workload identity, with the record in the *Rekor* transparency log.
+You then checked every claim with public material only: `cosign verify` against Chains' identity, the provenance naming your pipeline's `build-image`, the SBOM matching the hash in the signed provenance, and `ec validate image` repeating Conforma's verdict.
+Last, you built the same source *outside* the pipeline and watched the admission webhook refuse it, while the pipeline's digest was admitted.
 
 [mermaid]
 ....
@@ -26,9 +26,9 @@ For a real service in your org: is there a stored, attestable record of what eve
 . *Do you sign your images — and does anything check the signature?*
 Signing without verification is theater.
 If your org signs images today, where is the signature actually _enforced_ — at admission on every cluster, or nowhere?
-If it does not sign yet, the Tekton Chains path you saw needs no per-build work — what stops you turning it on?
+If it does not sign yet, the Tekton Chains path you saw needs no pipeline step at all — what stops you turning it on?
 . *Where should the gate live — the pipeline, admission, or both?*
-You saw a build-time scan gate and a run-time admission control.
+You saw two build-time gates (the scan and Conforma) and a run-time admission control.
 For a service that matters, which failures do you want caught in a developer's pipeline run (shift-left) versus refused at the cluster no matter what?
 Most mature answers are "both" — which one is missing in your pipeline today?
 
@@ -46,8 +46,11 @@ The controls in this module are the right default for anything you ship — whic
 | Sign images that nothing verifies
 | Turn signing on together with a place that enforces it
 
-| Go keyless by default
-| Keep a well-managed cosign key for a controlled build system; go keyless for public verifiability or per-identity signing
+| Go keyless
+| Run the identity plane (SPIRE) and the transparency log as production services first; a well-managed cosign key is simpler for an isolated build system
+
+| Rely on admission alone
+| Check in the pipeline too (Conforma), so a bad release fails with a reason before it deploys
 
 | Treat an SBOM as a live feed
 | Store SBOMs and re-query them when a new CVE lands
@@ -62,9 +65,12 @@ Scope admission to the repositories you actually sign, decide who can grant a do
 * *Don't sign images you never verify.*
 If no admission control or downstream check ever validates the signature, signing is pure overhead.
 Turn signing on _with_ a place that enforces it — otherwise you have added a step that produces an artifact nobody reads.
-* *Keyless signing is powerful, but it is not free.*
-The keyless flow (Fulcio short-lived certs + a Rekor transparency log) removes long-lived keys, but it adds an identity dependency (here SPIRE and its OpenID Connect (OIDC) discovery endpoint, which every signature relies on), a transparency-log retention question, and more moving parts.
-For a controlled build system, a well-managed cosign key is often the simpler, sufficient choice — reach for keyless when you need public verifiability or per-identity signing, not by default.
+* *Keyless signing removes the key, not the operations.*
+The keyless flow (Fulcio short-lived certificates + a Rekor transparency log) removes the long-lived key to guard and rotate, but every signature now depends on the identity plane (here SPIRE and its OpenID Connect (OIDC) discovery endpoint) and on the log, with its retention question.
+Run them as production services before you depend on them; for an isolated build system, a well-managed cosign key can be the simpler choice.
+* *Don't rely on admission alone.*
+Admission refuses an image at the door, but the deployer learns about it only when a pod is refused.
+A check in the pipeline (Conforma here) fails the release earlier, with a reason the developer reads in the run; admission stays the backstop for everything that skipped the pipeline.
 * *An SBOM is a snapshot, not a subscription.*
 The bill of materials is accurate the moment it is built; it does not tell you a component became vulnerable _after_ the build.
 Storing SBOMs is what lets you re-query them when a _new_ CVE lands — the SBOM is only as useful as the process that keeps and re-scans it.
@@ -76,12 +82,12 @@ Storing SBOMs is what lets you re-query them when a _new_ CVE lands — the SBOM
 * *GitOps Fundamentals* — this module made the image _trustworthy_ and taught the cluster to refuse an _unsigned_ one; the GitOps module is where that signed image is reconciled into each environment from Git, so "only the right image reaches production" is the two halves together (a separate module).
 * *Registry, Images & Catalog Governance* — the other half of image admission: which registries images may come from at all, mirroring, and catalog governance (a separate module).
 * *Red Hat Trusted Profile Analyzer* (RHTPA) — the enterprise "SBOM at scale" story: ingest every build's SBOM and query your whole estate for an affected component from one place (the RHADS component this lab's terminal `jq` foreshadows).
-* Red Hat documentation: *Advanced Cluster Security for Kubernetes* (RHACS) "Verifying image signatures" and build-time policy; *OpenShift Pipelines* "Using Tekton Chains for supply chain security"; *Trusted Artifact Signer* (RHTAS); and OpenShift "Managing secure signatures with sigstore" (`ClusterImagePolicy`, `ImagePolicy`).
+* Red Hat documentation: *OpenShift Pipelines* "Using Tekton Chains for supply chain security"; *Trusted Artifact Signer* (RHTAS), including its policy controller; *Conforma*; *Advanced Cluster Security for Kubernetes* (RHACS) build-time policy; and OpenShift "Managing secure signatures with sigstore" for the node-level `ClusterImagePolicy`.
 
 [NOTE]
 .Clean up
 ====
 Leave your work running if you are continuing — nothing depends on tearing it down.
-To return `{user}-cicd` to the entry state — the scanned, signed `parasol-claims-trusted:latest` copied back in, the Pipeline, the copied RHACS token and Chains public key, and your fork with its vulnerable `seed-vulnerable` branch restored — run `ws prep {module-id} --yes`.
-It clears your `:candidate` build so you start the module fresh, and returns in about a minute on a settled cluster.
+To return `{user}-cicd` to the entry state — the Pipeline, the trust settings, and your fork with its vulnerable `seed-vulnerable` branch, with no run yet — run `ws prep {module-id} --yes`.
+It removes your runs, images and test pods, so you start the module fresh.
 ====
