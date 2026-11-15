@@ -1362,13 +1362,13 @@ The pipeline now fires on Git push.
 ****
 
 == 5. Pipelines-as-Code: the pipeline lives in your repo
-⏱ *~8 min* · write a two-Task pipeline in a Git repo, then change it with a commit (each run takes about 15 seconds)
+⏱ *~11 min* · write a two-Task pipeline in a Git repo, change it with a commit, then add a pipeline that runs only for release tags (each run takes 5–15 seconds)
 
 In exercise 4 your fork's `.tekton/` file only pointed at a Pipeline stored in the cluster.
 With Pipelines-as-Code, the pipeline itself is a file in the repo, so changing how the code is built is a commit like any other.
 Try it on a new, deliberately small project.
 
-*You'll end with:* a `pac-demo` repo whose `.tekton/hello.yaml` holds a whole pipeline, and two runs of it: one from the commit that added the file, one from the commit that changed it.
+*You'll end with:* a `pac-demo` repo whose `.tekton/` holds two pipelines: `hello`, which ran for the commit that added it and again for the commit that changed it, and `release`, which ran when you published release `v0.1.0`.
 
 // Grounded live on cluster-gn67x (OCP 4.22.22 / OpenShift Pipelines 1.24.3), 2026-11-15, as user22 in
 // its own terminal pod after `ws prep pipelines-fundamentals --yes` and exercise 4. The Gitea UI steps
@@ -1391,6 +1391,7 @@ Three things differ on a second pass:
 ** the old `pac-demo` token: avatar → *Settings* → *Applications*, then *Delete* beside `pac-demo`;
 ** the old webhook: `pac-demo` → *Settings* → *Webhooks*, open the `pipelines-as-code-controller` entry and *Delete Webhook*.
 * `.tekton/hello.yaml` already exists, so instead of adding it, edit it (any change) and commit.
+* `.tekton/release.yaml` already exists and `v0.1.0` is taken: skip adding the file, and publish the next version, such as `v0.1.1`.
 ====
 
 . In Gitea, open the *+* menu (top right, *Create…*) and pick *New Repository*.
@@ -1642,10 +1643,76 @@ That is Pipelines-as-Code: the pipeline definition is versioned, reviewed and re
 Its history is the file's Git history, a pull request can review a change to it, and reverting the commit brings the previous pipeline back.
 The webhook is only the trigger; it carries no pipeline at all.
 
+// Grounded live on cluster-gn67x (OpenShift Pipelines 1.24.3), 2026-11-15, as user22: adding
+// release.yaml (a push to main) ran only `hello`; a bare tag (Gitea API) and a published release
+// (Gitea API, the same service the New Release form calls) each ran only `release`, in 5–6 s.
+// `{{ git_tag }}` printed `v0.2.0`; `{{ target_branch }}` and `{{ source_branch }}` both printed
+// `refs/tags/v0.2.0`. Form labels read from the page Gitea served user22: repo page "Releases",
+// releases page "New Release", field placeholder "Tag name" (the only required field), "Target :"
+// defaulting to main, buttons "Publish Release" / "Create Tag Only" / "Save Draft".
+*Release with a tag.*
+A push to `main` is one Git event; a tag is another.
+Each event can have its own file in `.tekton/`, a PipelineRun with its own trigger.
+A tag usually marks a commit as a release, so its run is where a version gets built and handed on for testing.
+Add a pipeline that runs only for tags:
+
+. In `pac-demo`, click *Add File* → *New File* and type `.tekton/release.yaml` in *Name your file…*.
+. Paste this pipeline, then click *Commit Changes*:
++
+[source,yaml]
+----
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: release
+  annotations:
+    pipelinesascode.tekton.dev/on-event: "[push]"
+    pipelinesascode.tekton.dev/on-target-branch: "[refs/tags/*]"
+    pipelinesascode.tekton.dev/max-keep-runs: "3"
+spec:
+  taskRunTemplate:
+    serviceAccountName: pipeline
+  pipelineSpec:
+    tasks:
+      - name: release
+        taskSpec:
+          steps:
+            - name: show-tag
+              image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+              script: |
+                echo "Releasing {{ git_tag }}"
+                echo "from commit {{ revision }}"
+----
+. On the `pac-demo` page click *Releases*, then *New Release*.
+. Type `v0.1.0` in *Tag name*, leave *Target* on `main`, and click *Publish Release*.
+
+Compare the trigger with `hello.yaml`: `on-target-branch: "[refs/tags/*]"` matches any tag instead of the `main` branch, and PaC fills in `{{ git_tag }}` with the tag's name.
+The commit that added `release.yaml` was a push to `main`, so it ran `hello`, not `release`.
+Publishing the release created the tag `v0.1.0`, and that push ran `release`.
+
+[source,sh,role=execute,subs="attributes+"]
+----
+NS={user}-cicd
+tkn pac logs pac-demo -n $NS -L
+----
+
+.Expected output (your commit differs)
+[source,texinfo]
+----
+[release : show-tag] Releasing v0.1.0
+[release : show-tag] from commit 9413fe8189b455bdb81129d0793890e7cf1e4acf
+----
+
+If the logs still show `hello`, the tag's run has not started yet: wait a few seconds and run the block again.
+
+*Where this goes in a full delivery flow:* the tag's run gives the image that passed its tests on `main` the version `v0.1.0` and commits that version to the test environment's configuration in Git, and Argo CD deploys it.
+Production has no pipeline trigger: a reviewed change to the production configuration promotes the same image, so the approval is a merge and a rollback is a revert.
+The GitOps modules build that part.
+
 [.checkpoint]
 ****
-✔ *Verify:* `tkn pac describe pac-demo -n $NS` shows a `Succeeded` run for your edit commit under *Last Run*, with the run for the commit that added the file under *Other Runs*, and the latest logs include a `[test : report]` line.
-You can say where the pipeline definition lives (in the repo, under `.tekton/`) and what the webhook does (it tells PaC that a push arrived).
+✔ *Verify:* `tkn pac describe pac-demo -n $NS` lists `hello` runs for the commits that added and changed `hello.yaml`, and a `release` run for `v0.1.0` whose logs print `Releasing v0.1.0`.
+You can say where the pipeline definition lives (in the repo, under `.tekton/`), what the webhook does (it tells PaC that a push arrived), and how PaC picks which file runs (each PipelineRun's `on-event` and `on-target-branch`).
 ****
 
 == Challenge (optional)
