@@ -7,12 +7,12 @@ namespaces:
   - "cicd"
 
 # ws reset purges user-created leftovers from these namespaces before re-materializing.
-# trusted-supply-chain lives ENTIRELY in {user}-cicd: the build→scan→sign pipeline, the copied RHACS token + Chains
-# public key, the copied parasol-claims-trusted image, and (in the lab) the attendee's admission-test pods.
-# The signature policy itself is the install's ClusterImagePolicy, never per-user state.
-# `oc delete all,pvc` + the engine's pipelinerun cleanup clear it back to the entry state
-# (the platform-owned quota/limitrange/rbac and the pipeline SA are untouched). The per-user Gitea
-# fork is re-created idempotently by the fork job and is NOT purged (attendees push to it).
+# trusted-supply-chain lives ENTIRELY in {user}-cicd: the pipeline, the copied RHACS token, and what the lab
+# adds — PipelineRuns, the parasol-claims image/Deployment/Service, the parasol-claims-sbom ConfigMap, the
+# out-of-chain BuildConfig and its :unsigned image. The image policy itself is cluster state (RHTAS policy
+# controller), never per-user. `oc delete all,pvc` + the engine's pipelinerun/configmap cleanup clear it back
+# to the entry state (the platform-owned quota/limitrange/rbac and the pipeline SA are untouched). The per-user
+# Gitea fork is re-created idempotently by the fork job and is NOT purged (attendees push to it).
 purgeNamespaces:
   - "${USER}-cicd"
 # trusted-supply-chain shares {user}-cicd with pipelines-fundamentals and re-materializes into it, so the two are MUTUAL conflicts
@@ -23,16 +23,16 @@ purgeNamespaces:
 conflictsWith:
   - pipelines-fundamentals
   - app-security-testing
-# The trusted-image-copy hook copies the cohort's install-time signed image into {user}-cicd in ~1s.
-# The long window only matters right after install, while that one shared build may still be running
-# (the hook waits for it, activeDeadlineSeconds 1500); on a settled cluster prep returns in about a minute.
-waitSeconds: 1500
-# Three representative attendee commands the trust lab leans on: the pre-scanned, Chains-signed image must
-# be present AND readable by {user} (RBAC/identity) — cosign verify, attestation and admission target
-# it — the install's signature policy must be readable (exercise 5 prints it), and so must the cluster's
-# SPIFFE OIDC issuer (exercise 4 reads its issuer URL; both reads are platform-observer grants). The
-# generic smoke battery already covers cockpit/identity/isolation/freshness.
+# Prep itself is ~1 min (token copy, namespace label, fork). The window is for `ws solve`, whose hook runs the
+# whole pipeline and waits for it (solve-endstate.yaml activeDeadlineSeconds); keep the two equal.
+waitSeconds: 1800
+# Representative attendee commands the lab leans on: the pipeline is readable, the namespace carries the
+# policy-controller opt-in label, the attendee may create a BuildConfig (the out-of-chain build), and the
+# cluster's SPIFFE OIDC issuer is readable (the local `cosign verify` names Chains' keyless identity by it;
+# a platform-observer grant), and so is the admission policy the lab prints. The generic smoke battery already covers cockpit/identity/isolation/freshness.
 smokeCommands:
-  - "oc get imagestreamtag parasol-claims-trusted:latest -n ${USER}-cicd"
-  - "oc get clusterimagepolicy ogsr-signed-parasol-claims"
+  - "tkn pipeline describe parasol-claims-trusted-build -n ${USER}-cicd"
+  - "oc get namespace ${USER}-cicd --show-labels | grep -q policy.rhtas.com/include=true"
+  - "oc auth can-i create buildconfigs.build.openshift.io -n ${USER}-cicd"
   - "oc get spireoidcdiscoveryprovider cluster"
+  - "oc get clusterimagepolicies.policy.sigstore.dev ogsr-parasol-claims-keyless"

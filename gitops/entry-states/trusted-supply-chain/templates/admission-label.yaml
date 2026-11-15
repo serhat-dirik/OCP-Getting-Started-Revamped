@@ -1,0 +1,110 @@
+# Opts {user}-cicd into the RHTAS policy controller: its admission webhook enforces the cluster's
+# image policies only in namespaces labelled policy.rhtas.com/include=true.
+#
+# A hook Job, not a rendered Namespace: workshop-config owns {user}-cicd (prune + selfHeal), and a
+# second Application rendering the same Namespace would fight it. A label workshop-config never set
+# is left alone by its selfHeal. The entry AppProject allows no ClusterRole, so the patch right is a
+# Role IN {user}-cicd on `namespaces` (RBAC scopes a request on a Namespace object to that namespace),
+# restricted to this one name, and the SA, Role and RoleBinding are hooks too: they exist only while
+# the sync runs (HookSucceeded), so nothing in the namespace keeps the right to relabel it.
+#
+# KNOWN LIMIT: the label outlives this entry state. purge_ns runs as the attendee and cannot unlabel,
+# so after pipelines-fundamentals/app-security-testing evict this module, {user}-cicd stays enrolled.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: trusted-supply-chain-ns-label
+  namespace: {{ .Values.user }}-cicd
+  labels:
+    workshop.redhat.com/module: trusted-supply-chain
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-wave: "-1"
+---
+# why: get + patch THIS namespace object only (labels), for the hook Job below.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: trusted-supply-chain-ns-label
+  namespace: {{ .Values.user }}-cicd
+  labels:
+    workshop.redhat.com/module: trusted-supply-chain
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-wave: "-1"
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: [{{ printf "%s-cicd" .Values.user | quote }}]
+    verbs: ["get", "patch"]
+---
+# why: binds the Role above to the hook SA for the duration of the sync.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: trusted-supply-chain-ns-label
+  namespace: {{ .Values.user }}-cicd
+  labels:
+    workshop.redhat.com/module: trusted-supply-chain
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-wave: "-1"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: trusted-supply-chain-ns-label
+subjects:
+  - kind: ServiceAccount
+    name: trusted-supply-chain-ns-label
+    namespace: {{ .Values.user }}-cicd
+---
+# why: sets the label; idempotent (--overwrite), re-runs on every ws prep/reset.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trusted-supply-chain-ns-label-{{ .Values.user }}
+  namespace: {{ .Values.user }}-cicd
+  labels:
+    workshop.redhat.com/module: trusted-supply-chain
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  # Retries cover the RoleBinding reaching the authorizer cache a moment after it is created.
+  backoffLimit: 4
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app: trusted-supply-chain-ns-label-{{ .Values.user }}
+    spec:
+      serviceAccountName: trusted-supply-chain-ns-label
+      restartPolicy: Never
+      containers:
+        - name: label
+          # Digest-pinned; el8 `ose-cli:latest` was frozen on v4.15.0 with unapplied Critical errata.
+          image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+          env:
+            - name: NS
+              value: {{ .Values.user }}-cicd
+          resources:
+            requests: {cpu: 10m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              oc label namespace "$NS" policy.rhtas.com/include=true --overwrite >/dev/null
+              echo "✅ ${NS} labelled policy.rhtas.com/include=true (image policies enforced here)"

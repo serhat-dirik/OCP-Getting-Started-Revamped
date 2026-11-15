@@ -1,177 +1,242 @@
-# The trusted-supply-chain build→scan→sign supply-chain Pipeline, materialized per-user in {user}-cicd. It builds the
-# ATTENDEE's fork (so their fix matters) from the seeded seed-vulnerable branch, reports the CycloneDX
-# SBOM (surfacing the seeded log4j-core), builds + Tekton-Chains-SIGNS the image, then gates on RHACS.
-# Tasks are cluster-resolver references (bundled git-clone/buildah + the curated parasol-tasks
-# acs-image-check) — no task bodies copied, except one small inline SBOM-report taskSpec.
+# The trusted-supply-chain Pipeline, one per attendee in {user}-cicd:
+#   fetch-source → build-image → scan + sbom → verify-conforma → deploy
+# Signing is NOT a task: Tekton Chains (a controller outside the pipeline) signs the image build-image
+# pushed, and its SLSA provenance, keyless through Trusted Artifact Signer, seconds after that TaskRun
+# ends. verify-conforma checks that signature and provenance before deploy pins the Deployment to the
+# digest. Shared Tasks come by cluster resolver (git-clone/buildah from openshift-pipelines, the curated
+# acs-image-check/verify-conforma from ogsr-parasol-tasks); only sbom and deploy are inline.
 #
-# Chains signs the build-image TaskRun's image automatically (signing-secrets cosign key from the
-# trust-signing component); `cosign verify --key` is the attendee's terminal beat. The scan gate fails
-# on the seeded Log4Shell (trust stack's "Block Log4Shell at build" policy, scoped to the Supply Chain
-# Security category). The gate turns green by DROPPING log4j-core from the fork — that is the only fix
-# it keys on; bumping the base tag is optional trusted-base hardening (it does not affect this gate).
+# Every default is filled in, so the console's Actions → Start form (shared-workspace =
+# VolumeClaimTemplate) or `tkn pipeline start --use-param-defaults` runs it as is. Memory: buildah needs
+# no override, the -cicd LimitRange default limit (2Gi) is sized for this Maven build (proven by
+# pipelines-fundamentals' plain console runs); the inline sbom step carries its own request.
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: parasol-claims-supply-chain
+  name: parasol-claims-trusted-build
   namespace: {{ .Values.user }}-cicd
   labels:
     app.kubernetes.io/part-of: parasol-claims
     workshop.redhat.com/module: trusted-supply-chain
     workshop.redhat.com/owner: ogsr
-    # Fails ON PURPOSE by default — see entry-states/README.md rule 7 and `ws by-design`.
-    workshop.redhat.com/by-design: "true"
-  annotations:
-    # Marked on the Pipeline because the thing that goes red — the PipelineRun — is created at run
-    # time and cannot carry a marker from the chart. This is the durable object `oc describe` reaches
-    # from a failed run, and its git-revision default is what makes the run fail.
-    workshop.redhat.com/by-design-symptom: >-
-      PipelineRuns of this Pipeline fail at the acs-image-check gate on the default git-revision
-    workshop.redhat.com/by-design-reason: >-
-      trusted-supply-chain: this Pipeline defaults to the attendee's seeded `seed-vulnerable` branch,
-      which ships log4j-core 2.14.1 (CVE-2021-44228, Log4Shell) on purpose, so the RHACS gate is
-      SUPPOSED to block the build — a red run here is the exercise working, and a green one on that
-      branch would mean the trust policy is not enforcing. The attendee turns it green by dropping
-      log4j-core from their fork; `-p git-revision=main` builds the clean branch.
 spec:
   params:
     - name: git-url
       type: string
-      description: Source repository — defaults to THIS attendee's Gitea fork (over the in-cluster svc).
+      description: Source repository, this attendee's Gitea fork (in-cluster address).
       default: http://gitea.{{ .Values.giteaNamespace }}.svc:3000/{{ .Values.user }}/parasol-claims.git
     - name: git-revision
       type: string
-      description: Branch/tag/commit to build. Defaults to the seeded (vulnerable) branch.
-      default: seed-vulnerable
+      description: Branch to build. main is clean; seed-vulnerable carries a known-vulnerable dependency.
+      default: main
     - name: image
       type: string
-      description: Fully-qualified target image reference (registry/namespace/name:tag).
-      # Own-namespace registry path, so this Pipeline is portable across every {user}-cicd with no edit.
-      default: image-registry.openshift-image-registry.svc:5000/$(context.pipelineRun.namespace)/parasol-claims:latest
+      description: Image repository to push to (pushed as :latest; every later task uses the digest).
+      default: image-registry.openshift-image-registry.svc:5000/{{ .Values.user }}-cicd/parasol-claims-secure
   workspaces:
-    # One shared PVC carries the checkout from git-clone through the SBOM report and the image build.
+    # One PVC-backed workspace: the checkout git-clone writes and buildah + sbom read.
     - name: shared-workspace
   results:
-    # Surface the scan verdict at the PipelineRun level for `tkn pr describe` / ws doctor.
-    - name: scan-passed
-      value: $(tasks.acs-scan.results.check-passed)
+    # IMAGE_URL + IMAGE_DIGEST name the built image; SBOM_SHA256 ties the SBOM to it in the run's provenance.
+    - name: IMAGE_URL
+      value: $(tasks.build-image.results.IMAGE_URL)
+    - name: IMAGE_DIGEST
+      value: $(tasks.build-image.results.IMAGE_DIGEST)
+    - name: SBOM_SHA256
+      value: $(tasks.sbom.results.SBOM_SHA256)
   tasks:
-    # 1) Clone the attendee's fork@seed-vulnerable into the shared workspace (bundled task, resolver).
+    # Clone the fork into the shared workspace.
     - name: fetch-source
       taskRef:
         resolver: cluster
         params:
-          - name: kind
-            value: task
-          - name: name
-            value: git-clone
-          - name: namespace
-            value: openshift-pipelines
+          - {name: kind, value: task}
+          - {name: name, value: git-clone}
+          - {name: namespace, value: openshift-pipelines}
       params:
-        - name: URL
-          value: $(params.git-url)
-        - name: REVISION
-          value: $(params.git-revision)
+        - {name: URL, value: $(params.git-url)}
+        - {name: REVISION, value: $(params.git-revision)}
       workspaces:
-        - name: output
-          workspace: shared-workspace
+        - {name: output, workspace: shared-workspace}
 
-    # 2) SBOM report: generate the CycloneDX bill of materials and surface the seeded vulnerable dep
-    #    (the trusted-supply-chain "find what's inside" beat). Inline taskSpec — makeBom needs no compile, so it is fast.
-    - name: sbom-report
-      runAfter:
-        - fetch-source
+    # Build the Containerfile and push; IMAGE_URL/IMAGE_DIGEST are what Chains signs.
+    # TLS_VERIFY=false: the internal registry serves a service-CA certificate the build pod does not trust.
+    - name: build-image
+      runAfter: [fetch-source]
+      taskRef:
+        resolver: cluster
+        params:
+          - {name: kind, value: task}
+          - {name: name, value: buildah}
+          - {name: namespace, value: openshift-pipelines}
+      params:
+        - {name: IMAGE, value: $(params.image)}
+        - {name: DOCKERFILE, value: ./Containerfile}
+        # The Containerfile's own `mvn package` resolves through the in-cluster Maven mirror.
+        - name: BUILD_ARGS
+          value:
+            - MAVEN_MIRROR_URL=http://maven-mirror.ogsr-maven-mirror.svc:8080
+        - {name: TLS_VERIFY, value: "false"}
       workspaces:
-        - name: source
-          workspace: shared-workspace
+        - {name: source, workspace: shared-workspace}
+
+    # RHACS build-time policy check of the pushed digest; fails the run on an enforced violation
+    # (the seed-vulnerable branch's Log4Shell), so nothing after it runs.
+    - name: scan
+      runAfter: [build-image]
+      taskRef:
+        resolver: cluster
+        params:
+          - {name: kind, value: task}
+          - {name: name, value: acs-image-check}
+          - {name: namespace, value: ogsr-parasol-tasks}
+      params:
+        - {name: IMAGE, value: "$(tasks.build-image.results.IMAGE_URL)@$(tasks.build-image.results.IMAGE_DIGEST)"}
+
+    # CycloneDX SBOM of the source, stored as ConfigMap parasol-claims-sbom; its sha256 is a result,
+    # so it is recorded in the provenance Chains signs for this run.
+    - name: sbom
+      runAfter: [build-image]
+      params:
+        - {name: image-digest, value: $(tasks.build-image.results.IMAGE_DIGEST)}
+      workspaces:
+        - {name: source, workspace: shared-workspace}
       taskSpec:
+        params:
+          - {name: image-digest, type: string}
         workspaces:
           - name: source
+        results:
+          - name: SBOM_SHA256
+            description: sha256 of the CycloneDX SBOM (stored in ConfigMap parasol-claims-sbom)
+        volumes:
+          - name: sbom
+            emptyDir: {}
         steps:
           - name: cyclonedx
-            # UBI9 OpenJDK 21 (Maven 3.9) — same runner as the parasol-tasks maven-jdk21 Task.
-            #
-            # BYTE-IDENTICAL to that Task's reference (pipelines/tasks/maven-jdk21.yaml, both steps),
-            # which is what turns the sentence above into a checkable fact: `git grep 24dad82b` lists
-            # this line beside them. It was NOT one before — this step floated on `:latest` while the
-            # curated library was pinned, so "same runner" was true only for as long as the tag
-            # happened not to move. A supply-chain module whose own SBOM step floats is the
-            # contradiction a reviewer notices first.
-            #
-            # TAG → DIGEST, re-resolved 2026-08-12 against registry.access.redhat.com and unchanged
-            # from the library's 2026-08-07 resolution:
-            #   oc image info --show-multiarch registry.access.redhat.com/ubi9/openjdk-21:latest
-            # Image 1.24-3.1785873424, built 2026-08-04, catalog freshness grade A; labels
-            # org.jboss.product.openjdk.version=21. That is the multi-arch INDEX digest, deliberately
-            # not one of its four per-arch children — a child would pin this Pipeline to one node
-            # architecture. Bare digest (no tag in front) so the string matches maven-jdk21 exactly.
+            # Same runner, byte-identical, as the curated maven-jdk21 Task (pipelines/tasks/maven-jdk21.yaml):
+            # the multi-arch INDEX digest of ubi9/openjdk-21 1.24-3.1785873424. Change both or neither.
             image: registry.access.redhat.com/ubi9/openjdk-21@sha256:24dad82bd5d25d9b0c85f0e9c976e47ccce787cc73792355462bf54fe03d9a77
             workingDir: $(workspaces.source.path)
+            computeResources:
+              requests: {memory: 1Gi}
+              limits: {memory: 1536Mi}
+            volumeMounts:
+              - {name: sbom, mountPath: /sbom}
             script: |
               #!/usr/bin/env bash
               set -euo pipefail
               echo "▶ generating the CycloneDX SBOM…"
-              # makeBom invoked from the CLI uses the plugin's DEFAULT output name (target/bom.json),
-              # not the pom's outputName — so find whichever CycloneDX JSON was written.
               # Resolve through the in-cluster Maven mirror (Central + Red Hat GA, warmed at install).
               printf '<settings><mirrors><mirror><id>mirror.default</id><url>%s</url><mirrorOf>central</mirrorOf></mirror></mirrors></settings>' \
                 "http://maven-mirror.ogsr-maven-mirror.svc:8080" > /tmp/settings.xml
               /usr/bin/mvn -B -ntp -s /tmp/settings.xml org.cyclonedx:cyclonedx-maven-plugin:2.9.2:makeBom
+              # makeBom from the CLI writes the plugin's default name (target/bom.json), not the pom's outputName.
               SBOM="$(ls -1 target/parasol-claims-sbom.json target/bom.json target/*cyclonedx.json 2>/dev/null | head -1 || true)"
               [[ -n "$SBOM" ]] || { echo "❌ no CycloneDX SBOM produced under target/"; exit 1; }
-              echo "▶ SBOM: ${SBOM} — scanning for known-vulnerable components…"
+              cp "$SBOM" /sbom/sbom.json
+              echo "▶ SBOM: $(grep -o '"bom-ref"' /sbom/sbom.json | wc -l) components"
               # The purl carries the exact version, e.g. pkg:maven/…/log4j-core@2.14.1
-              if HIT="$(grep -oE 'log4j-core@[0-9][0-9.]*' "$SBOM" | head -1)"; then
-                echo "⚠️  the SBOM contains ${HIT} — CVE-2021-44228 (Log4Shell). Fix: drop this dependency."
+              if HIT="$(grep -oE 'log4j-core@[0-9][0-9.]*' /sbom/sbom.json | head -1)"; then
+                echo "⚠️  the SBOM lists ${HIT} (CVE-2021-44228, Log4Shell)"
               else
-                echo "✅ no log4j-core in the SBOM (clean build)."
+                echo "✅ no log4j-core in the SBOM"
               fi
+              sha256sum /sbom/sbom.json | cut -d' ' -f1 | tr -d '\n' > "$(results.SBOM_SHA256.path)"
+              echo "▶ SBOM sha256: $(cat "$(results.SBOM_SHA256.path)")"
+          - name: publish
+            # Digest-pinned; el8 `ose-cli:latest` was frozen on v4.15.0 with unapplied Critical errata.
+            image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+            volumeMounts:
+              - {name: sbom, mountPath: /sbom}
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              # create, never apply: apply would copy the ~600 KB SBOM into an annotation and pass 1 MiB.
+              oc delete configmap parasol-claims-sbom --ignore-not-found >/dev/null
+              oc create configmap parasol-claims-sbom --from-file=sbom.json=/sbom/sbom.json >/dev/null
+              oc annotate configmap parasol-claims-sbom \
+                workshop.redhat.com/image-digest="$(params.image-digest)" \
+                workshop.redhat.com/pipelinerun="$(context.pipelineRun.name)" >/dev/null
+              echo "✅ SBOM stored: configmap/parasol-claims-sbom (image $(params.image-digest))"
 
-    # 3) Build the image from the Containerfile and push it to the internal registry. Tekton Chains
-    #    SIGNS this TaskRun's image automatically (cosign key in openshift-pipelines/signing-secrets).
-    #    TLS_VERIFY=false: the in-cluster registry serves a service-CA cert the build pod doesn't trust.
-    - name: build-image
-      runAfter:
-        - sbom-report
+    # Conforma (`ec validate image`): the image signature and SLSA provenance verify against Tekton
+    # Chains' keyless identity and Rekor, and the policy holds. Waits for Chains to finish signing.
+    - name: verify-conforma
+      runAfter: [scan, sbom]
       taskRef:
         resolver: cluster
         params:
-          - name: kind
-            value: task
-          - name: name
-            value: buildah
-          - name: namespace
-            value: openshift-pipelines
+          - {name: kind, value: task}
+          - {name: name, value: verify-conforma}
+          - {name: namespace, value: ogsr-parasol-tasks}
+      # The signer must be Tekton Chains' SPIFFE identity (trust domain = the apps domain), certified by
+      # Fulcio against this cluster's SPIRE OIDC issuer. EXPECTED_PIPELINE/EXPECTED_TASK default to this
+      # Pipeline and build-image; REKOR_URL/TUF_URL/WAIT_SECONDS keep the Task's in-cluster defaults.
       params:
-        - name: IMAGE
-          value: $(params.image)
-        - name: DOCKERFILE
-          value: ./Containerfile
-        # The Containerfile's own `mvn package` resolves through the same mirror (ARG MAVEN_MIRROR_URL).
-        - name: BUILD_ARGS
-          value:
-            - MAVEN_MIRROR_URL=http://maven-mirror.ogsr-maven-mirror.svc:8080
-        - name: TLS_VERIFY
-          value: "false"
-      workspaces:
-        - name: source
-          workspace: shared-workspace
+        - {name: IMAGE, value: "$(tasks.build-image.results.IMAGE_URL)@$(tasks.build-image.results.IMAGE_DIGEST)"}
+        - {name: CERTIFICATE_IDENTITY, value: "spiffe://{{ .Values.clusterDomain }}/ns/openshift-pipelines/sa/tekton-chains-controller"}
+        - {name: CERTIFICATE_OIDC_ISSUER, value: "https://oidc-discovery.{{ .Values.clusterDomain }}"}
 
-    # 4) The scan GATE: the curated parasol-tasks acs-image-check runs `roxctl image check` (scoped to
-    #    the Supply Chain Security category) against the freshly-built image and FAILS the pipeline on
-    #    the seeded Log4Shell. Fix = DROP log4j-core from the fork (the gate keys ONLY on that; the
-    #    base-tag bump is optional hardening), then re-run → this passes.
-    - name: acs-scan
-      runAfter:
-        - build-image
-      taskRef:
-        resolver: cluster
-        params:
-          - name: kind
-            value: task
-          - name: name
-            value: acs-image-check
-          - name: namespace
-            value: ogsr-parasol-tasks
+    # Deploy parasol-claims pinned to the digest Conforma just verified, then wait for the rollout.
+    # Runs as the operator-provided `pipeline` SA, which already holds `edit` in this namespace.
+    - name: deploy
+      runAfter: [verify-conforma]
       params:
-        - name: IMAGE
-          value: $(params.image)
+        - name: image-ref
+          value: "$(tasks.build-image.results.IMAGE_URL)@$(tasks.build-image.results.IMAGE_DIGEST)"
+      taskSpec:
+        params:
+          - {name: image-ref, type: string}
+        steps:
+          - name: deploy
+            # Digest-pinned; el8 `ose-cli:latest` was frozen on v4.15.0 with unapplied Critical errata.
+            image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              IMG="$(params.image-ref)"
+              echo "▶ deploying parasol-claims at ${IMG}"
+              oc apply -f - <<EOF
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: parasol-claims
+                labels:
+                  app: parasol-claims
+                  app.kubernetes.io/part-of: parasol-claims
+              spec:
+                replicas: 1
+                selector:
+                  matchLabels:
+                    app: parasol-claims
+                template:
+                  metadata:
+                    labels:
+                      app: parasol-claims
+                  spec:
+                    containers:
+                      - name: parasol-claims
+                        image: ${IMG}
+                        ports:
+                          - containerPort: 8080
+                        readinessProbe:
+                          tcpSocket:
+                            port: 8080
+                          periodSeconds: 5
+              ---
+              apiVersion: v1
+              kind: Service
+              metadata:
+                name: parasol-claims
+                labels:
+                  app: parasol-claims
+              spec:
+                selector:
+                  app: parasol-claims
+                ports:
+                  - port: 8080
+                    targetPort: 8080
+              EOF
+              oc rollout status deployment/parasol-claims --timeout=300s
+              echo "✅ parasol-claims runs $(oc get deployment parasol-claims -o jsonpath='{.spec.template.spec.containers[0].image}')"

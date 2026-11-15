@@ -1,0 +1,73 @@
+{{- if .Values.solve }}
+# END state for `ws solve trusted-supply-chain`: run parasol-claims-trusted-build once with its defaults
+# (main, the same plain run the attendee starts) and WAIT for it, so solve reports ready only when the
+# signed, Conforma-verified digest is deployed. PostSync: the Pipeline and the namespace label exist.
+# Re-solve recreates the Job (BeforeHookCreation); the run uses generateName and a per-run PVC.
+# backoffLimit 0: a retry would start a second run beside a live one. Window = ws-meta waitSeconds.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trusted-supply-chain-solve-{{ .Values.user }}
+  namespace: {{ .Values.user }}-cicd
+  labels:
+    workshop.redhat.com/module: trusted-supply-chain
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  template:
+    metadata:
+      labels:
+        app: trusted-supply-chain-solve-{{ .Values.user }}
+    spec:
+      # The operator-provisioned pipeline SA (edit) can create PipelineRuns in its own namespace.
+      serviceAccountName: pipeline
+      restartPolicy: Never
+      containers:
+        - name: solve
+          # Digest-pinned; el8 `ose-cli:latest` was frozen on v4.15.0 with unapplied Critical errata.
+          image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+          resources:
+            requests: {cpu: 10m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              PR="$(oc create -o name -f - <<'EOF'
+              apiVersion: tekton.dev/v1
+              kind: PipelineRun
+              metadata:
+                generateName: solve-trusted-build-
+              spec:
+                pipelineRef:
+                  name: parasol-claims-trusted-build
+                taskRunTemplate:
+                  serviceAccountName: pipeline
+                workspaces:
+                  - name: shared-workspace
+                    volumeClaimTemplate:
+                      spec:
+                        accessModes: [ReadWriteOnce]
+                        resources:
+                          requests:
+                            storage: 1Gi
+              EOF
+              )"
+              echo "▶ started ${PR#*/} — waiting for build → scan + sbom → Conforma → deploy…"
+              # 170 x 10s ≈ 28 min, inside activeDeadlineSeconds.
+              for _ in $(seq 1 170); do
+                s="$(oc get "$PR" -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}' 2>/dev/null || true)"
+                case "$s" in
+                  True)  echo "✅ ${PR#*/} Succeeded — parasol-claims runs the signed digest"; exit 0;;
+                  False) echo "❌ ${PR#*/} failed — inspect: tkn pipelinerun logs ${PR#*/}"; exit 1;;
+                esac
+                sleep 10
+              done
+              echo "❌ ${PR#*/} still not finished after ~28 min — inspect: oc get ${PR}"
+              exit 1
+{{- end }}
