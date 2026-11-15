@@ -49,6 +49,14 @@ claims_otel_endpoint() {
   [[ "$OC_OUT" == *"otel-collector.ogsr-observability-workshop"* ]]
 }
 
+# parasol-claims names its traces parasol-claims-<user>: exercise 5 picks that name from the Service
+# Name menu of Observe -> Traces, and every attendee shares one Tempo tenant.
+claims_otel_service_name() {
+  oc_read get deploy parasol-claims -n "$NS" \
+    -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="QUARKUS_OTEL_SERVICE_NAME")].value}' || return 1
+  [[ "$OC_OUT" == "parasol-claims-${USER_NAME}" ]]
+}
+
 # /q/metrics (scraped by the ServiceMonitor) exposes a given metric name. Retries briefly: a
 # Micrometer counter (claims_created_total) only appears after the load generator's first POST.
 metrics_expose() {
@@ -229,6 +237,7 @@ check "parasol-claims deployment has >=1 ready replica"   deploy_ready parasol-c
 check "claims Route answers 200 (/q/health/ready)"        route_ready_200                               || hint "claims app not ready — check: oc get pods -n ${NS}"
 check "parasol-claims has OpenTelemetry export ON"        claims_otel_enabled                           || hint "OTLP disabled — entry sets QUARKUS_OTEL_SDK_DISABLED=false; ws reset observability-metrics-traces --user ${USER_NAME}"
 check "parasol-claims exports OTLP to shared collector"   claims_otel_endpoint                          || hint "OTEL endpoint unset — should point at otel-collector.ogsr-observability-workshop; ws reset observability-metrics-traces"
+check "parasol-claims traces as parasol-claims-${USER_NAME}" claims_otel_service_name                    || hint "service name not per-user — the Service Name menu in Observe -> Traces will not list yours; ws reset observability-metrics-traces --user ${USER_NAME}"
 check "ServiceMonitor parasol-claims present"             oc get servicemonitor parasol-claims -n "$NS" || hint "per-user metrics wiring missing — ws reset observability-metrics-traces --user ${USER_NAME}"
 check "ServiceMonitor scrapes every 10s (alert-beat determinism)" servicemonitor_scrape_10s          || hint "entry ships a 10s scrape so the Ex4 alert fires deterministically; a 30s interval re-introduces the flake — ws reset observability-metrics-traces --user ${USER_NAME}"
 check "load generator claims-load has >=1 ready replica"  deploy_ready claims-load "$NS"                || hint "load generator missing — ws reset observability-metrics-traces --user ${USER_NAME}"
