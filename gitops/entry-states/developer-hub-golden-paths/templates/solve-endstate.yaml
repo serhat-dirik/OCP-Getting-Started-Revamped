@@ -1,16 +1,21 @@
 {{- if .Values.solve }}
-# ws solve ONLY (guarded by .Values.solve): materializes the developer-hub-golden-paths END state — a representative
-# "already scaffolded" golden-path service, {user}-{{ .Values.scaffoldOrgSuffix }}/{{ .Values.solveServiceName }},
-# in the attendee's scaffold org. It creates the repo, stamps it with the golden-path provenance
-# description, and seeds a catalog-info.yaml so it is registerable in RHDH — the demo-ready outcome an
-# instructor shows without running the interactive template. (The lab's running deploy of a scaffolded
-# service is an interactive image build; solve materializes the repo outcome, not a built image —
-# honest end state, not a fabricated running workload.) Wave 2 = AFTER the scaffold-org hook (wave 1),
-# so the clean-slate pass never deletes the repo solve just created.
+# ws solve ONLY (guarded by .Values.solve): materializes the developer-hub-golden-paths END state by
+# walking the real golden path, not by faking its outcome:
+#   1. runs the parasol-golden-path template through Developer Hub's scaffolder API (guest token,
+#      in-cluster address), creating {svc} and {svc}-gitops in {user}-svcs and the catalog entry
+#   2. waits for the platform's ApplicationSet to register the repo with Pipelines-as-Code
+#   3. commits one change to main as {user} (Gitea API) -> the build pipeline runs
+#   4. once that build Succeeded, publishes release v1.0.0 -> the release pipeline promotes the same
+#      digest to stage, then prod
+#   5. waits until prod's Rollout is available
+# It BLOCKS for the whole path (about 10 min measured), so ws-meta's waitSeconds covers it. Wave 4 =
+# after the scaffold-org hook (wave 1, which empties the org) and the ApplicationSet (wave 3).
+{{- $svc := printf "%s-%s" .Values.goldenServicePrefix .Values.user }}
+{{- $org := printf "%s-%s" .Values.user .Values.scaffoldOrgSuffix }}
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: gitea-solve-developer-hub-golden-paths-{{ .Values.user }}
+  name: golden-path-solve-{{ .Values.user }}
   namespace: {{ .Values.giteaNamespace }}
   labels:
     workshop.redhat.com/module: developer-hub-golden-paths
@@ -19,16 +24,16 @@ metadata:
   annotations:
     argocd.argoproj.io/hook: Sync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
-    argocd.argoproj.io/sync-wave: "2"
+    argocd.argoproj.io/sync-wave: "4"
 spec:
-  backoffLimit: 4
-  activeDeadlineSeconds: 300
+  backoffLimit: 0
+  activeDeadlineSeconds: 1500
   template:
     metadata:
       labels:
-        app: gitea-solve-developer-hub-golden-paths-{{ .Values.user }}
+        app: golden-path-solve-{{ .Values.user }}
     spec:
-      # reuses the scaffold-org hook's ServiceAccount (same namespace, same read-only Gitea RBAC).
+      # The scaffold-org hook's ServiceAccount: Gitea admin discovery, plus reads in {user}-cicd/-prod.
       serviceAccountName: gitea-scaffold-org-developer-hub-golden-paths-{{ .Values.user }}
       restartPolicy: Never
       containers:
@@ -36,96 +41,93 @@ spec:
           # Digest-pinned; el8 `ose-cli:latest` was frozen on v4.15.0 with unapplied Critical errata.
           image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
           env:
-            - name: GITEA_NS
-              value: {{ .Values.giteaNamespace | quote }}
-            - name: FORK_USER
-              value: {{ .Values.user | quote }}
-            - name: SCAFFOLD_ORG
-              value: {{ printf "%s-%s" .Values.user .Values.scaffoldOrgSuffix | quote }}
-            - name: SVC_NAME
-              value: {{ .Values.solveServiceName | quote }}
-            - name: SCAFFOLD_MARKER
-              value: {{ .Values.scaffoldMarker | quote }}
+            - {name: GITEA_NS, value: {{ .Values.giteaNamespace | quote }}}
+            - {name: FORK_USER, value: {{ .Values.user | quote }}}
+            - {name: ORG, value: {{ $org | quote }}}
+            - {name: SVC, value: {{ $svc | quote }}}
+            - {name: RHDH_URL, value: {{ .Values.rhdhInClusterUrl | quote }}}
+            - {name: CICD_NS, value: "{{ .Values.user }}-cicd"}
+            - {name: PROD_NS, value: "{{ .Values.user }}-prod"}
           command: ["/bin/bash", "-c"]
           args:
             - |
               set -euo pipefail
               NS="${GITEA_NS}"
-              echo "▶ waiting for the Gitea route…"
-              for i in $(seq 1 60); do
-                HOST="$(oc get route gitea -n "$NS" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
-                [[ -n "$HOST" ]] && break
-                sleep 5
-              done
-              [[ -n "${HOST:-}" ]] || { echo "❌ gitea route not found"; exit 1; }
-              GITEA_URL="https://${HOST}"
               ADMIN_USER="$(oc get gitea gitea -n "$NS" -o jsonpath='{.spec.giteaAdminUser}' 2>/dev/null || echo gitea-admin)"
-              ADMIN_PASS=""
-              for i in $(seq 1 60); do
-                ADMIN_PASS="$(oc get gitea gitea -n "$NS" -o jsonpath='{.status.adminPassword}' 2>/dev/null || true)"
-                [[ -z "$ADMIN_PASS" ]] && ADMIN_PASS="$(oc get secret gitea-admin-credentials -n "$NS" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
-                [[ -n "$ADMIN_PASS" ]] && break
-                sleep 5
-              done
-              [[ -n "$ADMIN_PASS" ]] || { echo "❌ no Gitea admin password"; exit 1; }
-              AUTH="${ADMIN_USER}:${ADMIN_PASS}"
-              for i in $(seq 1 30); do
-                curl -ksf -u "$AUTH" "${GITEA_URL}/api/v1/version" >/dev/null && break
-                sleep 5
-              done
-
-              echo "▶ materializing end-state repo ${SCAFFOLD_ORG}/${SVC_NAME} (golden-path outcome)…"
-              GITEA_URL="$GITEA_URL" AUTH="$AUTH" FORK_USER="$FORK_USER" SCAFFOLD_ORG="$SCAFFOLD_ORG" SVC_NAME="$SVC_NAME" MARKER="$SCAFFOLD_MARKER" python3 - <<'PY'
-              import base64, json, os, ssl, urllib.request, urllib.error
-              base = os.environ["GITEA_URL"].rstrip("/"); auth = os.environ["AUTH"]
-              user = os.environ["FORK_USER"]; org = os.environ["SCAFFOLD_ORG"]
-              svc = os.environ["SVC_NAME"]; marker = os.environ["MARKER"]
-              ctx = ssl._create_unverified_context()
-              def api(method, path, body=None, sudo=False):
-                  h = {"Authorization": "Basic " + base64.b64encode(auth.encode()).decode(),
-                       "Content-Type": "application/json"}
-                  if sudo: h["Sudo"] = user
+              ADMIN_PASS="$(oc get gitea gitea -n "$NS" -o jsonpath='{.status.adminPassword}' 2>/dev/null || true)"
+              [[ -n "$ADMIN_PASS" ]] || ADMIN_PASS="$(oc get secret gitea-admin-credentials -n "$NS" -o jsonpath='{.data.password}' | base64 -d)"
+              export AUTH="${ADMIN_USER}:${ADMIN_PASS}" GITEA_URL="http://gitea.${NS}.svc:3000"
+              python3 - <<'PY'
+              import base64, json, os, ssl, subprocess, sys, time, urllib.request, urllib.error
+              g = os.environ["GITEA_URL"]; auth = os.environ["AUTH"]; user = os.environ["FORK_USER"]
+              org = os.environ["ORG"]; svc = os.environ["SVC"]; rhdh = os.environ["RHDH_URL"].rstrip("/")
+              cicd = os.environ["CICD_NS"]; prod = os.environ["PROD_NS"]
+              def call(method, url, body=None, headers=None):
+                  h = {"Content-Type": "application/json", **(headers or {})}
                   data = json.dumps(body).encode() if body is not None else None
-                  req = urllib.request.Request(base + path, data=data, headers=h, method=method)
+                  req = urllib.request.Request(url, data=data, headers=h, method=method)
                   try:
-                      with urllib.request.urlopen(req, context=ctx) as r:
-                          return r.status, json.loads(r.read().decode() or "{}")
+                      with urllib.request.urlopen(req, timeout=30) as r:
+                          raw = r.read().decode(); return r.status, (json.loads(raw) if raw else None)
                   except urllib.error.HTTPError as e:
-                      return e.code, {}
-              desc = f"{svc} — {marker}"
-              st, _ = api("GET", f"/api/v1/repos/{org}/{svc}")
-              if st == 200:
-                  print(f"  ✓ {org}/{svc} already exists — ensuring description marker")
-                  api("PATCH", f"/api/v1/repos/{org}/{svc}", {"description": desc}, sudo=True)
-              else:
-                  # create in the org (owner is the org, not a user → /orgs/{org}/repos)
-                  cst, _ = api("POST", f"/api/v1/orgs/{org}/repos",
-                      {"name": svc, "description": desc, "private": False, "auto_init": True,
-                       "default_branch": "main"}, sudo=True)
-                  print(f"  {'✓ created' if cst in (201,) else '! create HTTP '+str(cst)} {org}/{svc}")
-              catalog = """apiVersion: backstage.io/v1alpha1
-              kind: Component
-              metadata:
-                name: %s
-                description: Parasol service scaffolded from the golden-path template.
-                annotations:
-                  backstage.io/kubernetes-id: %s
-                tags: [java, quarkus, parasol]
-              spec:
-                type: service
-                lifecycle: experimental
-                owner: parasol
-                system: parasol-insurance
-              """ % (svc, svc)
-              catalog = "\n".join(l[14:] if l.startswith(" " * 14) else l for l in catalog.splitlines()) + "\n"
-              st2, cur = api("GET", f"/api/v1/repos/{org}/{svc}/contents/catalog-info.yaml?ref=main")
-              body = {"message": "golden-path catalog-info", "branch": "main",
-                      "content": base64.b64encode(catalog.encode()).decode()}
-              if st2 == 200:
-                  body["sha"] = cur["sha"]
-                  api("PUT", f"/api/v1/repos/{org}/{svc}/contents/catalog-info.yaml", body, sudo=True)
-              else:
-                  api("POST", f"/api/v1/repos/{org}/{svc}/contents/catalog-info.yaml", body, sudo=True)
-              print(f"✅ end state ready: {org}/{svc} (golden-path scaffolded service)")
+                      return e.code, None
+              gh = {"Authorization": "Basic " + base64.b64encode(auth.encode()).decode(), "Sudo": user}
+              def oc(*a):
+                  return subprocess.run(["oc", *a], capture_output=True, text=True).stdout.strip()
+              def wait(what, fn, seconds):
+                  t0 = time.time()
+                  while time.time() - t0 < seconds:
+                      v = fn()
+                      if v: print(f"  ✓ {what} ({int(time.time() - t0)}s)", flush=True); return v
+                      time.sleep(10)
+                  sys.exit(f"❌ {what}: not within {seconds}s")
+              def run_of(pipeline, sha=None):
+                  out = oc("get", "pipelineruns", "-n", cicd, "-l", f"tekton.dev/pipeline={pipeline}", "-o",
+                           "jsonpath={range .items[*]}{.metadata.labels.pipelinesascode\\.tekton\\.dev/sha} {.status.conditions[0].reason}{\"\\n\"}{end}")
+                  for line in out.splitlines():
+                      s, _, reason = line.partition(" ")
+                      if (sha is None or s == sha):
+                          if reason == "Failed": sys.exit(f"❌ {pipeline} run for {s} Failed: tkn pipelinerun list -n {cicd}")
+                          if reason in ("Succeeded", "Completed"): return True
+                  return False
+
+              print(f"▶ 1. creating {svc} from the parasol-golden-path template…", flush=True)
+              st, tok = call("GET", f"{rhdh}/api/auth/guest/refresh")
+              token = (tok or {}).get("backstageIdentity", {}).get("token")
+              if not token: sys.exit(f"❌ no Developer Hub guest token (HTTP {st})")
+              bh = {"Authorization": f"Bearer {token}"}
+              st, task = call("POST", f"{rhdh}/api/scaffolder/v2/tasks", {"templateRef": "template:default/parasol-golden-path",
+                              "values": {"name": svc, "orgName": org, "owner": "parasol"}}, bh)
+              if st != 201: sys.exit(f"❌ scaffolder refused the task (HTTP {st})")
+              def task_done():
+                  _, t = call("GET", f"{rhdh}/api/scaffolder/v2/tasks/{task['id']}", None, bh)
+                  s = (t or {}).get("status")
+                  if s == "failed": sys.exit("❌ the template run failed: open Developer Hub -> Self-service -> Task List")
+                  return s == "completed"
+              wait("template run completed", task_done, 180)
+
+              print("▶ 2. waiting for Pipelines-as-Code to know the repo (ApplicationSet -> ci app)…", flush=True)
+              wait(f"Repository {svc} in {cicd}", lambda: oc("get", "repository", svc, "-n", cicd, "-o", "name"), 300)
+
+              print("▶ 3. pushing one change to main (the build pipeline runs)…", flush=True)
+              path = f"/api/v1/repos/{org}/{svc}/contents/README.md"
+              st, cur = call("GET", g + path, None, gh)
+              text = base64.b64decode(cur["content"]).decode() + "\nReleased by `ws solve` through the golden path.\n"
+              st, res = call("PUT", g + path, {"content": base64.b64encode(text.encode()).decode(), "sha": cur["sha"],
+                             "message": "Docs: note the golden path", "branch": "main"}, gh)
+              if st not in (200, 201): sys.exit(f"❌ commit refused (HTTP {st})")
+              sha = res["commit"]["sha"]
+              wait(f"build {svc}-build for {sha[:8]} Succeeded", lambda: run_of(f"{svc}-build", sha), 900)
+
+              print("▶ 4. publishing release v1.0.0 (the release pipeline promotes stage, then prod)…", flush=True)
+              st, _ = call("POST", f"{g}/api/v1/repos/{org}/{svc}/releases",
+                           {"tag_name": "v1.0.0", "target_commitish": "main", "name": "v1.0.0"}, gh)
+              if st != 201: sys.exit(f"❌ release refused (HTTP {st})")
+              wait(f"release {svc}-release Succeeded", lambda: run_of(f"{svc}-release"), 600)
+
+              print("▶ 5. waiting for prod's Rollout to be available…", flush=True)
+              wait(f"{prod} runs the release", lambda: (oc("get", "rollout", svc, "-n", prod, "-o",
+                   "jsonpath={.status.availableReplicas}") or "0") not in ("", "0"), 300)
+              print(f"✅ solved: {svc} created from the template, built, and v1.0.0 released to dev, stage and prod")
               PY
 {{- end }}
