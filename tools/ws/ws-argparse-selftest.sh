@@ -361,7 +361,7 @@ run_suite() {
   #    call prefix reaches the sourced ws inside _run's subshell, so these run on the ATTENDEE surface.
   for v in hide show; do
     WANT_RC=2 WS_AUDIENCE=attendee expect_refusal audience "ws ${v}: operator verb exits 2 on the attendee surface" \
-      "'${v}' is an instructor/operator command" "adm ${v}" -- "$v" m07
+      "'${v}' is an instructor/operator command" -- "$v" m07
   done
   WS_AUDIENCE=attendee expect_accepted control "ws list: the audience gate still lets attendee verbs through" "" -- list
   expect_refusal module "adm hide: an unknown slug is refused before any cluster call" \

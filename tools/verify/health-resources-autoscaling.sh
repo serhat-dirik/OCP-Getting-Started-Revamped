@@ -102,8 +102,8 @@ hpa_on_cpu_min2() {
 }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
-check "namespace ${NS} exists"                                   oc get ns "$NS"                                    || hint "run: ws prep health-resources-autoscaling (instructor: adm start health-resources-autoscaling --user ${USER_NAME})"
-check "entry marker ws-entry-health-resources-autoscaling present" oc get cm ws-entry-health-resources-autoscaling -n "$NS" || hint "entry app not synced — ws prep health-resources-autoscaling (instructor: adm start health-resources-autoscaling --user ${USER_NAME})"
+check "namespace ${NS} exists"                                   oc get ns "$NS"                                    || hint "run: ws prep health-resources-autoscaling"
+check "entry marker ws-entry-health-resources-autoscaling present" oc get cm ws-entry-health-resources-autoscaling -n "$NS" || hint "entry app not synced — ws prep health-resources-autoscaling"
 check "workshop quota present in ${NS}"                          oc get resourcequota workshop-quota -n "$NS"       || hint "workshop layer not applied — run bootstrap/install.sh"
 check "claims-db deployment ready in ${NS}"                      deploy_ready claims-db "$NS"                       || hint "wait for rollout: oc rollout status deploy/claims-db -n ${NS}"
 check "parasol-claims deployment ready in ${NS}"                 deploy_ready parasol-claims "$NS"                  || hint "wait for rollout: oc rollout status deploy/parasol-claims -n ${NS}; if a pod shows OOMKilled, the memory limit is too low — set it back: oc set resources deploy/parasol-claims -n ${NS} --requests=memory=256Mi --limits=memory=512Mi"

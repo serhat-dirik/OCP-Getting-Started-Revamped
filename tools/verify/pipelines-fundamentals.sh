@@ -174,9 +174,9 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
 else
   # --- end state (what a completed lab / solve looks like) -------------------
   info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
-  check "parasol-claims deployment ready in ${NS}"        deploy_ready parasol-claims "$NS"                  || hint "not done yet? the pipeline is what deploys and wires this app to claims-db, so before you run it this red is expected, not a broken environment (or: adm solve pipelines-fundamentals --user ${USER_NAME}). If a run already Succeeded and the app is still not ready, that one is real: oc get pods -n ${NS}; tkn pr list -n ${NS}"
+  check "parasol-claims deployment ready in ${NS}"        deploy_ready parasol-claims "$NS"                  || hint "not done yet? the pipeline is what deploys and wires this app to claims-db, so before you run it this red is expected, not a broken environment. If a run already Succeeded and the app is still not ready, that one is real: oc get pods -n ${NS}; tkn pr list -n ${NS}"
   check "parasol-claims image built (ImageStream present)" oc get imagestream parasol-claims -n "$NS"        || hint "not done yet — the build-image step pushes here, so no ImageStream before you run the build-test-deploy pipeline is expected"
-  check "parasol-claims Route created by the pipeline in ${NS}" oc get route parasol-claims -n "$NS"         || hint "not done yet — the deploy step creates the edge Route itself, so it appears only once the pipeline has run (or: adm solve pipelines-fundamentals --user ${USER_NAME}); attendees never run oc expose here"
+  check "parasol-claims Route created by the pipeline in ${NS}" oc get route parasol-claims -n "$NS"         || hint "not done yet — the deploy step creates the edge Route itself, so it appears only once the pipeline has run; attendees never run oc expose here"
 fi
 
 verify_summary
