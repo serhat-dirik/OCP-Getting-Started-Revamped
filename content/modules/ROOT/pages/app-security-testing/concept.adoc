@@ -38,18 +38,26 @@ include::partial$version-attributes.adoc[]
 [.lead]
 A green build is not a safe build.
 Parasol's `parasol-claims` service compiles, tests pass, and it deploys — and it still ships a hard-coded password, a dependency with a remote-code-execution hole, a container that runs as root with excess privileges, and an app that leaks itself to the browser.
-This module wires *five security gates* into one pipeline so every one of those is caught *before* it reaches production — and, just as important, shows you *where each finding is reported* so a red build tells you exactly what to fix.
+This module shows how *five security gates* that teams often ask for can be wired into one pipeline, so each of those flaws is caught *before* it reaches production — and, just as important, *where each finding is reported*, so a red build tells you exactly what to fix.
 
 include::partial$prep-while-you-read.adoc[]
 
+[NOTE]
+.The gates are the lesson; the tools are one example
+====
+This lab builds the gates with one set of tools: Red Hat's own OpenShift Pipelines and Red Hat Advanced Cluster Security, plus three open-source scanners.
+That is one way to do it, not a recommended toolset.
+Many organizations run commercial or other tools for the same gates, and the pattern does not change: a check runs at a fixed point in the pipeline, and a finding stops the build.
+====
+
 == What you'll learn
 
-* The *five pillars* of application security testing — *SAST*, *SCA*, *DAST*, *configuration security*, and *image risk* — and which class of bug each one catches that the others miss.
+* *Five security gates* — *SAST*, *SCA*, *image scan*, *config check*, and *DAST* — and which class of flaw each one catches that the others miss.
 * *Shift-left vs shift-right*: why some flaws are cheapest to catch in the source (before you build) and others can only be found by exercising the *running* app (after you deploy).
 * *Policy-as-a-gate*: how a scanner becomes a *build breaker* — a red quality gate, a non-zero exit, an enforced policy — instead of a report nobody reads.
 * *Defense in depth*: why the same class of vulnerability is checked at *more than one layer*, so a blind spot in one scanner is covered by the next.
-* *Where security findings live* — the SonarQube dashboard, the RHACS console, Tekton Results, and the per-task artifacts — the direct answer to "our security reporting is scattered and weak".
-* *Supply-chain hygiene*: why you pin your scanners by digest and never trust a tool's own CI action blindly (the 2026 Trivy Action compromise as a live lesson).
+* *Where security findings live* — each tool's own console, the pipeline's TaskRun logs, and Tekton Results — the direct answer to "our security reporting is scattered and weak".
+* *Supply-chain hygiene*: why you pin your scanners by digest and never trust a tool's own CI action blindly (the 2026 Trivy Action compromise as a recent example).
 
 == Why not just rely on "the build passed"?
 
@@ -63,19 +71,19 @@ That says nothing about *security*, because the most dangerous defects are invis
 
 None of these is a *bug* in the "it doesn't work" sense. They are *security debt* — and the only way to stop them shipping is to *test for them explicitly* and *fail the build* when they appear. That is what this module builds.
 
-== The five pillars, mapped to pipeline stages
+== Five gates, mapped to pipeline stages
 
-Each pillar answers a different question, at a different point in the software's life. The Application Security Testing capstone pipeline runs all five as *gates* — a red result stops the line.
+Each gate answers a different question, at a different point in the software's life. For each one: what it catches, when it runs, and what stops the build. The capstone pipeline runs all five — a red result stops the line. The last column names the tool this lab uses, one example among many.
 
-[cols="1,3,3",options="header"]
+[cols="2,3,2,3,2",options="header"]
 |===
-| Pillar | The question it answers | Where it runs
+| Gate | What it catches | When it runs | What stops the build | In this lab
 
-| *SAST* — Static Application Security Testing | Is there a flaw in the *source we wrote* — a hard-coded secret, an injection, unsafe code? | On the source, *before build* (SonarQube quality gate)
-| *SCA* — Software Composition Analysis | Is there a known vulnerability in a *dependency we pulled in*? | On the source tree, *before build* (Trivy filesystem scan)
-| *Image risk* | Does the *built image* — base layers and all — carry a known vulnerability? | On the image, *after build* (RHACS image scan)
-| *Config security* | Is the *Deployment we're about to apply* insecure — privileged, no limits, excess capabilities? | On the manifest, *before deploy* (RHACS `roxctl deployment check`)
-| *DAST* — Dynamic Application Security Testing | Does the *running app* misbehave — missing headers, exposed endpoints? | On the live service, *after deploy* (ZAP baseline scan)
+| *SAST* — Static Application Security Testing | A flaw in the *source we wrote*: a hard-coded secret, an injection, unsafe code | On the source, *before build* | A failed quality gate (here: any vulnerability) | SonarQube Community Build
+| *SCA* — Software Composition Analysis | A known vulnerability in a *dependency we pulled in* | On the source tree, *before build* | A HIGH or CRITICAL CVE | Trivy filesystem scan
+| *Image scan* | A known vulnerability in the *built image*, base layers and all | On the image, *after build* | An enforced build policy, such as Block Log4Shell | RHACS image check
+| *Config check* | An insecure *Deployment we're about to apply*: privileged, no limits, excess capabilities | On the manifest, *before deploy* | A deploy-policy violation of MEDIUM or above | RHACS `roxctl deployment check`
+| *DAST* — Dynamic Application Security Testing | Misbehavior of the *running app*: missing headers, exposed endpoints | On the live service, *after deploy* | Any warning from the baseline scan | ZAP baseline scan
 |===
 
 [mermaid]
@@ -87,7 +95,7 @@ The shape of the pipeline *is* the lesson: security is not a stage at the end, i
 
 == Shift-left vs shift-right — catch it where it's cheapest
 
-The pillars split into two families, and the split matters for *cost*:
+The gates split into two families, and the split matters for *cost*:
 
 * *Shift-left* (SAST, SCA, config): run against the *source and manifests*, before you build or deploy. These are the *cheapest* place to catch a flaw — no image to rebuild, no environment to stand up. A hard-coded secret found by SAST is a one-line fix in a code review; the same secret found in production is an incident.
 * *Shift-right* (image scan, DAST): run against the *built image* and the *running app*. Some things can only be seen here — a vulnerability in a base-image layer you didn't write, or a missing response header that only exists when the server actually answers a request.
@@ -100,9 +108,9 @@ The most important idea in this module is *defense in depth*: no single scanner 
 
 The lab makes this concrete with *log4shell* (CVE-2021-44228), the critical Log4j remote-code-execution flaw:
 
-* If log4shell entered as a *declared dependency* in `pom.xml`, the *SCA* scan (Trivy, shift-left) would catch it in the source.
+* If log4shell entered as a *declared dependency* in `pom.xml`, the *SCA* gate (shift-left; Trivy in this lab) would catch it in the source.
 * But in the lab it is *baked directly into the image* at build time — not declared in `pom.xml` at all. A source scan *cannot see it*: there is nothing in the source tree to find.
-* The *image scan* (RHACS, shift-right) catches it anyway, because it inspects the *assembled image*, layer by layer.
+* The *image scan* gate (shift-right; RHACS in this lab) catches it anyway, because it inspects the *assembled image*, layer by layer.
 
 That is defense in depth in one screen: a dependency that slips past the source scanner is stopped by the image scanner. Remove either gate and the vulnerable image ships. This is why "we run a dependency scanner" is not the same as "we scan for vulnerabilities" — *where* you scan decides *what* you can catch.
 
@@ -112,7 +120,7 @@ The most common complaint about security tooling is not that it fails to find th
 
 [cols="2,3",options="header"]
 |===
-| Gate | Where you read the finding
+| Gate (tool in this lab) | Where you read the finding
 
 | SAST (SonarQube) | The *SonarQube dashboard* for your project — the failing quality-gate condition, the exact rule (e.g. S2068), the file and line
 | SCA (Trivy) | The *TaskRun logs* in the pipeline, plus a *CycloneDX SBOM* (Software Bill of Materials) artifact listing every dependency
@@ -122,27 +130,29 @@ The most common complaint about security tooling is not that it fails to find th
 | The whole run | The *OpenShift Pipelines console* graph (which stage is red) and *Tekton Results* (historical runs and logs)
 |===
 
-Reading a finding *in its native console* — not just "the pipeline is red" — is a hands-on skill this module drills, because it is what turns a security gate from an obstacle into a tool.
+Other tools have their own consoles; the habit carries over. Reading a finding *in its native console* — not just "the pipeline is red" — is a hands-on skill this module drills, because it is what turns a security gate from an obstacle into a tool.
 
 == Supply-chain hygiene — trust, but pin
 
-Security tools are software too, and software gets compromised. In *March 2026* the Trivy *GitHub Action* was compromised, and in April its package-signing keys were rotated after the incident. The lesson is not "don't use Trivy" — Trivy is excellent — it is *how* you consume it:
+Security tools are software too, and software gets compromised. In *March 2026* the Trivy *GitHub Action* was compromised, and in April its package-signing keys were rotated after the incident. The lesson applies to every scanner, open source or commercial: it is about *how* you consume it.
 
 * *Pin by digest, not by tag.* Every scanner image in this pipeline is pinned to an immutable `sha256:` digest, so a compromised or moved `:latest` cannot silently change what runs in your build.
 * *Prefer the container to the convenience wrapper.* This pipeline runs the Trivy *container image* directly, not the GitHub Action — one fewer moving part in the supply chain, and the exact thing the 2026 incident argues for.
 
 Your security gates are part of *your* supply chain. Treating them with the same rigour you apply to your app dependencies is the whole point.
 
-== A note on entitlements and tooling `[OCP]`
+== The tools in this lab
 
-This module runs on *OpenShift Pipelines* and *Red Hat Advanced Cluster Security* (RHACS), both included with OpenShift — so it is tagged `[OCP]`.
-The three *scanners* it drives are *third-party open source*, called out here plainly so you know what you're adopting:
+The pipeline runs on *OpenShift Pipelines*, included with OpenShift; *Tekton Chains*, part of OpenShift Pipelines, signs each image the pipeline builds.
+The image-scan and config-check gates use *Red Hat Advanced Cluster Security* (RHACS), Red Hat's own product for image scanning and deploy-time policy. RHACS is part of Red Hat Advanced Developer Suite and is also included with OpenShift Platform Plus.
 
-* *SonarQube Community Build* — the free edition of SonarQube for SAST (LGPLv3 binaries). It provides quality gates and the dashboard; it has *no* pull-request analysis, so this pipeline analyzes the pushed revision and gates on the result.
-* *Trivy* — an open-source scanner (from Aqua Security) for SCA and license inspection.
-* *ZAP* — the *Zed Attack Proxy* (formerly OWASP ZAP), an open-source DAST tool.
+The other three gates use open-source scanners, as one example:
 
-The *technique* — five gates, defense in depth, findings you can read — is the transferable skill; the specific scanners are swappable for whatever your organization has standardized on.
+* *SonarQube Community Build* (LGPLv3 binaries) for SAST: quality gates and a dashboard. It analyzes the pushed revision rather than each pull request, so this pipeline gates on the pushed revision.
+* *Trivy* for SCA and license inspection.
+* *ZAP*, the *Zed Attack Proxy*, for DAST.
+
+Any of them can be replaced by a tool your organization already runs. The gate stays the same: where it sits, what it checks, and what stops the build.
 
 == The security layer over the Parasol platform
 
@@ -156,9 +166,9 @@ include::example$diagrams/app-security-testing/03-platform-accretion.mmd[]
 
 == How this shows up in real orgs
 
-* *"We bought a scanner and nobody reads the report."* The tool is not the problem; its *wiring* is. A scanner that publishes a report is a *suggestion*, and suggestions lose to deadlines. A scanner wired to a failing quality gate, a non-zero exit, or an enforced policy is a *control* that stops the line. Making each pillar a gate changes the conversation from "who has time to triage this" to "what do I fix to go green".
+* *"We bought a scanner and nobody reads the report."* The tool is not the problem; its *wiring* is. A scanner that publishes a report is a *suggestion*, and suggestions lose to deadlines. A scanner wired to a failing quality gate, a non-zero exit, or an enforced policy is a *control* that stops the line. Making each check a gate changes the conversation from "who has time to triage this" to "what do I fix to go green".
 * *"We already scan our dependencies — aren't we covered?"* Not for the flaw that isn't a dependency. The log4shell in this lab is baked *into the image* and never appears in `pom.xml`, so the source scan cannot see it — the image scan is what catches it. *Where* you scan decides *what* you can catch, which is exactly why the same class of risk is checked at more than one layer.
-* *"Our security reporting is scattered and weak."* Then a red pipeline teaches nobody. Route every gate to a console a human can actually read: the failing rule, file, and line in the *SonarQube dashboard*; the policy, CVE, and image in the *RHACS console*; the SBOM and the JUnit deploy report as *TaskRun artifacts*; the run history in *Tekton Results*. "Stage failed" is not a finding.
+* *"Our security reporting is scattered and weak."* Then a red pipeline teaches nobody. Route every gate to a console a human can actually read: the failing rule, file, and line in the *SAST dashboard* (SonarQube here); the policy, CVE, and image in the *RHACS console*; the SBOM and the JUnit deploy report as *TaskRun artifacts*; the run history in *Tekton Results*. "Stage failed" is not a finding.
 * *"Security is the gate at the end that blocks our releases."* That is what testing only at the end feels like. Most of what security finds is cheapest in the *source* — a hard-coded secret is a one-line fix in code review and an incident in production. Push what you can left, keep the checks that genuinely need a built image or a running app on the right, and security stops being one late gate that everyone dreads.
 * *"How do we know the security tools themselves are safe?"* By default, you don't — scanners are software, and software gets compromised. Pin every scanner *by digest* rather than a mutable tag, prefer running the scanner's *container* over a convenience CI wrapper, and treat your gates as part of *your* supply chain, held to the same standard you apply to your application's dependencies.
 
@@ -168,7 +178,8 @@ ifdef::instructor[]
 ====
 Spend no more than five minutes here before the live demo.
 Two ideas must land: (1) *a green build is not a safe build* — five gates catch five classes of flaw a compiler and a passing test suite cannot see: a hard-coded secret, a dependency with an *RCE*, an image-layer CVE, an insecure Deployment, and a self-leaking app; (2) *defense in depth, findings you can read* — the same risk is checked at more than one layer (log4shell baked into the *image* slips the source scan and is caught by the image scan), and every red gate routes to a console that names the rule, the file, the CVE — not just "stage failed".
-The payoff is the *red-to-green gauntlet*: each seeded flaw turns one gate red, a one-commit fix turns it green, and you read the finding in its native console — the SonarQube dashboard, the RHACS Violations view, the ZAP report.
+The payoff is the *red-to-green gauntlet*: each seeded flaw turns one gate red, a one-commit fix turns it green, and you read the finding in its native console — the SonarQube dashboard, the RHACS Violations view, the ZAP log.
+Present the tools as one example: if the room runs other scanners, commercial or open source, the gates carry over unchanged.
 Keep supply-chain hygiene (pin by digest; run the container, not the Action) as the closing aside, not the spine.
 ====
 endif::instructor[]

@@ -48,7 +48,7 @@ What that means for pacing — *how long a re-run takes to reach each gate*:
 |===
 | Segment | Time | Notes
 
-| Concept (five pillars, shift-left/right, defense-in-depth, reporting) | ~15 min | ≤15-min read; slides carry it
+| Concept (five gates, shift-left/right, defense-in-depth, reporting) | ~15 min | ≤15-min read; slides carry it
 | 1. Meet the seeded app + start the capstone | ~4–6 min | Read five flaws, start the run; it fails at SAST after *~1–1.5 min* (measured 70 s and 77 s)
 | 2. SAST gate — externalize the credential | ~6–8 min | Read SonarQube, fix, commit; the re-run reaches the SCA gate in *~1–1.5 min* (70 s, 81 s)
 | 3. SCA gate — drop the vulnerable dep | *~6–10 min* | *The step-change.* This re-run is the first to build: fetch + SAST + SCA + (unit-test beside build) + image-scan = *~3.5 min of pipeline* before it fails (3m18s, 3m19s)
@@ -62,9 +62,9 @@ What that means for pacing — *how long a re-run takes to reach each gate*:
 [NOTE]
 .How this timing was measured
 ====
-Re-measured 2026-11-12 as attendee slot `user5`, because the *pipeline itself got faster*: `unit-test` and `build-image` now run side by side instead of one after the other, the ZAP stage no longer launches ZAP a first time just to download add-on updates, the k6 load runs 15 s instead of 30 s, and the trivial steps carry small explicit limits, so the next stage no longer waits for namespace quota. A green capstone run on clean `main` went from 6m18s to 3m40s on an idle node with those changes alone. The table this replaced was correct when it was taken and is now roughly *twice as long* as a real run.
+Re-measured 2026-11-12 as attendee slot `user5`, because the *pipeline itself got faster*: `unit-test` and `build-image` now run side by side instead of one after the other, the ZAP stage no longer launches ZAP a first time just to download add-on updates, the k6 load runs 15 s instead of 30 s, and the trivial steps carry small explicit limits, so the next stage no longer waits for namespace quota. A green capstone run on clean `main` went from 6m18s to 3m40s on an idle node with those changes alone. The table this replaced was correct when it was taken and is now roughly *twice as long* as a current run.
 
-The numbers above come from *two complete passes of the lab's own ladder*, not from stage sums: twelve real PipelineRuns, started exactly as Exercises 1–6 start them (the CLI block, as the attendee, real commits to `seed-appsec` between runs), and left to land on whatever node the scheduler chose. Each exercise row quotes both passes. The first pass ran while another workload was rolling out across the cluster, which is where the 5m10s run 4 comes from; the second pass is the quieter one.
+The numbers above come from *two complete passes of the lab's own ladder*, not from stage sums: twelve PipelineRuns, started exactly as Exercises 1–6 start them (the CLI block, as the attendee, commits to `seed-appsec` between runs), and left to land on whatever node the scheduler chose. Each exercise row quotes both passes. The first pass ran while another workload was rolling out across the cluster, which is where the 5m10s run 4 comes from; the second pass is the quieter one.
 
 The human reading/fix/commit time in each exercise row is carried over from the previous measurement (its row minus the pipeline time it was built on); only the pipeline component was re-measured, because only the pipeline changed.
 
@@ -135,7 +135,7 @@ right order of magnitude, not as a fresh measurement.
 run `ws reset app-security-testing --user <u>` (or `adm git-refresh --restart-terminals --user <u>` for a
 stale cockpit) and re-smoke.
 
-`adm solve` is *slow by design*: it runs the real capstone to completion so the green end state genuinely
+`adm solve` is *slow by design*: it runs the full capstone to completion so the green end state genuinely
 exists. It wraps the capstone pipeline measured above (3m44s on clean `main`, plus two Argo syncs), so start it *at least 10 minutes* before
 a demo — not two.
 
@@ -294,6 +294,7 @@ Complementary. Trusted Software Supply Chain proves the image is *provably yours
 
 == Watchouts
 
+* *Present the tools as one example, not a recommendation.* The module teaches the gates. SonarQube Community Build, Trivy and ZAP are open-source examples; many organizations run commercial or other tools for the same gates, and the pattern carries over. Do not rank or compare vendors. RHACS and OpenShift Pipelines are Red Hat's own products and can be presented as such.
 * *SonarQube first-analysis behavior (the #1 gotcha).* If the default gate is "Sonar way", the seeded credential *passes* on a fresh project (no new-code baseline). Verify pre-flight step 5 — the default must be *Parasol AppSec Gate*. This surprised the build itself: the credential fires the S2068 rule (`vulnerabilities=1`) but the CAYC gate reports empty conditions on the first run.
 * *Per-user Sonar project keys are mandatory.* Community Build has no branch analysis, so every attendee must scan into `parasol-claims-<user>` (set in the Start form / PipelineRun param). A shared key means user A's fix greens the project while user B still has the credential — confusing everyone. The `adm solve` PipelineRun already sets the per-user key.
 * *The cluster-resolver task cache.* The pipeline references tasks by cluster resolver, which caches resolved Tasks briefly. If you *update* a curated task (e.g. `roxctl-deployment-check`), a run started within the cache TTL may still use the old body. Re-run after a minute, or bump nothing mid-session.
@@ -311,7 +312,7 @@ Complementary. Trusted Software Supply Chain proves the image is *provably yours
 
 * *Attendees cannot sign in to RHACS Central, by design of the product, not an oversight in the setup.* Central keeps its own user database; its sign-in page offers only a username-and-password form, and it *rejects OpenShift bearer tokens outright* (verified: presenting even a cluster-admin OpenShift token to Central returns "token validation failed"). The `advanced-cluster-security` OpenShift console plugin is not a workaround — it proxies the same OpenShift token to the same Central. So *every* RHACS screen in this module is yours to show. The lab says so plainly and routes attendees to the `image-scan` / `deployment-check` TaskRun logs, which carry the identical verdict. If an attendee asks to see the console, show it on the shared display; do not hand out Central credentials.
 
-* *The ZAP, k6 and SBOM report files are not retrievable, and the lab no longer pretends otherwise.* Each is written into a pipeline workspace — a scratch volume on the stage's own pod — and once the stage finishes there is no running container to copy it out of (`oc exec` into a completed pod is refused, PVC-backed or `emptyDir`, attendee or admin). Expect the question; the honest answer is that publishing artifacts durably is a real platform decision this teaching pipeline deliberately skips, and it is raised as an org-mapping prompt in the wrap-up. Do not improvise a `oc debug` workaround in front of the room — it will not work for the `emptyDir` workspaces at all.
+* *The ZAP, k6 and SBOM report files are not retrievable, and the lab no longer pretends otherwise.* Each is written into a pipeline workspace — a scratch volume on the stage's own pod — and once the stage finishes there is no running container to copy it out of (`oc exec` into a completed pod is refused, PVC-backed or `emptyDir`, attendee or admin). Expect the question; the honest answer is that publishing artifacts durably is a platform decision this teaching pipeline deliberately skips, and it is raised as an org-mapping prompt in the wrap-up. Do not improvise a `oc debug` workaround in front of the room — it will not work for the `emptyDir` workspaces at all.
 
 * *Tekton Results is present and attendees can read it — do not tell them otherwise.* The `tekton-results-api`, `-watcher` and `-postgres` pods run on this cluster and archive every PipelineRun, including the failed ones, so the red-to-green history genuinely persists. Attendee identities are authorized for their own namespace (verified: an attendee identity reads its own namespace's results and is denied another attendee's). One caveat still worth knowing: the API runs with `LOGS_API=false`, so run *metadata* is archived but TaskRun *logs* are not — report that to the platform owner rather than working around it. The `tekton-results-api` Route itself is fixed (reencrypt termination) on clusters where the workshop installed Pipelines — verify with `oc get route tekton-results-api -n openshift-pipelines -o jsonpath='{.spec.tls.termination}'` before relying on the public URL in front of the room; on a cluster that already had Pipelines installed before the workshop arrived (adopted, not ours), that config may not have applied, so check first and fall back to the OpenShift console's own service proxy, which always works regardless.
 
@@ -330,5 +331,5 @@ Complementary. Trusted Software Supply Chain proves the image is *provably yours
 // sentence re-dating itself — but it bakes that pre-existing uncertainty in rather than moving it.
 Application Security Testing runs on OpenShift Pipelines 1.23.1, SonarQube Community Build 26.5.0, RHACS 4.11.2, and Trivy 0.67.0, from the SonarQube, RHACS, and Trivy documentation.
 Every gate fail-then-pass — SAST (SonarQube S2068, a hard-coded credential), SCA (Trivy, `commons-collections` 3.2.1 CVE-2015-7501), the image scan (RHACS, log4shell baked into the image), the `roxctl` deployment check (the insecure manifest), and the ZAP baseline (missing security headers) — was performed end-to-end on OCP 4.21.22 against the live appsec + trust stacks on 2026-07-15.
-The timing table was re-measured on 2026-07-31 (cluster 2, attendee slot `user5`) from three real runs — see *How this timing was measured* above; the previous table's estimates were replaced from fresh measurement, not extrapolated.
+The timing table was re-measured on 2026-07-31 (cluster 2, attendee slot `user5`) from three runs — see *How this timing was measured* above; the previous table's estimates were replaced from fresh measurement, not extrapolated.
 No content ported from stale material.
