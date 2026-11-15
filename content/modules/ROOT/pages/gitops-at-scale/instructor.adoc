@@ -17,14 +17,14 @@ include::partial$prep-before-you-teach.adoc[]
 
 == Timing
 
-Total hands-on: *~40 min* (add ~12–15 min of concept up front).
+Total hands-on: *~45 min* (add ~12–15 min of concept up front).
 
 [cols="1,4,1,2",options="header"]
 |===
 | # | Exercise group | Attendee time | Measured core (as user7, 4.21.22)
 
 | 1 | One ApplicationSet generates the fleet | ~8 min | CLI download *~290 MB / ~30–60s* (once) + token + `appset create`; generation *~8s*; prod converges (db + migration + Rollout Healthy) in *~50s*
-| 2 | Sync waves and hooks | ~5 min | read-only (`oc get`/`oc logs`) — seconds
+| 2 | Sync waves and hooks | ~10 min | write six manifests + `git push` (password prompt) + `~/argocd app create`; the sync itself *29 s* warm (PreSync → wave 0 → wave 1 hook → wave 2 → wave 3 → PostSync), measured as `user21` on 2026-11-16
 | 3 | Canary with automated analysis | ~11 min | one Gitea commit + Refresh; canary *25%→pause 20s→50%→analysis ~45s→100%* ≈ *2 min*
 | 4 | Break and fix (auto-rollback) | ~11 min | knob + Gitea commit; canary aborts at analysis in *~90s*; git-revert recovery *~24s*
 | 5 | Blue-green (concept + challenge) | ~5 min | reading; optional hands-on blue-green in the Challenge
@@ -37,6 +37,7 @@ Every exercise was performed as `user7` on the build cluster (OCP 4.21.22, OpenS
 
 * *ApplicationSet (exercise 1)* — the served CLI is *~290 MB* (a one-time ~30–60&nbsp;s fetch); `~/argocd appset create` then generated the three Applications in *~8 seconds* (dev + stage *adopted* by name, prod *created*); production converged in *~50 seconds* (claims-db, the wave-1 migration Job, then the Rollout to `4/4` Healthy) on a warm image cache.
 On a *cold* node add the image pull for the first user of the day.
+* *Sync waves sample (exercise 2)* — re-measured 2026-11-16 as `user21` in the cockpit terminal on cluster-gn67x: `~/argocd app sync waves-{user}` finished in *28 s* with warm images (PreSync Job ~5 s, `waves-db` Healthy ~3 s after create, migration Job ~5 s, app ~3 s, Route, PostSync smoke ~4 s). On a cold node add the `openshift/postgresql` and `openshift/httpd` image pulls.
 * *Canary (exercise 3)* — from the Gitea commit to `100%` Healthy was *~2 minutes*: `setWeight 25` (1 of 4 pods), a *20 s* pause, `setWeight 50` (2 of 4), the job-provider analysis (*~45 s*: two 200-probes at a 15 s interval plus Job startup), then `setWeight 100`.
 * *Break/abort (exercise 4)* — with `gitops-at-scale-canary-control` = `fail`, the canary reached the analysis step and *aborted* about *90 seconds* after the commit; the route answered `200` throughout and the stable ReplicaSet never scaled down.
 * *Fix (exercise 4)* — clearing the knob and reverting the image in Git returned the Rollout to Healthy in *~24 seconds* (reverting to the version that is already stable clears the abort without a fresh canary).
@@ -129,12 +130,14 @@ Beyond the Say/Show/Do arc in the demo flavor:
 
 * *Pre-solve and pre-sign-in before the room.*
 Run `adm solve gitops-at-scale --user {user}` early (blocks ~4–6 min) so a finished, Healthy prod Rollout is your opening visual, and sign in to the student Argo CD UI as `{user}` ahead of time — open `claims-prod-{user}` so its Application card is one click away.
-The Argo CD *Rollout view* does not render on this cluster (`spec.server.enableRolloutsUI` is set on our ArgoCD CR, but the extension's assets 404 regardless of URL — a packaging gap in the downstream image, not our config; it can be revisited if a later CSV fixes it), so have a large terminal window ready instead — beats 2–3 are driven from the polling loops there.
+Open the OpenShift console's *GitOps* → *Rollouts* → `parasol-claims` page in `{user}-prod` beside a large terminal: the page shows the stable and canary revisions side by side, and the polling loops print the step and the analysis verdict (the console has no AnalysisRun view).
+The Argo CD Rollouts UI extension is switched off on the attendees' Argo CD (on Argo CD 3.5 it broke the Applications toolbar), so do not look for a Rollout tab there.
+// CONSOLE-UNVERIFIED: the console Rollout details page as a demo visual — see lab exercise 3.
 * *Both canaries are fast — the whole arc lands live.*
 The green canary (beat 2) and the aborting canary (beat 3) each take ~2 minutes; there is nothing to wait out.
-Let the terminal's polling loop print the 25% → 50% → analysis → 100% progression on screen (there is no Rollout view to animate it here), then the abort snapping back to stable.
+Let the terminal's polling loop print the 25% → 50% → analysis → 100% progression while the console's *Revisions* section shows the canary's share grow, then the abort snapping back to stable.
 * *Drive by Git, narrate by terminal.*
-Ship each version with a one-line Gitea edit (the image tag) so the audience sees "GitOps"; keep the terminal poll running — it is the only live view of the step/phase on this cluster.
+Ship each version with a one-line Gitea edit (the image tag) so the audience sees "GitOps"; keep the terminal poll running beside the console's Rollout page: the loop carries the step number and the analysis verdict, which the page does not.
 For the abort beat, `oc patch … verdict=fail` *before* the commit — the solve prod app is `selfHeal: false`, so the knob holds while you drive.
 * *Have a fallback.*
 If the shared student controller is sluggish and a sync lags, narrate from the terminal's own history instead of waiting on a fresh one — `oc get analysisrun -n $PROD --sort-by=.metadata.creationTimestamp` lists every canary this namespace has already run, so the previous green run is still there to point at.
@@ -173,16 +176,18 @@ The Showroom terminal has `oc`, `git`, and `helm` but no `argocd`/Rollouts plugi
 Pre-flight check 3 confirms the server serves the CLI and the account + RBAC exist; the verify's `argocd CLI served` check gates it too.
 The ~290&nbsp;MB download is a one-time ~30–60&nbsp;s wait the first time an attendee runs exercise 1 — set the expectation.
 Do *not* steer attendees to `argocd login` (interactive gRPC over the route is unreliable — the lab uses a REST token) or to `oc apply` into `ogsr-student-gitops`.
+* *Exercise 2 pushes the attendee's own commit.*
+The `waves/` sample is written in the terminal and pushed to the attendee's fork; `git push` asks for the workshop password (the username is preset with `credential.username`).
+`ws prep` removes the `waves-{user}` Application with the rest of `proj-{user}` and purges `{user}-dev`, but leaves the `waves/` folder in the fork (the fork job re-asserts only the files it owns); re-running the write block produces identical files, so a redo is clean.
 * *Reset handles the ApplicationSet — `ws prep` is enough.*
 `ws reset`/`ws prep` purge the attendee's *ApplicationSet first* (in the shared control plane), then its Applications, then the namespaces — so a surviving ApplicationSet cannot re-generate what was purged, and a full reset leaves nothing to resurrect (verified).
 Attendees do not need a manual step; if one prefers, `~/argocd appset delete claims-{user}` removes it and prunes its apps in one shot.
-* *Watch the canary with `oc get rollout`, not a plugin or the Rollout view.*
-There is no Argo Rollouts CLI plugin (`oc argo rollouts`) in the attendee terminal, and the lab leans on the Argo CD *Rollout view* nowhere either.
-That view has been unreliable across builds: the UI extension is enabled (`spec.server.enableRolloutsUI`, `d622a6f`), its assets 404'd everywhere they were looked for on the cluster this module was built on, while on the cluster it was last re-run against they *do* serve (4.8&nbsp;MB from the student Argo route's `/extensions.js`) — with nobody yet signed in to confirm whether the view then draws.
-So the lab observes the canary with plain `oc get rollout … -o jsonpath` (step/phase) polling loops — these ARE the visual here, not a fallback for one.
-If a later GitOps CSV closes the packaging gap, the Rollout-view beats in the lab and demo flavors name where to restore it.
-If you demo from your laptop and have the plugin installed, `oc argo rollouts get rollout parasol-claims -n {user}-prod --watch` is a nicer live view — but do not put it in attendee steps; it will not be found.
-And if someone runs the blue-green Challenge and asks how to promote without a *Promote* button: it is an object patch, `oc patch rollout <name> -n {user}-prod --subresource status --type merge -p '{"status":{"pauseConditions":null}}'` — the Challenge spells it out, along with the two lookalikes that report success and promote nothing.
+* *Two views of the canary: the console's Rollouts page and `oc get rollout`.*
+The OpenShift GitOps console plugin adds *GitOps* → *Rollouts* (list and *Rollout details*: strategy, revisions with Stable/Canary/Active/Preview labels, traffic, and the *Promote*, *Full Promote*, *Abort* and *Retry* actions); the lab's Console tabs use it.
+It has no AnalysisRun page, so the analysis verdict is always read with `oc get analysisrun`, and the terminal loops stay the record of the step sequence.
+The Argo CD Rollouts UI extension is switched off on the attendees' Argo CD (on Argo CD 3.5 it broke the Applications toolbar); do not re-enable it for a demo.
+There is no Argo Rollouts CLI plugin (`oc argo rollouts`) in the attendee terminal; if you demo from your laptop with the plugin, `oc argo rollouts get rollout parasol-claims -n {user}-prod --watch` is fine to show, but keep it out of attendee steps.
+And if someone runs the blue-green Challenge: *Promote* on the console's Rollout details page, or an object patch, `oc patch rollout <name> -n {user}-prod --subresource status --type merge -p '{"status":{"pauseConditions":null}}'` — the Challenge spells it out, along with the two lookalikes that report success and promote nothing.
 * *The analysis knob is entry-owned; a mid-lab `adm start`/`ws prep` resets it to `pass`.*
 `gitops-at-scale-canary-control` is materialized by the entry app (with `selfHeal: false`), so a manual `oc patch … verdict=fail` *holds* through the lab.
 But re-running `adm start`/`ws prep`/a full entry re-sync while a room is mid-exercise-4 will reset it to `pass` and a canary that should abort will instead promote.

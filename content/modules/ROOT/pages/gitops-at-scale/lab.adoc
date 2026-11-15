@@ -7,76 +7,39 @@ include::partial$version-attributes.adoc[]
 // [source,sh,role=execute]. The attendee OWNS {user}-dev/stage/prod, so every WORKLOAD view (deploys,
 // the Rollout, pods, the migration Job, AnalysisRuns, the route) is a real `oc` command there and is
 // load-bearing/verifiable. The Argo CD control plane (ogsr-student-gitops) is SHARED and attendees cannot
-// write to it with oc — so the ApplicationSet is CREATED via the Argo CD CLI (as themselves, via
-// their applicationsets RBAC on proj-{user} — Argo 3.4's web UI has no create/read screen for
-// ApplicationSets) and the canary is WATCHED from the terminal via `oc get rollout`/`analysisrun`
-// polling loops. The Argo CD Rollouts UI extension (spec.server.enableRolloutsUI, d622a6f) is
-// enabled on this instance but its assets do not resolve (404 through every route/localhost
-// convention tried, no extension-registration log line — a packaging gap in the downstream image,
-// not something config fixes), so the visual Rollout view does not render; the terminal loops and
-// the console's Pods view carry the // media-pass: capture markers instead. New versions are shipped by editing the
-// {user}/claims-config FORK in the Gitea UI (git-driven, same as the previous GitOps module).
-// To keep jsonpath braces literal, the first block sets DEV/STAGE/PROD with subs=attributes (no
-// braces) and later oc blocks use $DEV/$STAGE/$PROD with NO subs. All commands, outputs, and timings
-// were performed as user4 on OCP 4.21.22 (frozen provenance — not a requirement) / OpenShift GitOps 1.21.1 (Argo CD 3.4, Argo
-// Rollouts GA) on 2026-07-11: the ApplicationSet adopted dev+stage and generated prod (~8s), prod
-// converged wave-ordered (db -> migrate -> Rollout, ~50s), the 1.0->1.1 canary ran 25%/pause/50%/
-// analysis(green)/100% (~2 min), and with the verdict knob = fail a 1.1->1.0 canary ABORTED at the
-// failed AnalysisRun with stable preserved (route 200 throughout), then a git revert recovered it.
-// Console dual-path retrofit (2026-07-11): the k8s-facing steps in YOUR namespaces carry [tabs]
-// Console|CLI — starting-point deploys, the migration Job + logs, the sync-wave annotations (YAML tab),
-// prod serving (Route), and the analysis-knob ConfigMap edit. Single-path (recorded): the ApplicationSet
-// step is Argo CLI/API (Argo 3.4 UI has no appset create/read screen — deliberate, no console dual);
-// the git-clone/cat repo tour is pure-git; Gitea image edits are product-UI; and the canary/abort/
-// recovery WATCH loops stay CLI-only. No Argo Rollouts-SPECIFIC console plugin is installed (re-verified
-// 2026-07-31 on cluster2: `oc get consoleplugins.console.openshift.io` lists no rollouts-facing plugin),
-// but that is NOT the same as "no console nav": grounded 2026-08-02 by reading the live plugin manifest,
-//   oc get --raw "/api/v1/namespaces/openshift-gitops/services/https:gitops-plugin:9001/proxy/plugin-manifest.json"
-// gitops-plugin (v0.0.17 on that cluster — Argo CD's OWN console plugin, already in
-// consoles.operator.openshift.io/cluster .spec.plugins) registers an UNCONDITIONAL
-// console.navigation/resource-ns extension (id `rollout`, name "Rollouts") in its own "GitOps" nav
-// section (`gitops-navigation-section`, insertAfter workloads, admin perspective) targeting
-// argoproj.io/v1alpha1 Rollout — the group/version of the Rollout CRD installed here. So Rollout DOES
-// have a console nav entry: GitOps > Rollouts (a LIST view). AnalysisRun has NO registration anywhere in
-// that manifest — it stays Home>Search only, and no step in this lab asks for one in the console
-// (every AnalysisRun step is CLI).
-// SEEN, not inferred (2026-08-02): the page was opened with an authenticated ATTENDEE session (user2,
-// project user2-prod) and rendered — a list with Name / Status / Labels / Selector, showing
-// parasol-claims at "Phase: Paused, 4 of 4" mid-canary. It is badged *Tech preview*, which the
-// attendee text now says. The manifest proves the extension is registered; this proves it draws.
-// The gap
-// beside the loops is therefore NARROWER than "no nav at all": a Rollouts list view exists in nav, but
-// the Argo CD Rollouts UI extension (spec.server.enableRolloutsUI, see the header comment above) still
-// 404s, so there is no canary/step/analysis VISUALIZATION anywhere in the console — for watching the
-// canary progress the terminal loops are still the view.
-// Console nav reuses platform-orientation/build-deliver live-grounded 4.21 labels.
-// Blue-green promotion (Challenge, last bullet) PERFORMED 2026-08-07 as user7, in the real cockpit
-// ttyd terminal, from this module's ENTRY state (adm start gitops-at-scale --user user7), on OCP 4.22 /
-// GitOps 1.21.1. A throwaway blueGreen Rollout (2 replicas, activeService+previewService,
-// autoPromotionEnabled:false) in {user}-prod paused ~4s after the image change with
-// status.phase=Paused, status.message=BlueGreenPause, pauseConditions=[{"reason":"BlueGreenPause",
-// "startTime":…}], status.controllerPause=true, blueGreen.activeSelector=<blue> /
-// previewSelector=<green> — and spec.paused UNSET, which is why unpausing it does nothing.
-// MEASURED, both ways round: `oc patch rollout <n> --subresource status --type merge -p
-// '{"status":{"pauseConditions":null}}'` flipped activeSelector to the green hash and stableRS to the
-// green RS in under a second (blue RS scaled 2->0 ~30s later — measured, and the attendee text names
-// no field for it because the CRD's own blueGreen schema was not read before the cluster went away);
-// the same patch
-// WITHOUT --subresource printed "patched (no change)" and left it Paused; '{"spec":{"paused":false}}'
-// printed "patched" and promoted nothing. '{"status":{"promoteFull":true}}' on the status subresource
-// promotes identically (the controller consumes and clears the flag). RBAC holds: as user7,
-// `oc auth can-i patch rollouts.argoproj.io/status` is yes in own ns, no in a neighbour's. The plugin
-// really is absent (`kubectl argo rollouts` -> unknown command; `oc plugin list` -> none), and
-// `oc set image rollout/...` fails with `no kind "Rollout" is registered ... in scheme` — ship a new
-// image by re-applying the manifest. Single-path on purpose: the promote could NOT be clicked here.
-// The gitops-plugin's own locale bundle (locales/en/plugin__gitops-plugin.json, served through the
-// plugin service) DOES carry "Promote" / "Full Promote" / "Abort" / "Retry" alongside "Rollout
-// details", so its console Rollout details page very likely offers the action — unproven, because
-// clicking it needs a signed-in console session. Same for the Argo CD Rollouts UI extension: on THIS
-// cluster its asset SERVES (student-gitops route /extensions.js -> 200, 4.8 MB, from the
-// rollout-extension init container), which contradicts the older "404s regardless of URL" note above
-// — whether the view then draws is untested here. Both need one human console/Argo login to settle;
-// do not write a Console:: tab for the promote until someone has clicked it.
+// write to it with oc — so the ApplicationSet (exercise 1) and the waves sample Application (exercise 2)
+// are CREATED via the Argo CD CLI, as the attendee, through their RBAC on proj-{user}.
+// New versions are shipped by editing the {user}/claims-config FORK in the Gitea UI (git-driven, same
+// as the previous GitOps module). To keep jsonpath braces literal, the first block sets DEV/STAGE/PROD
+// with subs=attributes (no braces) and later oc blocks use $DEV/$STAGE/$PROD with NO subs.
+// Provenance (frozen, not a requirement): first performed as user4 on OCP 4.21.22 / OpenShift GitOps
+// 1.21.1 on 2026-07-11 — the ApplicationSet adopted dev+stage and generated prod (~8s), prod converged
+// wave-ordered (db -> migrate -> Rollout, ~50s), the 1.0->1.1 canary ran 25%/pause/50%/analysis
+// (green)/100% (~2 min), and with the verdict knob = fail a 1.1->1.0 canary ABORTED at the failed
+// AnalysisRun with stable preserved (route 200 throughout), then a git revert recovered it. Exercises 1
+// and 2 re-performed 2026-11-16 as user21 in the user21 cockpit terminal pod on cluster-gn67x.
+//
+// Rollouts in the console: the OpenShift GitOps console plugin (gitops-plugin, 1.0.0 on cluster-gn67x,
+// read 2026-11-16 from its live plugin-manifest.json through the plugin service) contributes a GitOps
+// nav section (insertAfter workloads, admin perspective) with a namespaced "Rollouts" item
+// (console.navigation/resource-ns id `rollout`), a Rollout list page and a Rollout details page
+// (console.page/resource/list + /details for argoproj.io/v1alpha1 Rollout), and Topology integration
+// (rollout node decorator, side-bar Details/Overview tabs). Its locale bundle carries "Rollout
+// details", "Revisions", "Stable", "Canary", "Active", "Preview", "Traffic", "Strategy", "Stable
+// Service", "Canary Service", "Analysis Templates", and the actions "Promote", "Full Promote",
+// "Abort", "Retry", "Restart", "Rollback". There is NO AnalysisRun page: verdicts stay CLI. The
+// Console tabs in exercises 3, 4 and the blue-green Challenge are written from that manifest; every
+// step not yet seen in a signed-in browser carries a `// CONSOLE-UNVERIFIED:` line.
+// The Argo CD Rollouts UI extension (spec.server.enableRolloutsUI) is switched OFF on the attendees'
+// Argo CD (8806861b: on Argo CD 3.5 it broke the Applications toolbar) — do not point attendees at it.
+// Blue-green promotion (Challenge, last bullet) PERFORMED 2026-08-07 as user7 in the cockpit terminal
+// from the ENTRY state on OCP 4.22 / GitOps 1.21.1: a blueGreen Rollout (autoPromotionEnabled:false)
+// pauses with status.phase=Paused, message=BlueGreenPause, pauseConditions=[BlueGreenPause] and
+// spec.paused UNSET. `oc patch ... --subresource status -p '{"status":{"pauseConditions":null}}'`
+// flipped activeSelector to green in under a second (blue RS scaled to 0 ~30 s later); the same patch
+// WITHOUT --subresource printed "patched (no change)"; '{"spec":{"paused":false}}' promoted nothing;
+// '{"status":{"promoteFull":true}}' on the status subresource promotes too. `oc set image rollout/...`
+// fails (`no kind "Rollout" is registered`), and the Argo Rollouts kubectl plugin is absent.
 // Two AsciiDoc traps that block carries, both caught by READING THE RENDERED PAGE, not the source:
 // (1) a bare subs="attributes" REPLACES the default substitutions, so specialchars is dropped and the
 // browser swallows a literal <name> placeholder as an unknown tag — it vanished from the page while
@@ -150,7 +113,9 @@ It leaves the claims service GitOps-managed in `{user}-dev` and `{user}-stage` a
 
 The account in that command is the one you signed in to this cockpit with. Sign in to the student Argo CD ({student_argo_url}) as `{user}` and open `claims-prod-{user}`; the three green applications are the starting view for step 1. Sign in to Gitea as well — {gitea_url}/{user}/claims-config[{user}/claims-config^] — because steps 2 and 3 ship a new version by editing that fork, and editing needs a signed-in session.
 
-Keep a large terminal window beside the browser. The Argo CD *Rollout view* does not render on this cluster: its UI extension is enabled but its assets do not resolve, so the polling loops in steps 2 and 3 are where the canary is watched.
+Keep a large terminal window beside the browser, and open the OpenShift console's *GitOps* → *Rollouts* → `parasol-claims` page in `{user}-prod`: its *Revisions* section shows the stable and canary versions side by side while the polling loops in steps 2 and 3 print the step and the analysis verdict.
+// CONSOLE-UNVERIFIED: same Rollout details page as lab exercise 3 — confirm it is a usable demo
+// visual (Revisions with Stable/Canary and traffic) at presenter zoom.
 
 NOTE: The analysis verdict step 3 sets is a ConfigMap the module's entry state owns. Staging the module again — or a full entry re-sync — resets it to `pass`, and a canary that should abort will promote instead. If that happens, read `oc get cm gitops-at-scale-canary-control -n {user}-prod -o jsonpath='{.data.verdict}'` before looking for a deeper cause.
 
@@ -213,7 +178,7 @@ image::gitops-at-scale/gitops-at-scale-04-canary-progressing.png["A terminal pol
 
 The new version earns its traffic. A quarter of production runs it while three quarters stay on the proven version, an analysis Job probes the canary's real readiness endpoint, and only that evidence widens the slice — so a release is measured rather than hoped for.
 
-*On screen* — in Gitea, open `rollouts/claims-rollout.yaml` in `{user}/claims-config`, change the image tag from `1.0` to `1.1`, and commit. Then choose *Refresh* on `claims-prod-{user}` in Argo CD and follow the canary from the terminal, where the loop's `step N/5` and `analysis:` columns stand in for the Rollout view:
+*On screen* — in Gitea, open `rollouts/claims-rollout.yaml` in `{user}/claims-config`, change the image tag from `1.0` to `1.1`, and commit. Then choose *Refresh* on `claims-prod-{user}` in Argo CD and follow the canary from the terminal, the loop's `step N/5` and `analysis:` columns beside the console's Rollout details page:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
@@ -593,16 +558,28 @@ A fourth environment is one more list element; another service, another Applicat
 ****
 
 == 2. Sync waves and hooks: ordered convergence
-⏱ *~5 min* · watch production come up in the right order — database, then migration, then app
+⏱ *~10 min* · sync a small app whose resources carry waves and hooks, and prove the order from the logs
 
 Parasol's schema must exist before the app boots against it, on every sync, with no runbook.
+Argo CD orders a sync with two annotations: a *sync wave* (an integer; lower waves go first) and a *hook* (`PreSync`, `Sync`, `PostSync`: a one-shot Job that runs at a set moment in the sync).
 
-*You'll end with:* production converged in order: database, then migration, then app.
+*You'll end with:* a sample app you synced with your Argo CD, and the logs and events that prove each step waited for the one before it.
 
 [mermaid]
 ....
-include::example$diagrams/gitops-at-scale/02-sync-waves.mmd[]
+include::example$diagrams/gitops-at-scale/12-waves-sample.mmd[]
 ....
+
+// Exercise 2 PERFORMED 2026-11-16 as user21 in the user21 cockpit terminal pod (the attendee's own
+// oc session), on cluster-gn67x, from `ws prep gitops-at-scale --yes` + exercise 1: the sample was
+// written into ~/claims-config/waves, pushed to the user21/claims-config fork, created with
+// `~/argocd app create`, and synced with `~/argocd app sync` — 29 s end to end with warm images.
+// Every expected-output block below is that run. The sample is the attendee's own commit (defining
+// the annotations IS the lesson), so the fork job does not provision it and `ws prep` does not remove
+// the waves/ folder from the fork; re-running the write block rewrites identical files.
+// Only kinds the student Argo CD watches (workshop-config studentArgo.resourceInclusions): Job,
+// Deployment, Service, Route. Images are the in-cluster openshift/postgresql and openshift/httpd
+// streams, so nothing here is runtime-specific.
 
 Set this exercise's shortcuts first:
 
@@ -611,80 +588,343 @@ Set this exercise's shortcuts first:
 DEV={user}-dev; STAGE={user}-stage; PROD={user}-prod
 ----
 
-First, the migration Job: a `Sync` *hook* Argo ran during the sync.
+*Define the sample.*
+Six files in a new `waves/` folder of your fork: read the `argocd.argoproj.io/` annotation at the top of each one, because that is the whole lesson.
 
-[tabs]
-====
-Console::
-+
---
-With the *Project* set to `{user}-prod`, open *Workloads* → *Jobs*: `claims-db-migrate` shows *Complete* (`1/1`).
-Click it, open the *Pods* tab, click its Pod, and read the *Logs* tab — the same wait-for-database then apply-schema output the CLI prints.
---
-CLI::
-+
---
 [source,sh,role=execute]
 ----
-oc get job claims-db-migrate -n $PROD
-oc logs job/claims-db-migrate -n $PROD
+mkdir -p ~/claims-config/waves && cd ~/claims-config/waves
+cat > 00-presync-hook.yaml <<'YAML'
+# PreSync hook: runs before Argo CD applies anything else in this folder
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: waves-presync
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: presync
+          image: image-registry.openshift-image-registry.svc:5000/openshift/postgresql:15-el9
+          command: ["/bin/bash", "-c", 'echo "$(date +%T)  PreSync hook  preflight passed, nothing applied yet"']
+YAML
+cat > 10-database.yaml <<'YAML'
+# wave 0: the database and its Service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: waves-db
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  selector: {matchLabels: {app: waves-db}}
+  template:
+    metadata: {labels: {app: waves-db}}
+    spec:
+      containers:
+        - name: postgresql
+          image: image-registry.openshift-image-registry.svc:5000/openshift/postgresql:15-el9
+          env:
+            - {name: POSTGRESQL_USER, value: waves}
+            - {name: POSTGRESQL_PASSWORD, value: waves-sample}
+            - {name: POSTGRESQL_DATABASE, value: waves}
+          readinessProbe:
+            exec: {command: ["pg_isready", "-h", "127.0.0.1"]}
+            periodSeconds: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: waves-db
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  selector: {app: waves-db}
+  ports: [{port: 5432}]
+YAML
+cat > 20-migrate-hook.yaml <<'YAML'
+# wave 1: a Sync hook, the one-shot schema migration
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: waves-migrate
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: image-registry.openshift-image-registry.svc:5000/openshift/postgresql:15-el9
+          env: [{name: PGPASSWORD, value: waves-sample}]
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              echo "$(date +%T)  wave 1 hook   database answers: $(pg_isready -h waves-db)"
+              psql -h waves-db -U waves -d waves -q -v ON_ERROR_STOP=1 -c \
+                "CREATE TABLE IF NOT EXISTS schema_version (version int PRIMARY KEY);
+                 INSERT INTO schema_version VALUES (1) ON CONFLICT DO NOTHING;"
+              echo "$(date +%T)  wave 1 hook   schema version 1 applied"
+YAML
+cat > 30-app.yaml <<'YAML'
+# wave 2: the app, which refuses to start without the schema
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: waves-app
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  selector: {matchLabels: {app: waves-app}}
+  template:
+    metadata: {labels: {app: waves-app}}
+    spec:
+      initContainers:
+        - name: read-schema
+          image: image-registry.openshift-image-registry.svc:5000/openshift/postgresql:15-el9
+          env: [{name: PGPASSWORD, value: waves-sample}]
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              V=$(psql -h waves-db -U waves -d waves -tAc 'SELECT max(version) FROM schema_version') || exit 1
+              echo "$(date +%T)  wave 2 app    starting on schema version $V"
+              echo "waves sample: schema version $V" > /www/index.html
+          volumeMounts: [{name: www, mountPath: /www}]
+      containers:
+        - name: web
+          image: image-registry.openshift-image-registry.svc:5000/openshift/httpd:2.4-ubi9
+          readinessProbe: {httpGet: {path: /, port: 8080}}
+          volumeMounts: [{name: www, mountPath: /var/www/html}]
+      volumes: [{name: www, emptyDir: {}}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: waves-app
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  selector: {app: waves-app}
+  ports: [{port: 8080}]
+YAML
+cat > 40-route.yaml <<'YAML'
+# wave 3: expose the app only once it is up
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: waves-app
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  to: {kind: Service, name: waves-app}
+  tls: {termination: edge, insecureEdgeTerminationPolicy: Redirect}
+YAML
+cat > 50-postsync-hook.yaml <<'YAML'
+# PostSync hook: a smoke test once every wave is Healthy, deleted when it succeeds
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: waves-smoke
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: smoke
+          image: image-registry.openshift-image-registry.svc:5000/openshift/httpd:2.4-ubi9
+          command: ["/bin/bash", "-c", 'curl -fsS http://waves-app:8080/']
+YAML
+ls
 ----
 
 .Expected output
-[%collapsible]
-=====
 [source,texinfo]
 ----
-NAME                STATUS     COMPLETIONS   DURATION   AGE
-claims-db-migrate   Complete   1/1           12s        3m
-▶ waiting for claims-db:5432 to accept connections…
-claims-db:5432 - accepting connections
-claims-db:5432 - accepting connections
-▶ applying idempotent schema migration (schema_version marker)…
-CREATE TABLE
-INSERT 0 1
-✅ migration applied — schema_version:
- version |          applied_at
----------+-------------------------------
-       1 | 2026-07-11 05:38:33.805893+00
-(1 row)
+00-presync-hook.yaml
+10-database.yaml
+20-migrate-hook.yaml
+30-app.yaml
+40-route.yaml
+50-postsync-hook.yaml
 ----
-=====
---
+
+*Push it to your fork.*
+The last line asks for your *workshop password* (the username is already set to `{user}`); type it and press *Enter*:
+
+// The push must stay the LAST line of this block: click-to-run sends the whole block in one
+// write, and a line after an interactive prompt is swallowed as the password (see exercise 1).
+[source,sh,role=execute,subs="attributes+"]
+----
+cd ~/claims-config
+git add waves
+git -c user.name={user} -c user.email={user}@workshop.local commit -qm "Add the sync-waves sample" || echo "(nothing new to commit)"
+git config credential.username {user}
+git push -q origin main
+----
+
+.Expected output (Gitea's pull-request hint is harmless: you pushed straight to `main`)
+[source,texinfo,subs="attributes+"]
+----
+remote:
+remote: Create a new pull request for 'main':
+remote:   {gitea_url}/{user}/claims-config/pulls/new/main
+remote:
+----
+
+*Register it with your Argo CD.*
+The Argo CD CLI is still signed in from exercise 1; after a terminal reconnect, run exercise 1's two sign-in blocks again first.
+The Application has *no automated sync*, so nothing happens until you sync it:
+
+[source,sh,role=execute,subs="attributes+"]
+----
+~/argocd app create waves-{user} --project proj-{user} \
+  --repo {gitea_url}/{user}/claims-config.git --path waves --revision main \
+  --dest-server https://kubernetes.default.svc --dest-namespace {user}-dev --upsert
+----
+
+.Expected output (`unchanged` if you run it again)
+[source,texinfo,subs="attributes+"]
+----
+application 'waves-{user}' created
+----
+
+*Sync it, and watch the tree fill in.*
+In the {student_argo_url}[Student Argo CD^] tab, open the `waves-{user}` tile first: every resource is `OutOfSync` and `Missing`.
+// CONSOLE-UNVERIFIED: the waves-user21 tile is visible in the student Argo CD Applications view
+// (OutOfSync / Missing before the first sync) and its tree shows the five non-hook resources.
+Then start the sync from the terminal and keep your eyes on the Argo CD tree: `waves-presync` appears alone, then `waves-db`, then `waves-migrate`, `waves-app`, the Route, and last `waves-smoke`, which disappears again a few seconds later.
+// CONSOLE-UNVERIFIED: during the sync the tree adds the hook Jobs in that order, and waves-smoke
+// shows briefly and then drops out of the tree (HookSucceeded) — capture it mid-sync.
+
+[source,sh,role=execute,subs="attributes+"]
+----
+~/argocd app sync waves-{user} --timeout 300
+----
+
+.Expected output — every line is timestamped, and each wave starts only after the one before it is Healthy (about 30 seconds)
+[%collapsible]
+====
+[source,texinfo,subs="attributes+"]
+----
+TIMESTAMP                  GROUP                     KIND   NAMESPACE                  NAME    STATUS    HEALTH        HOOK  MESSAGE
+2026-11-15T20:44:37+00:00  batch         Job  {user}-dev         waves-presync   Running   Synced     PreSync  job.batch/waves-presync created
+2026-11-15T20:44:42+00:00  batch         Job  {user}-dev         waves-presync  Succeeded   Synced         PreSync  Reached expected number of succeeded pods
+2026-11-15T20:44:42+00:00            Service  {user}-dev              waves-db    Synced   Healthy                  service/waves-db created
+2026-11-15T20:44:42+00:00   apps  Deployment  {user}-dev              waves-db    Synced   Progressing              deployment.apps/waves-db created
+2026-11-15T20:44:45+00:00   apps  Deployment  {user}-dev              waves-db    Synced  Healthy              deployment.apps/waves-db created
+2026-11-15T20:44:47+00:00  batch         Job  {user}-dev         waves-migrate   Running   Synced        Sync  job.batch/waves-migrate created
+2026-11-15T20:44:52+00:00  batch         Job  {user}-dev         waves-migrate  Succeeded   Synced            Sync  Reached expected number of succeeded pods
+2026-11-15T20:44:52+00:00            Service  {user}-dev             waves-app    Synced   Healthy                  service/waves-app created
+2026-11-15T20:44:52+00:00   apps  Deployment  {user}-dev             waves-app    Synced   Progressing              deployment.apps/waves-app created
+2026-11-15T20:44:55+00:00   apps  Deployment  {user}-dev             waves-app    Synced  Healthy              deployment.apps/waves-app created
+2026-11-15T20:44:58+00:00  route.openshift.io       Route  {user}-dev             waves-app    Synced  Healthy              route.route.openshift.io/waves-app created
+2026-11-15T20:44:58+00:00  route.openshift.io       Route  {user}-dev             waves-app    Synced  Healthy              Route is healthy
+2026-11-15T20:44:58+00:00  batch                      Job  {user}-dev           waves-smoke   Running   Synced    PostSync  job.batch/waves-smoke created
+2026-11-15T20:45:02+00:00  batch         Job  {user}-dev           waves-smoke  Succeeded   Synced    PostSync  Reached expected number of succeeded pods
+...
+Operation:          Sync
+Phase:              Succeeded
+Duration:           28s
+Message:            successfully synced (no more tasks)
+----
+The CLI also prints the not-yet-created resources (`OutOfSync`, `Missing`) at the start, and a summary table at the end; both are trimmed here.
 ====
 
-*What just happened:* the Job *waited* for the database, applied an idempotent schema change, and exited.
-It is an *action that runs once*, so a Job, not a Deployment.
+*Prove the order* with three independent records: what each step logged, what the cluster recorded, and the smoke test that is no longer there.
+(Events are kept for about an hour, so after a re-sync the list also holds the earlier run; read the newest group.)
 
-Now read the annotations that *ordered* it:
-
-[tabs]
-====
-Console::
-+
---
-Read each object's *YAML* tab (Project `{user}-prod`):
-
-* `claims-db` (*Workloads* → *Deployments*): *no* `argocd.argoproj.io/sync-wave` annotation, so the default, wave 0.
-* `claims-db-migrate` (*Workloads* → *Jobs*): `argocd.argoproj.io/sync-wave: '1'` and `argocd.argoproj.io/hook: Sync`.
-* The `parasol-claims` Rollout (*GitOps* → *Rollouts*, the GitOps console plugin's entry, badged *Tech preview*; or *Home* → *Search* → `Rollout`): `argocd.argoproj.io/sync-wave: '2'`.
-// Grounded 2026-08-02: read the plugin's own live manifest with
-//   oc get --raw "/api/v1/namespaces/openshift-gitops/services/https:gitops-plugin:9001/proxy/plugin-manifest.json"
-// gitops-plugin v0.0.17 registers an UNCONDITIONAL console.navigation/resource-ns extension (id
-// `rollout`, name "Rollouts") under its "GitOps" nav section (insertAfter workloads, admin
-// perspective) for argoproj.io/v1alpha1 Rollout — the group/version installed here — so the nav item
-// IS present. This CORRECTS the 2026-07-29 note that used to sit here, which inferred "no Rollouts
-// nav item" from `oc get consoleplugins` listing no Rollouts-SPECIFIC plugin; true, but the entry
-// comes from the GitOps plugin, not a Rollouts one. NOT established: the exact GitOps > Rollouts
-// list/YAML rendering for a Rollout instance still needs a browser capture.
---
-CLI::
-+
---
 [source,sh,role=execute]
 ----
-oc get deploy claims-db -n $PROD \
-  -o jsonpath='claims-db          wave: {.metadata.annotations.argocd\.argoproj\.io/sync-wave}{" (unset = default 0)"}{"\n"}'
+echo "--- what each step logged, in the order it ran ---"
+oc logs job/waves-presync -n $DEV
+oc logs job/waves-migrate -n $DEV
+oc logs deploy/waves-app -c read-schema -n $DEV
+echo "--- the cluster's own record, oldest first ---"
+oc get events -n $DEV --sort-by=.lastTimestamp \
+  -o custom-columns=TIME:.lastTimestamp,KIND:.involvedObject.kind,NAME:.involvedObject.name,REASON:.reason \
+  | grep -E '^TIME|(Job|Deployment) +waves-'
+echo "--- the PostSync smoke test ---"
+oc get job waves-smoke -n $DEV
+----
+
+.Expected output
+[source,texinfo]
+----
+--- what each step logged, in the order it ran ---
+20:44:36  PreSync hook  preflight passed, nothing applied yet
+20:44:46  wave 1 hook   database answers: waves-db:5432 - accepting connections
+20:44:46  wave 1 hook   schema version 1 applied
+20:44:51  wave 2 app    starting on schema version 1
+--- the cluster's own record, oldest first ---
+TIME                   KIND         NAME                              REASON
+2026-11-15T20:44:35Z   Job          waves-presync                     SuccessfulCreate
+2026-11-15T20:44:39Z   Job          waves-presync                     Completed
+2026-11-15T20:44:40Z   Deployment   waves-db                          ScalingReplicaSet
+2026-11-15T20:44:45Z   Job          waves-migrate                     SuccessfulCreate
+2026-11-15T20:44:49Z   Job          waves-migrate                     Completed
+2026-11-15T20:44:50Z   Deployment   waves-app                         ScalingReplicaSet
+2026-11-15T20:44:58Z   Job          waves-smoke                       SuccessfulCreate
+2026-11-15T20:45:02Z   Job          waves-smoke                       Completed
+--- the PostSync smoke test ---
+Error from server (NotFound): jobs.batch "waves-smoke" not found
+----
+
+*What just happened:* one sync, run in a strict order you wrote into the manifests.
+
+[cols="2,3,4",options="header"]
+|===
+|Resource |Annotation |What your run proves
+
+|`waves-presync` Job
+|`hook: PreSync`
+|It ran and *Completed* before the database was even created: the place for a preflight check or a backup.
+
+|`waves-db` Deployment + Service
+|`sync-wave: "0"`
+|Applied first among the resources; Argo CD waited for its readiness probe to report *Healthy* before going on.
+
+|`waves-migrate` Job
+|`hook: Sync`, `sync-wave: "1"`, `hook-delete-policy: BeforeHookCreation`
+|Created only after wave 0 was Healthy, so its first log line finds the database already accepting connections. `BeforeHookCreation` keeps the Job for you to read and replaces it on the next sync.
+
+|`waves-app` Deployment + Service
+|`sync-wave: "2"`
+|Created only after the migration *Completed*; its init container read schema version 1 before the web server started.
+
+|`waves-app` Route
+|`sync-wave: "3"`
+|Exposed last, once the app behind it was Healthy, so no user meets a half-started app.
+
+|`waves-smoke` Job
+|`hook: PostSync`, `hook-delete-policy: HookSucceeded`
+|Ran after every wave was Healthy, then was deleted because it succeeded: the events show it ran, and `NotFound` shows it passed.
+|===
+
+.Predict, then check: what if the migration had not run?
+[%collapsible]
+====
+The app's init container queries `schema_version`, so without the migration it exits with an error, the pod never becomes ready, wave 2 never turns Healthy, and Argo CD never applies the Route in wave 3.
+The order is not a convention someone has to remember: a missing step stops the sync where it broke, and the Argo CD tree shows exactly where.
+====
+
+*Production uses the same order.*
+The claims Rollout your ApplicationSet generated in exercise 1 came up the same way: database at the default wave 0, the `claims-db-migrate` Sync hook at wave 1, the Rollout at wave 2.
+
+[source,sh,role=execute]
+----
 oc get job claims-db-migrate -n $PROD \
   -o jsonpath='claims-db-migrate  wave: {.metadata.annotations.argocd\.argoproj\.io/sync-wave}  hook: {.metadata.annotations.argocd\.argoproj\.io/hook}{"\n"}'
 oc get rollout parasol-claims -n $PROD \
@@ -694,57 +934,13 @@ oc get rollout parasol-claims -n $PROD \
 .Expected output
 [source,texinfo]
 ----
-claims-db          wave:  (unset = default 0)
 claims-db-migrate  wave: 1  hook: Sync
 parasol-claims     wave: 2
 ----
---
-====
-
-*What just happened:* wave `0` (database) → wave `1` (migration hook) → wave `2` (application), encoded in the repo next to the app.
-Argo applied each wave only after the previous one was healthy, so the app never met a database without its schema; the idempotent migration makes every *re-*sync safe too.
-
-Confirm production is serving, database-backed:
-
-[tabs]
-====
-Console::
-+
---
-. *Networking* → *Routes* (`{user}-prod`) → the `parasol-claims` *Location* link; append `/api/claims` for the seeded claims, `/q/health/ready` for readiness.
-. The Rollout at `4/4`: *GitOps* → *Rollouts* (badged *Tech preview*) → `parasol-claims`. Its *Status* is a phase (`Paused` mid-canary). *Home* → *Search* → `Rollout` reaches it too.
-// Grounded 2026-08-02 by the same plugin-manifest read as the sync-wave marker above: gitops-plugin
-// v0.0.17 registers the "Rollouts" nav item unconditionally, so the entry is present — this REPLACES the
-// 2026-07-29 note here, which wrongly concluded "no dedicated Rollouts nav item" from the absence of a
-// Rollouts-specific console plugin. Note the list view is all you get: the Argo CD Rollouts UI extension
-// (enableRolloutsUI) still 404s, so there is no canary-step visualization. NOT established: the exact
-// GitOps > Rollouts replica/AVAILABLE readout still needs a browser capture.
---
-CLI::
-+
---
-[source,sh,role=execute]
-----
-oc get rollout parasol-claims -n $PROD
-ROUTE=$(oc get route parasol-claims -n $PROD -o jsonpath='{.spec.host}')
-curl -s -o /dev/null -w "prod health: %{http_code}\n" "http://$ROUTE/q/health/ready"
-curl -s "http://$ROUTE/api/claims" | head -c 90; echo
-----
-
-.Expected output
-[source,texinfo]
-----
-NAME             DESIRED   CURRENT   UP-TO-DATE   AVAILABLE   AGE
-parasol-claims   4         4         4            4           4m
-prod health: 200
-[{"claimNumber":"CLM-1001","claimant":"Alice Nguyen","type":"auto","status":"UnderReview",...
-----
---
-====
 
 [.checkpoint]
 ****
-✔ *Verify:* `claims-db-migrate` is `Complete` (its log: wait for the database, then apply the schema); the waves read *db (0) → migrate (1, Sync hook) → app (2)*; prod runs `parasol-claims` as a Rollout `4/4`, its route answering `200`.
+✔ *Verify:* `waves-{user}` is *Synced* and *Healthy* in Argo CD; the logs read *PreSync → wave 1 hook → wave 2 app* in time order; the events show each Job *Completed* no later than the next wave's first event; and `oc get job waves-smoke` answers `NotFound` because the PostSync hook succeeded and deleted itself.
 ****
 
 == 3. A canary rollout with automated analysis
@@ -778,20 +974,7 @@ Ship `1.1` the GitOps way: edit Git in the *Gitea* tab, {gitea_url}/{user}/claim
 
 Argo CD syncs it within about a minute; press *Refresh* on `claims-prod-{user}` in the {student_argo_url}[student Argo CD UI^] to sync at once.
 
-Follow the canary from the terminal; the loop waits for it to start, then prints each step:
-
-.Why the terminal, and not the Argo CD Rollout view?
-[%collapsible]
-====
-The Argo CD *Rollout view* — the richer canary visualization, with the canary and stable revisions animating side by side — is not available on this cluster: its UI extension is enabled (`spec.server.enableRolloutsUI`) but its assets do not currently resolve, which reads as a packaging gap in the downstream image rather than something this workshop's config can fix.
-If a later GitOps release closes that gap, this is the beat to reopen it in.
-
-So the loop below stands in for it.
-It *first waits for the canary to actually start* (the Rollout's image flips to `1.1`), so it does not mistake the current steady state for a finished rollout; then it follows the steps to 100%, printing the same step, weight and analysis information the Rollout view would have animated.
-If the image never flips, it says so plainly instead of reporting a rollout that never happened.
-
-The console's *Workloads* → *Pods* view (Project `{user}-prod`) shows the same progression a different way: the pod count shifts from 4 stable to a mix of stable and canary pods as the steps advance.
-====
+Follow the canary, in the console's Rollouts view or from the terminal; both read the same Rollout object:
 
 // Row 4a CAPTURED + EMBEDDED 2026-08-01 (as user4, anonymously through the Showroom ttyd terminal —
 // it answers 200 with no auth and the shell it hands you is already the attendee). The image sits
@@ -799,6 +982,32 @@ The console's *Workloads* → *Pods* view (Project `{user}-prod`) shows the same
 // command. Driver + the assertion traps it hit: tools/media/capture_m11_canary.py.
 // Row 4b (the console Workloads > Pods view at the same instant) is still NOT CAPTURED — it needs a
 // console OAuth session, which this pass had no way to establish. See media-manifest.md.
+
+[tabs]
+====
+Console::
++
+--
+. In the {ocp_console_url}[OpenShift web console^], set the *Project* to `{user}-prod`, open *GitOps* → *Rollouts*, and click `parasol-claims`: the *Rollout details* page.
+// CONSOLE-UNVERIFIED: the GitOps nav section (after Workloads) lists "Rollouts"; the list shows
+// parasol-claims in user21-prod (note the columns and any Tech preview badge); clicking the name
+// opens the Rollout details page. Capture the list before the canary starts.
+. Read the *Rollout details*: *Strategy* `Canary`, the *Stable Service* `parasol-claims-stable` and *Canary Service* `parasol-claims-canary`, and under *Analysis Templates* `claims-canary-analysis`, the check the canary has to pass.
+// CONSOLE-UNVERIFIED: field labels and values exactly as named here (locale bundle carries
+// "Strategy", "Stable Service", "Canary Service", "Analysis Templates"); where Status/phase shows.
+. Keep the page open while the canary runs. Under *Revisions*, the *Stable* revision (`1.0`) and the *Canary* revision (`1.1`) sit side by side, each with its pods and its *Traffic* share: the canary takes 25%, holds through the 20-second pause, widens to 50% while the analysis runs, then becomes the *Stable* revision at 100%.
+// CONSOLE-UNVERIFIED: the Revisions section labels Stable/Canary, shows the image tag, pod list and
+// a Traffic %; capture at step 1/5 (Paused, 25%, ~20 s window), at step 3/5 (50%, analysis running,
+// ~45 s window), and after promotion (one Stable revision on 1.1).
+. During the pause, *Promote* skips the rest of the pause and *Full Promote* skips every remaining step, the analysis included; leave both alone here, because the analysis is the point of this exercise.
+// CONSOLE-UNVERIFIED: Promote and Full Promote appear on the details page (buttons or Actions
+// menu?) while the Rollout is Paused. Do NOT click them during the lab-path capture.
+. The page has no AnalysisRun view; the verdict is the CLI tab's `analysis:` column, or `oc get analysisrun -n {user}-prod`.
+--
+CLI::
++
+--
+The loop first waits for the canary to start (the Rollout's image flips to `1.1`), so it does not mistake the steady state for a finished rollout; then it prints each step:
 
 [source,sh,role=execute]
 ----
@@ -829,7 +1038,7 @@ fi
 
 .Expected output — the canary earns its way to 100%
 [%collapsible]
-====
+=====
 [source,texinfo]
 ----
 waiting for the canary to start (Argo syncing your commit)…
@@ -841,6 +1050,8 @@ waiting for the canary to start (Argo syncing your commit)…
   08:43:19  step 5/5   Healthy       canary-pods:4/4   analysis:Successful
   ✔ promoted to 100%
 ----
+=====
+--
 ====
 
 image::gitops-at-scale/gitops-at-scale-04-canary-progressing.png["The Showroom terminal running the canary watch loop to completion. Under the echoed loop source, a timestamped line every seven seconds tells the whole story: step 0/5 Progressing with canary-pods:1/4 and analysis:none, then step 1/5 Paused still at 1/4, then step 2/5 widening to canary-pods:2/4, then step 3/5 holding at 2/4 while analysis:Running for about forty seconds, then step 4/5 with canary-pods:4/4 and analysis:Successful, and finally step 5/5 Healthy followed by the tick and \"promoted to 100%\". Notice that the jump to all four pods happens only after the analysis returns Successful — the new version is admitted in slices, and the last slice is granted by a health check rather than by a timer."]
@@ -961,12 +1172,29 @@ Set to `fail`, it makes the next canary's analysis report a failure *exactly as 
 
 This time, watch the canary *abort*:
 
-// If a later GitOps release fixes the Rollouts UI extension (see exercise 3), this is the beat to watch the abort in.
 // Row 5 CAPTURED + EMBEDDED 2026-08-01 (as user4, anonymously through the Showroom ttyd terminal).
 // The image sits further down, after the "prod health through the abort" block, because the single
 // frame carries all three pieces this beat needs — the Degraded/Failed line, the RolloutAborted
 // status message, and the route still answering 200. Driver: tools/media/capture_m11_canary.py.
 
+[tabs]
+====
+Console::
++
+--
+. Back on *GitOps* → *Rollouts* → `parasol-claims` (Project `{user}-prod`), a new *Canary* revision on `1.0` appears beside the *Stable* `1.1` revision and takes its 25%, then 50%.
+// CONSOLE-UNVERIFIED: after the 1.1 -> 1.0 commit syncs, Revisions shows a new Canary revision
+// (image 1.0) next to the Stable one (1.1), with traffic 25% then 50%.
+. When the analysis fails, the Rollout's status turns *Degraded* with the `RolloutAborted` message, the canary revision drops to zero pods, and the *Stable* revision keeps every pod: production never left `1.1`.
+// CONSOLE-UNVERIFIED: status/phase reads Degraded and the RolloutAborted message is visible
+// somewhere on the details page; Canary revision 0 pods, Stable keeps 4. Capture this frame.
+. *Abort* on this page is the same decision taken by hand, for a canary you want out before its analysis runs. *Retry* restarts the aborted canary; do not press it now, because with the verdict still `fail` it would fail the same way.
+// CONSOLE-UNVERIFIED: Abort is offered while a canary is progressing, Retry on the aborted Rollout
+// (buttons or Actions menu?). Do NOT click either on the lab path.
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
 for i in $(seq 1 22); do
@@ -986,6 +1214,8 @@ done
   06:43:38  rollout: Degraded      analysis: Failed
   ✖ canary aborted — analysis failed
 ----
+--
+====
 
 Read it like an incident review; the failed `AnalysisRun` is the evidence:
 
@@ -1057,6 +1287,9 @@ If your exercise-3 canary never actually ran, this revert *starts* one instead �
 ====
 
 Watch the recovery. Success is a *pair*: a `Failed` `AnalysisRun` exists, *and* the Rollout is `Healthy`.
+In the console's Rollout details page, the same moment reads as the status returning to *Healthy* with a single *Stable* revision on `1.1`.
+// CONSOLE-UNVERIFIED: after the revert + Refresh, the details page shows Healthy and one Stable
+// revision (1.1), the aborted 1.0 revision gone or at 0 pods.
 
 .Why a pair, and not `Healthy` alone?
 [%collapsible]
@@ -1163,14 +1396,28 @@ First, `oc set image` cannot touch a Rollout at all (`no kind "Rollout" is regis
 Second, the paused Rollout is *not* held by `spec.paused`; that field is never set.
 It is held by a *pause condition the controller wrote into `status`* — `phase: Paused`, `message: BlueGreenPause`, `pauseConditions: [{"reason":"BlueGreenPause", …}]` — with `status.blueGreen.activeSelector` still on the blue pod-hash while `previewSelector` has already moved to the green one.
 
-Promoting means clearing that condition — normally a *Promote* button in a Rollouts UI, or the Argo Rollouts CLI plugin's `promote` command.
-That plugin is not installed in this terminal (`oc plugin list` finds none), so signal the promotion on the object yourself — on the *status subresource*:
+Promoting means clearing that condition: the *Promote* action on the console's Rollout details page, or a patch on the object's *status subresource* (the Argo Rollouts CLI plugin's `promote` command is not installed in this terminal; `oc plugin list` finds none).
 
+[tabs]
+======
+Console::
++
+--
+On *GitOps* → *Rollouts* → `<name>` (Project `{user}-prod`), the *Revisions* section labels the old pods *Active* and the new ones *Preview*, and the *Active Service* / *Preview Service* fields name the two Services. Click *Promote*: the *Preview* revision becomes *Active*.
+// CONSOLE-UNVERIFIED: on a paused blueGreen Rollout (autoPromotionEnabled: false) the details page
+// shows Active/Preview revisions + Active/Preview Service, and Promote performs the cutover (verify
+// with `oc get rollout <name> -n user21-prod -o jsonpath='{.status.blueGreen}'` after the click).
+--
+CLI::
++
+--
 [source,sh,subs="attributes+"]
 ----
 oc patch rollout <name> -n {user}-prod --subresource status \
   --type merge -p '{"status":{"pauseConditions":null}}'
 ----
+--
+======
 
 *Active* cuts over to the green pod-hash within a second, `status.stableRS` becomes the green ReplicaSet, and blue scales to zero about 30 seconds later — the blue-green scale-down delay, which is why the old version is still there to fall back to for a moment.
 Leave `--subresource status` off and the API server silently drops the status half of your patch: `oc` prints `patched (no change)` and the Rollout stays paused — the same false success `oc patch … -p '{"spec":{"paused":false}}'` hands you.
