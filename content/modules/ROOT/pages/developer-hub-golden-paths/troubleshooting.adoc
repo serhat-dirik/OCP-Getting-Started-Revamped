@@ -2,151 +2,88 @@
 :module-id: developer-hub-golden-paths
 include::partial$version-attributes.adoc[]
 
-// Real entries from performing the module on Red Hat Developer Hub 1.10.2 / OCP 4.21.22
-// as user6 on 2026-07-11. Format: Symptom / Cause / Fix. Several are failures actually hit while
-// building the module on the cluster (the duplicate-name 409, the README's oc new-build command
-// failing on Dockerfile-vs-Containerfile, the internal gitea.ogsr-gitea.svc links, TechDocs not built).
+// Entries from building and performing the golden-template module on cluster-gn67x as user25,
+// 2026-11-16 (RHDH 1.10.7, OpenShift Pipelines 1.24.3, OpenShift GitOps 1.22.3). Format:
+// Symptom / Cause / Fix. Most were hit while building it: the early tag, the duplicate release run
+// after a re-pushed tag, the Git password prompt above the terminal, the empty Developer Hub tabs.
 
-Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
-Terminal commands assume you set `DEV={user}-dev`, `ORG={user}-svcs`, and `SVC=parasol-policy-{user}` at the start of the lab.
+Every entry below was hit while building the module on the cluster or is a known failure mode to watch for.
+Terminal commands assume you ran the lab's first block, which sets `U`, `SVC`, `ORG` and `CICD`.
 
 == `flag needs an argument: 'n' in -n` after the terminal reconnected
 
-Symptom:: A command that worked a minute ago fails with `Error: flag needs an argument: 'n' in -n`, or `oc` reports a namespace named after the next flag (`"-o"`).
-Cause:: A reconnected terminal is a fresh shell, so `$DEV` is empty and `-n $DEV` collapses to `-n`.
-Fix:: Run the first block of the exercise you are in again — it sets the shortcuts that exercise uses — then repeat the command.
+Symptom:: A command that worked a minute ago fails with `Error: flag needs an argument: 'n' in -n`.
+Cause:: A reconnected terminal is a fresh shell, so `$CICD` is empty.
+Fix:: Run the lab's first block again, then repeat the command.
 
-== The "Open the new repository" (or catalog "source") link does not open in my browser
+== The template failed at "Publish the GitOps repository" with "repository already exists"
 
-Symptom:: After scaffolding, the *Open the new repository* link — or a catalog entity's *source*/*view* link — leads nowhere, or your browser cannot resolve the host.
-Cause:: Those links point at Gitea's *in-cluster service address*, `http://gitea.ogsr-gitea.svc:3000/...`, which is how Red Hat Developer Hub reads and writes Git internally.
-That address is only routable *inside* the cluster; your browser cannot reach it.
-Fix:: Open the repository through the Gitea *route* instead: `{gitea_url}/{user}-svcs/parasol-policy-{user}`.
-The *Open in the software catalog* link (which stays inside the portal) works normally.
-This is a known rough edge of the workshop portal's internal wiring, not a broken scaffold.
+Symptom:: The task stops at *Publish the GitOps repository* (or *Publish the service repository*); its log shows `repository already exists [owner: {user}-svcs, repo: …]`.
+Cause:: A Git server will not hold two repositories with the same name, and `{user}-svcs` already holds one from an earlier run.
+Fix:: Run `ws prep developer-hub-golden-paths --yes`: it empties `{user}-svcs`, removes the catalog entry and purges the four namespaces. Then run the template again.
 
-== The scaffolder task failed at "Publish to Gitea" with a 409
+== The push did not start a pipeline run
 
-Symptom:: The *New Parasol microservice* task ran, but the *Publish to Gitea* step failed; its log shows `repository already exists [owner: {user}-svcs, repo: <the name you chose>]`.
-Cause:: A Git server will not hold two repositories with the same name, and you tried to scaffold a service whose name already exists in your `{user}-svcs` org (most often: you ran the template twice with the same name).
-The *fetch* step succeeded, but *publish* refused to overwrite your existing repo — nothing was created on this second run.
-Fix:: Choose a *unique* service name (`parasol-quote-{user}`, `parasol-billing-{user}`, …) and run the template again.
-If you truly meant to replace the existing service, delete its repo first (in the Gitea UI, or via the API), then re-run.
-A `ws prep developer-hub-golden-paths --user {user}` empties your `{user}-svcs` org and deregisters its catalog entry, so a fresh start always has an empty slate.
-
-== The scaffolder failed at "Publish" but *not* with a 409
-
-Symptom:: The publish step fails with an authorization error, a "not found" on the org, or a connection error — not a `409`.
-Cause:: Either your scaffold org `{user}-svcs` does not exist (the entry-state hook that creates it did not run), or the portal's Gitea integration credentials are not working.
-Fix:: Confirm the org exists, then re-materialize the entry state if it does not:
-+
-[source,sh,role=execute,subs="attributes+"]
-----
-curl -sk "{gitea_url}/api/v1/orgs/{user}-svcs" -o /dev/null -w "org {user}-svcs: HTTP %\{http_code}\n"
-----
-+
-A `200` means the org is there (re-check the name you typed in the form — it must be exactly `{user}-svcs`).
-A `404` means the org is missing — run `ws prep developer-hub-golden-paths --user {user}`, which recreates it.
-If the org exists and you still cannot publish, tell your instructor: the portal's Gitea integration credentials may need attention (an instructor/admin task).
-
-== A service with the name I chose is already in the catalog
-
-Symptom:: You changed the *Name* away from the lab's `parasol-policy-{user}`, and the scaffolder's *Register* step failed with a conflict (or your Component never appears) because an entity with that name already exists in the catalog.
-Cause:: The Developer Hub portal and its software catalog are *shared* by the whole class, and every Component must have a unique name.
-A bare name like `parasol-policy` collides with a classmate who scaffolded the same one — the catalog is shared by the whole room and keyed by name, so the *name* is what distinguishes your service from theirs.
-Fix:: Use a name that carries *your* username; the lab's `parasol-policy-{user}` is unique to you.
-Re-run the template with a `-{user}` name.
-This is exactly why the lab tags the scaffolded service with your username — on a shared catalog, the name *is* the entity's identity.
-
-== The scaffolded README's build command fails with "Dockerfile: no such file or directory"
-
-Symptom:: You copied the build command from the scaffolded `README.md` — `oc new-build --strategy=docker --binary --name=parasol-policy-{user}` — started a build, and it failed almost immediately with `error: open /tmp/build/inputs/Dockerfile: no such file or directory`.
-Cause:: `oc new-build --strategy=docker` defaults to looking for a file named `Dockerfile`, but the scaffolded repo's container recipe is named `Containerfile`.
-Fix:: Use the lab's build steps instead of the README's command — apply the repo's own `BuildConfig`, which is configured for `Containerfile`:
+Symptom:: `git push` succeeded, but `tkn pipelinerun list -n $CICD` shows nothing new after 30 seconds.
+Cause:: Pipelines-as-Code runs only for a repository it knows: the `Repository` that the `ci` application creates, and the organization webhook that `ws prep` creates. Either is missing.
+Fix:: Check both:
 +
 [source,sh,role=execute]
 ----
-oc apply -f openshift/buildconfig.yaml -n $DEV
-oc start-build $SVC --from-dir=. -n $DEV
+oc get repository -n $CICD
+oc get secret golden-pac-secret -n $CICD -o name
 ----
 +
-(The scaffolded `openshift/buildconfig.yaml` sets `dockerfilePath: Containerfile` correctly; only the README's convenience command has the mismatch.)
+No `Repository`: the `ci` application has not synced yet (wait a minute after creating the project) or the GitOps repository is not named `<service>-gitops`. No Secret: run `ws prep developer-hub-golden-paths` again, which re-creates the Secret and the webhooks.
 
-== My first build is numbered `-2`, not `-1` — did build 1 fail?
+== The release run failed at `resolve-image`: "No image was built from commit …"
 
-Symptom:: After `oc apply -f openshift/buildconfig.yaml` and `oc start-build`, the build is `parasol-policy-{user}-2`, and `oc get builds` shows no `-1`.
-Cause:: Applying the `BuildConfig` registers a trigger that claims build number 1 without producing a build object, so your first *manual* build is numbered 2.
-Fix:: Nothing to fix — it is cosmetic.
-The lab's exercise-4 poll finds the build *by label* (`-l buildconfig=$SVC`), so the number does not matter.
-Do not go looking for a "missing" or "failed" build 1.
+Symptom:: A tag started `parasol-quote-{user}-release`, which failed in seconds; `resolve-image` says no image was built from the commit.
+Cause:: The release promotes the image the build pipeline made from the tagged commit. You tagged it before its build run finished, or its build failed a gate.
+Fix:: Wait until that commit's `parasol-quote-{user}-build` run reads `Succeeded` (`tkn pipelinerun list -n $CICD`), then tag the same commit with the next version and push the tag.
 
-== The build has been running for several minutes — is it stuck?
+== Two release runs started for one tag
 
-Symptom:: `oc get build ...` shows the build `Running` for many minutes and nothing seems to happen.
-Cause:: Almost always normal.
-The first build on a node pulls the UBI9 Java 21 *builder image* and then runs a *full Maven build* (downloading every dependency), which takes about *8–9 minutes*.
-Fix:: Give it time — the lab starts the build in exercise 3 precisely so it runs while you read.
-Watch real progress in the build log:
-+
-[source,sh,role=execute]
-----
-B=$(oc get build -n $DEV -l buildconfig=$SVC --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')
-oc logs build/$B -n $DEV | tail -15
-----
-+
-You should see Maven downloading dependencies, then compiling, then the Quarkus build.
-If the log is truly idle for a long time or the pod is `Pending`, check your namespace's events for image-pull or quota problems: `oc get events -n $DEV --sort-by=.lastTimestamp | tail -10`.
+Symptom:: After deleting a tag and pushing it again, `tkn pipelinerun list` shows two `parasol-quote-{user}-release` runs at the same moment.
+Cause:: Gitea delivers the tag deletion as a push too, and Pipelines-as-Code starts the release for it with the same commit.
+Fix:: Nothing to fix: both runs promote the same digest, and the second finds stage and prod already running it. To avoid it, release under a new version instead of re-pushing a tag.
 
-== `/api/info` returns 503 (or prints nothing) right after I create the route
+== `git push` from Dev Spaces seems to hang, or says "Authentication failed"
 
-Symptom:: A `curl .../api/info` run by hand returns `503`, though the deployment rolled out; the lab's block, which retries for up to a minute, prints nothing.
-Cause:: Immediately after you create the Route, it needs a moment to program, and the pod a moment to finish starting.
-Fix:: Wait a few seconds and retry — it becomes `200` once the pod is ready:
-+
-[source,sh,role=execute]
-----
-ROUTE=$(oc get route $SVC -n $DEV -o jsonpath='{.spec.host}')
-curl -s -o /dev/null -w "%{http_code}\n" "http://$ROUTE/api/info"
-----
-+
-If it stays `503`, check the pod: `oc get pods -n $DEV -l deployment=$SVC` — it should be `Running` and `Ready`.
+Symptom:: The terminal shows nothing after `git push`, or the push fails with `Authentication failed`.
+Cause:: Dev Spaces asks for your Git credentials in an input box at the *top of the editor*, not in the terminal. A wrong password ends in `Authentication failed`.
+Fix:: Look up and enter `{user}` and the workshop password. After `git config --global credential.helper store` you are asked once.
 
-== The TechDocs tab on a catalog entity shows "not found"
+== The release is waiting for stage
 
-Symptom:: You open a Component's *TechDocs* tab and it reports that documentation could not be found.
-Cause:: The Parasol Components carry a `backstage.io/techdocs-ref` annotation (the *intent* to have docs-as-code), but no documentation is *built* in this workshop portal, so there is nothing to render.
-Fix:: Nothing to fix for the lab — TechDocs is not part of this module's hands-on.
-Rendering docs needs a TechDocs *build* (an in-portal builder or an external one) that this workshop does not run; it is a "go deeper" capability, noted in the wrap-up.
+Symptom:: The `promote` task prints `waiting for Argo CD to roll v… out in {user}-stage...` for minutes, then fails with `stage never picked up …`.
+Cause:: Argo CD has not synced `parasol-quote-{user}-stage`. It normally syncs within seconds of the commit, through the organization webhook; without the webhook it polls every three minutes.
+Fix:: Open the application in {student_argo_url}[Argo CD^] and click *Refresh*, then push the tag again under the next version. If it stays *OutOfSync*, its sync message names the problem.
 
-== I scaffolded a service but it does not appear in the Catalog
+== The CI, CD or Topology tab in Developer Hub is empty
 
-Symptom:: The task finished, the repo exists in Gitea, but `parasol-policy-{user}` is not visible in the *Catalog* list yet.
-Cause:: Usually a brief processing delay, or the *Catalog* list is filtered to a different Kind/owner.
-Fix:: Confirm the registration from the terminal (it is authoritative), then refresh the Catalog page:
-+
-[source,sh,role=execute,subs="attributes+"]
-----
-TOKEN=$(curl -sk {rhdh_url}/api/auth/guest/refresh | python3 -c 'import sys,json;print(json.load(sys.stdin)["backstageIdentity"]["token"])')
-curl -sk -H "Authorization: Bearer $TOKEN" "{rhdh_url}/api/catalog/entities/by-name/component/default/parasol-policy-{user}" \
-  | python3 -c 'import sys,json;print("registered:", json.load(sys.stdin).get("metadata",{}).get("name","not yet"))'
-----
-+
-If it prints `registered: parasol-policy-{user}`, the entity exists — set the Catalog *Kind* filter to *Component* and clear any owner filter, and it will be listed (the catalog processor may take a few seconds after the `catalog:register` step).
-
-== The portal shows a blank page or "Enter" does nothing
-
-Symptom:: The Developer Hub portal will not load, *Sign In* does not sign you in, or the tab shows a Keycloak sign-in form.
-Cause:: The shared `backstage-developer-hub` pod may be restarting, or your single sign-on session ended after a period of inactivity.
-Fix:: Reload the page and click *Sign In* again. If the Keycloak form appears, enter your workshop username (`{user}`) and password — the portal then opens as you.
-If the portal itself does not respond, confirm it is up (an instructor/admin check):
+Symptom:: The component page has the tabs, but they show no runs, no applications or no workloads, while `tkn pipelinerun list` and `oc get deploy -n $U-dev` show them.
+Cause:: Those tabs are read by the portal's Kubernetes and Argo CD plugins, which need the platform's portal configuration: a read-only ServiceAccount, the cluster CA, and the attendees' Argo CD account. A portal restart also leaves them empty for a minute.
+Fix:: Reload after a minute. If a tab stays empty, tell your instructor; the admin check is:
 +
 [source,sh,role=execute]
 ----
 oc get pods -n rhdh
+oc get secret rhdh-plugin-config -n rhdh -o name
 ----
-+
-Expect a `Running` `backstage-developer-hub-...` pod; if it is restarting, wait for it to settle, then reload.
+
+== The links to the repository inside Developer Hub do not open
+
+Symptom:: A repository link from the template's run page or the catalog leads nowhere.
+Cause:: Developer Hub addresses Gitea by its in-cluster service, `gitea.ogsr-gitea.svc:3000`, which a browser cannot reach.
+Fix:: Open the repository through the Gitea route: {gitea_url}/{user}-svcs/parasol-quote-{user}.
+
+== The portal shows a blank page or "Sign In" does nothing
+
+Symptom:: The Developer Hub portal will not load, or the tab shows a Keycloak sign-in form.
+Cause:: The shared `backstage-developer-hub` pod is restarting, or your single sign-on session ended.
+Fix:: Reload the page and click *Sign In*. If the Keycloak form appears, enter `{user}` and the workshop password.
 
 '''
 
-_Last verified on Red Hat Developer Hub 1.9.7 / OpenShift 4.22.6 — 2026-08-02._
+_Last verified on Red Hat Developer Hub 1.10.7 / OpenShift 4.22 — 2026-11-16._

@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Verify developer-hub-golden-paths — Developer Hub & Golden Paths.
 #   Entry: {user}-dev + entry marker · the SHARED RHDH portal is reachable · the Parasol software
-#          catalog is populated (parasol-claims Component present) · the golden-path Software Template
-#          is registered · and a CLEAN scaffold slate — the {user}-svcs scaffold org holds NO
-#          golden-path-scaffolded repos AND no orphan catalog Location points at it yet (running the
-#          template is the lab; the entry hook empties the org AND deregisters its catalog entry).
-#   End:   the SHARED portal + catalog + template are still there AND the {user} Gitea namespace holds
-#          >= 1 golden-path-scaffolded repo (the attendee ran the template; ws solve materializes
-#          {user}/parasol-golden). End checks are outcome-based and pass for BOTH the attendee's own
-#          result AND ws solve's demo repo (>=, not ==, per verify rule 14 — the attendee may scaffold
-#          more than one service).
+#          catalog is populated (parasol-claims Component present) · the parasol-golden-path Software
+#          Template is registered · the platform's CI wiring is in place (golden-pac-secret in
+#          {user}-cicd) · and a CLEAN scaffold slate — the {user}-svcs scaffold org holds NO repos AND
+#          no orphan catalog Location points at it yet (running the template is the lab; the entry hook
+#          empties the org AND deregisters its catalog entry).
+#   End:   the SHARED portal + catalog + template are still there, the {user}-svcs org holds >= 1 repo,
+#          a golden-path build pipeline run Succeeded in {user}-cicd, and a release reached production:
+#          a golden-path Rollout in {user}-prod is available, pinned by digest, and stage runs that same
+#          digest. Outcome-based (>=, not ==, per verify rule 14 — the attendee may create more than one
+#          service or release more than once).
 # Shared-platform checks (portal/catalog/template) are identical for every user — they assert the
 # pp-portal stack is serving. Runnable with only oc + curl (Showroom terminal reality); RHDH/Gitea
 # hosts are derived from the ingress domain (no cross-namespace route reads — verify rule 10).
@@ -92,10 +93,48 @@ catalog_has_parasol() {
 # The golden-path Software Template is registered (catalog holds the Template entity).
 template_registered() {
   rhdh_guest_token || return 1
-  http_read "https://${RHDH_HOST}/api/catalog/entities/by-name/template/default/parasol-service-template" \
+  http_read "https://${RHDH_HOST}/api/catalog/entities/by-name/template/default/parasol-golden-path" \
     -H "Authorization: Bearer ${RHDH_TOKEN}" || return 1
   [[ "$HTTP_CODE" == "200" ]] || return 1
-  printf '%s' "$HTTP_OUT" | grep -q '"name":"parasol-service-template"'
+  printf '%s' "$HTTP_OUT" | grep -q '"name":"parasol-golden-path"'
+}
+
+# ── end-state predicates: the golden path ran end to end ─────────────────────────────────────────
+# All three read through oc_read, so "the API could not be asked" stays ⚠ and never becomes ❌ on the
+# attendee's work. Names are matched by shape, not by the lab's suggested name: the template's
+# pipelines are always <service>-build, and every object it deploys carries backstage.io/kubernetes-id.
+CICD="${USER_NAME}-cicd"
+STAGE="${USER_NAME}-stage"
+PROD="${USER_NAME}-prod"
+
+# A run of a golden-path build pipeline (<service>-build) Succeeded in {user}-cicd.
+golden_build_succeeded() {
+  oc_read get pipelineruns.tekton.dev -n "$CICD" \
+    -o jsonpath='{range .items[*]}{.metadata.labels.tekton\.dev/pipeline}{" "}{.status.conditions[0].reason}{"\n"}{end}' || return 1
+  printf '%s\n' "$OC_OUT" | grep -q -E -- '-build Succeeded$'
+}
+
+# A golden-path Rollout in {user}-prod has available replicas and runs an image pinned by digest; the
+# digest is left in PROD_DIGESTS for the stage comparison.
+PROD_DIGESTS=""
+prod_release_running() {
+  PROD_DIGESTS=""
+  oc_read get rollouts.argoproj.io -n "$PROD" -l backstage.io/kubernetes-id \
+    -o jsonpath='{range .items[*]}{.status.availableReplicas}{" "}{.spec.template.spec.containers[0].image}{"\n"}{end}' || return 1
+  PROD_DIGESTS="$(printf '%s\n' "$OC_OUT" | awk '$1 >= 1 && $2 ~ /@sha256:/ {sub(/.*@/, "", $2); print $2}')"
+  [[ -n "$PROD_DIGESTS" ]]
+}
+
+# Stage runs the digest prod runs: promotion moved the SAME image, it did not rebuild.
+stage_matches_prod() {
+  prod_release_running || return 1
+  oc_read get deployments -n "$STAGE" -l backstage.io/kubernetes-id \
+    -o jsonpath='{range .items[*]}{.spec.template.spec.containers[0].image}{"\n"}{end}' || return 1
+  local d
+  for d in $PROD_DIGESTS; do
+    printf '%s\n' "$OC_OUT" | grep -q -F "@${d}" && return 0
+  done
+  return 1
 }
 
 # The attendee's dedicated scaffold org exists (the golden-path publish target).
@@ -205,8 +244,9 @@ check "namespace ${DEV} exists"                          oc get ns "$DEV"       
 check "entry marker ws-entry-developer-hub-golden-paths in ${DEV}"              oc get cm ws-entry-developer-hub-golden-paths -n "$DEV"          || hint "entry app not synced — ws prep developer-hub-golden-paths (or ws start developer-hub-golden-paths --user ${USER_NAME})"
 check "shared RHDH portal is reachable"                  rhdh_up                                   || hint "portal stack down — sync pp-portal (platform-portfolio/stacks/portal)"
 check "Parasol catalog populated (parasol-claims)"       catalog_has_parasol                       || hint "catalog not wired — check app-config-rhdh catalog.locations + Gitea seeding; tell your instructor"
-check "golden-path template registered"                  template_registered                       || hint "template not registered — check the parasol-service-template location in app-config-rhdh"
+check "golden-path template registered"                  template_registered                       || hint "template not registered — check the parasol-golden-path location in app-config-rhdh and the parasol/parasol-golden-path seed repo"
 check "scaffold org ${SCAFFOLD_ORG} exists"              scaffold_org_exists                       || hint "org hook didn't run — ws reset developer-hub-golden-paths --user ${USER_NAME} (or check gitea-scaffold-org-developer-hub-golden-paths-${USER_NAME} Job in ns gitea)"
+check "CI wiring: golden-pac-secret in ${USER_NAME}-cicd"  oc_present get secret golden-pac-secret -n "${USER_NAME}-cicd" -o name || hint "the org hook did not finish its CI wiring — ws prep developer-hub-golden-paths again (the gitea-scaffold-org-developer-hub-golden-paths-${USER_NAME} Job in ogsr-gitea creates it)"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # Entry-only: prove the scaffold slate is clean (running the template is the lab). "Clean" =
@@ -221,7 +261,10 @@ else
   # Gitea's own answer, this ❌ now covers "answered, and the org holds nothing" AND "answered with
   # something that is not a repo list", and asserting the first when it was the second is the same
   # false-confidence bug one layer up (cf. check()'s "could not check:" prefix rationale in _lib.sh).
-  check "${USER_NAME} scaffolded >=1 golden-path service" scaffold_repo_present                    || hint "not done yet — running the 'New Parasol microservice' template in RHDH IS the lab, so an empty ${SCAFFOLD_ORG} is the expected state before you start, not a broken portal. If instead Gitea answered /api/v1/orgs/${SCAFFOLD_ORG}/repos with a non-200 or with something that is not a repo list, that IS broken — tell your instructor"
+  check "${USER_NAME} created >=1 project in ${SCAFFOLD_ORG}" scaffold_repo_present                  || hint "not done yet — creating the project from the 'Parasol service, build to production' template IS the lab, so an empty ${SCAFFOLD_ORG} is the expected state before you start. If Gitea answered /api/v1/orgs/${SCAFFOLD_ORG}/repos with a non-200 or something that is not a repo list, that IS broken — tell your instructor"
+  check "a golden-path build pipeline run Succeeded in ${CICD}" golden_build_succeeded              || hint "not done yet — push a change to your service's main branch (exercise 3) and let its <service>-build run finish: tkn pipelinerun list -n ${CICD}"
+  check "prod runs a released image, pinned by digest"     prod_release_running                     || hint "not done yet — tag a release (exercise 4); the release pipeline promotes it to stage, then prod: tkn pipelinerun list -n ${CICD}"
+  check "stage runs the same digest as prod"               stage_matches_prod                       || hint "stage and prod differ — a release promotes ONE digest to both; check the latest <service>-release run: tkn pipelinerun list -n ${CICD}"
 fi
 
 verify_summary

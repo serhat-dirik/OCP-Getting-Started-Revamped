@@ -2,54 +2,56 @@
 :module-id: developer-hub-golden-paths
 include::partial$version-attributes.adoc[]
 
-// Internal delivery runbook. Timings MEASURED on the build cluster (Red Hat Developer Hub 1.10.2,
-// OCP 4.21.22) as user6 on 2026-07-11 by performing every exercise: the guest catalog tour, the
-// scaffolder task (fetch/publish:gitea/register ~10-15s), the 409 on a duplicate name, and the
-// in-cluster UBI9 build of the scaffolded service (~8.5 min COLD — the long pole). Read
-// "Watchouts → the build is the long pole" and "Watchouts → internal RHDH links" before running this
-// for a room; both will generate questions.
+// Internal delivery runbook. Timings MEASURED on cluster-gn67x (OCP 4.22, RHDH 1.10.7, OpenShift
+// Pipelines 1.24.3, OpenShift GitOps 1.22.3) as user25 on 2026-11-16 by performing every exercise in
+// user25's own cockpit terminal and Dev Spaces workspace. The template ran through the scaffolder API
+// (the UI steps are marked UI-UNVERIFIED in the lab source).
 
-The module's signature beat is exercise 2: a short form scaffolds a complete, catalog-registered Parasol service into the attendee's own Git org in *seconds* — "modules 2 through 10 in one button."
-The one thing that needs managing is *time*: the scaffold is instant, but *building* the scaffolded image in-cluster (exercise 4) takes about *8–9 minutes* the first time on a node, so the lab deliberately *starts the build in exercise 3* and fills the wait with the paved-road inspection.
-Two other seams to know up front: the portal signs attendees in through the cluster's Keycloak as themselves (`user:default/<userN>`) but has *no permission policy*, so isolation is per-Gitea-org, not per-portal-permission; and several *links inside Red Hat Developer Hub (RHDH) point at Gitea's internal service address* and are not browser-clickable.
+The module's signature beat: one form in Developer Hub creates a service that already carries *every practice of the workshop* (Pipelines-as-Code, test and image-scan gates, SBOM, keyless signing, Conforma, GitOps promotion by digest, a canary with analysis), and the attendee watches a push and two tags take it to production.
+The closing message is the module: every practice can live in a template, and keeping that template right is platform engineering's job.
+
+What makes it work is split in two, and attendees will ask which is which:
+
+* *The template* (`parasol/parasol-golden-path` in Gitea, *Parasol service, build to production* in Self-service) writes two repositories per service: the code with its `.tekton/` triggers, and `-gitops` with `ci/` (the PaC `Repository` and both pipelines) and the dev/stage/prod overlays.
+* *The platform wiring*, laid by `ws prep` per attendee: `golden-pac-secret` (a Gitea token and webhook secret) in `{user}-cicd`, two org webhooks on `{user}-svcs` (to Pipelines-as-Code and to the attendees' Argo CD), and the ApplicationSet `golden-path-{user}` in the attendees' Argo CD, whose SCM-provider generator turns every `*-gitops` repo in the org into four Applications: `ci`, `dev`, `stage`, `prod`.
 
 include::partial$prep-before-you-teach.adoc[]
 
 == Timing
 
-Total hands-on: *~30 min* of attendee activity, but the wall clock is dominated by the *~8–9 min in-cluster build* that overlaps exercises 3–4 (add ~15 min of concept up front).
-
-`ws prep developer-hub-golden-paths` waits up to *5 minutes* for the entry state to converge (`ws-meta.yaml` declares `waitSeconds: 300` — the same as the engine default). It normally returns well inside that — the ceiling is a timeout, not a duration. Attendees start it themselves from the top of the *concept* page, so deliver the concept at its normal pace and it converges under you.
-
-[cols="1,4,1,2",options="header"]
+[cols="1,4,1,3",options="header"]
 |===
-| # | Exercise group | Attendee time | Measured core (as user6, RHDH 1.10.2)
+| # | Exercise group | Attendee time | Measured core (user25, 2026-11-16)
 
-| 1 | Tour the software catalog | ~7 min | UI browse + one catalog API query — *seconds*
-| 2 | Scaffold from the golden path | ~10 min | scaffolder task (fetch → publish:gitea → register) *~10–15s*; the duplicate-name `409` *~5s*
-| 3 | Inspect the paved road + start build | ~7 min | clone *seconds*; the in-cluster build is *started here* and runs *~8–9 min* in the background
-| 4 | Deploy into `{user}-dev` | ~6 min | collect the build (poll to `Complete`); `oc new-app` + `oc create route edge` *~30s*; rollout + curl *~30s*
+| 1 | Create the project from the golden path | ~8 min | template run *10 s*; four Argo CD applications Synced/Healthy and the PaC `Repository` + both pipelines in `{user}-cicd` *27 s* after the run started
+| 2 | See the service in Developer Hub | ~5 min | page reads only
+| 3 | Change the code in Dev Spaces | ~15 min | workspace first start *2 min 13 s* (pulls the developer image on a new node); build pipeline *2 min 30 s* (fetch 21 s, unit tests 47 s beside the image build 83 s, scan 10 s, SBOM 32 s, Conforma 8 s, deploy-dev 5 s); dev pod Running *~10 s* after
+| 4 | Release to stage and prod | ~8 min | release pipeline *36 s* (resolve, Conforma, stage commit, wait for stage, prod commit); prod available *~30 s* later
+| 5 | Release again: a canary | ~12 min | refused release (tag before build) *6 s*; second build *2 min 22 s*; release + canary (pause 20 s, analysis, promote) *~1.5 min*
 |===
 
-[NOTE]
-.How this timing was measured
-====
-Every exercise was performed as `user6` on the build cluster (Red Hat Developer Hub 1.10.2, OCP 4.21.22) on 2026-07-11.
-
-* *Catalog tour (exercise 1)* — browsing is instant; the terminal catalog query (an API token from the portal's built-in guest identity via `/api/auth/guest/refresh` — kept for scripts, no longer offered on the sign-in page — then `/api/catalog/entities/by-name/...`) returns in *under a second*.
-* *Scaffold (exercise 2)* — the scaffolder task ran its three steps (fetch the skeleton, `publish:gitea` to `{user}-svcs`, `catalog:register`) in *~10–15 seconds*; the deliberate duplicate-name re-run failed at *Publish* with a `409` almost immediately.
-* *Build (exercises 3–4)* — the first in-cluster build measured *~8.5 minutes* (`509s`): it pulls the UBI9 `openjdk-21` builder image and runs a full Maven build (downloading dependencies).
-Builds land on *any* worker node, so a "second" build is not reliably warmer — assume *~8–9 min* per build.
-This is why the lab *starts the build in exercise 3* and inspects the repo while it runs.
-* *Deploy (exercise 4)* — once the image is built, `oc new-app` + `oc create route edge` + rollout took *~30 seconds*; `/api/info`, `/q/health/ready`, and `/q/metrics` answered `200` (a transient `503` for a few seconds while the Route programmed).
-====
+Total: about *50 minutes* of attendee time, plus ~15 minutes of concept.
+`ws prep` waits up to 25 minutes (`waitSeconds: 1500`, sized for `ws solve`); a prep alone converges in about a minute.
 
 == Pre-flight checklist
 
-Run these *before the session* (as cluster admin unless noted).
-`SAMPLE` is any attendee you use to smoke-test; note that starting Developer Hub & Golden Paths *evicts* that user's entries for the other `{user}-dev` modules (they share `{user}-dev`).
+Run these *before the session* as cluster admin.
+`SAMPLE` is any attendee you use to smoke-test; starting this module *evicts* that user's entries for the `{user}-dev` modules and for the three pipeline modules (they share `{user}-cicd`).
 
-. *A sample user's entry state materializes and verifies 7/7.*
+. *The portal serves the template and the four views.*
++
+[source,sh,role=execute]
+----
+oc get pods -n rhdh
+RHDH="backstage-developer-hub-rhdh.$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')"
+TOKEN=$(curl -sk "https://$RHDH/api/auth/guest/refresh" | python3 -c 'import sys,json;print(json.load(sys.stdin)["backstageIdentity"]["token"])')
+curl -sk -H "Authorization: Bearer $TOKEN" "https://$RHDH/api/catalog/entities/by-name/template/default/parasol-golden-path" | python3 -c 'import sys,json;print("template:", json.load(sys.stdin)["metadata"]["title"])'
+curl -sk -H "Authorization: Bearer $TOKEN" "https://$RHDH/api/dynamic-plugins-info/loaded-plugins" | python3 -c 'import sys,json;print(sorted(p["name"] for p in json.load(sys.stdin) if any(k in p["name"] for k in ("argocd","tekton","topology","kubernetes"))))'
+----
++
+Expect a running `backstage-developer-hub-...` pod (2/2), `template: Parasol service, build to production`, and six plugins: the Argo CD frontend and backend, Tekton, Topology, and the Kubernetes frontend and backend.
+
+. *A sample user's entry state materializes and verifies.*
 +
 [source,sh,role=execute]
 ----
@@ -58,154 +60,65 @@ adm start developer-hub-golden-paths --user $SAMPLE
 ws verify developer-hub-golden-paths --user $SAMPLE --entry-only
 ----
 +
-Expect `✅ all 7 checks passed`: `$SAMPLE-dev` + the `ws-entry-developer-hub-golden-paths` marker, the shared RHDH portal reachable, the Parasol catalog populated (`parasol-claims`), the golden-path template registered, the `$SAMPLE-svcs` scaffold org present, and a *clean scaffold slate* (the org is empty — running the template is the lab).
+Expect `✅ all 8 checks passed`, including `CI wiring: golden-pac-secret in $SAMPLE-cicd` and a clean scaffold slate.
 
-. *The shared Developer Hub portal is up and signs attendees in through Keycloak.*
+. *The whole path runs end to end (the real pre-flight).*
 +
 [source,sh,role=execute]
 ----
-DOMAIN=$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')
-curl -ks -o /dev/null -w 'portal: HTTP %{http_code}\n' "https://backstage-developer-hub-rhdh.${DOMAIN}/"
-curl -ks -o /dev/null -w '%{redirect_url}\n' "https://backstage-developer-hub-rhdh.${DOMAIN}/api/auth/oidc/start?env=production&flow=redirect&redirectUrl=https://backstage-developer-hub-rhdh.${DOMAIN}/" | grep -oE '^https://[^?]+|client_id=[^&]+'
-oc get pods -n rhdh
+adm solve developer-hub-golden-paths --user $SAMPLE
+ws verify developer-hub-golden-paths --user $SAMPLE
 ----
 +
-Expect `portal: HTTP 200`, then the Keycloak realm's `…/realms/<realm>/protocol/openid-connect/auth` and `client_id=ogsr-devhub` (the portal's sign-in hands off to Keycloak), and a running `backstage-developer-hub-...` pod (plus its `backstage-psql-...` database).
-No Keycloak lines means the portal's sign-in is not wired (the `rhdh-auth` Secret is missing or stale): re-sync `workshop-config` (its `devhub-sso-client` hook rewrites it) and read that Job's log.
-The portal is *shared by the whole room* — one instance serves everyone.
+Solve walks the golden path itself: it runs the template, pushes one change, waits for the build, publishes `v1.0.0` and waits until prod is available. It took about *15 minutes* on the build cluster, most of it resetting the user's previous state; the hook itself (template, build, release, prod) takes about 5. Expect `✅ all 11 checks passed`. A failure names the step; the pipeline's own log is `tkn pipelinerun logs -n $SAMPLE-cicd --last`.
 
-. *The Parasol catalog is populated and the golden-path template is registered.*
+. *`adm smoke` passes as the attendee, in the real cockpit terminal.*
 +
 [source,sh,role=execute]
 ----
-RHDH="backstage-developer-hub-rhdh.$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')"
-TOKEN=$(curl -sk "https://$RHDH/api/auth/guest/refresh" | python3 -c 'import sys,json;print(json.load(sys.stdin)["backstageIdentity"]["token"])')
-curl -sk -H "Authorization: Bearer $TOKEN" "https://$RHDH/api/catalog/entities/by-name/component/default/parasol-claims" | python3 -c 'import sys,json;print("component:", json.load(sys.stdin)["metadata"]["name"])'
-curl -sk -H "Authorization: Bearer $TOKEN" "https://$RHDH/api/catalog/entities/by-name/template/default/parasol-service-template" | python3 -c 'import sys,json;print("template: ", json.load(sys.stdin)["metadata"]["name"])'
+adm smoke developer-hub-golden-paths $SAMPLE
 ----
-+
-Expect `component: parasol-claims` and `template:  parasol-service-template`.
-If either is missing, the catalog wiring (`app-config-rhdh` `catalog.locations`, pointing at the `parasol/*` Gitea repos) or the Gitea seeding needs attention.
-
-. *Each attendee's scaffold org exists and is empty — and no orphan catalog entry lingers.*
-+
-[source,sh,role=execute]
-----
-GITEA="gitea-ogsr-gitea.$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')"
-curl -sk "https://$GITEA/api/v1/orgs/user1-svcs/repos" | python3 -c 'import sys,json;print("repos in user1-svcs:", len(json.load(sys.stdin)))'
-RHDH="backstage-developer-hub-rhdh.$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')"
-TOKEN=$(curl -sk "https://$RHDH/api/auth/guest/refresh" | python3 -c 'import sys,json;print(json.load(sys.stdin)["backstageIdentity"]["token"])')
-curl -sk -H "Authorization: Bearer $TOKEN" "https://$RHDH/api/catalog/locations" | python3 -c 'import sys,json;print("user1-svcs catalog Locations:", sum(1 for e in json.load(sys.stdin) if "/user1-svcs/" in (e.get("data",e).get("target") or "")))'
-----
-+
-Expect `repos in user1-svcs: 0` and `user1-svcs catalog Locations: 0` on a fresh entry state.
-Both are reset by the entry-state hook on every `adm start`/`ws prep` — it empties the org *and* deregisters its catalog entry; a non-zero count means a prior scaffold was not cleared, so re-run `ws prep developer-hub-golden-paths --user user1`.
-
-. *(For a demo) pre-solve a sample user.*
-+
-[source,sh,role=execute]
-----
-adm solve developer-hub-golden-paths --user user1     # materializes user1-svcs/parasol-golden (a demo-ready scaffolded repo) -- ceiling 5 min (ws-meta.yaml waitSeconds: 300)
-----
-+
-`adm solve developer-hub-golden-paths` creates a representative already-scaffolded service (`{user}-svcs/parasol-golden`) with a `catalog-info.yaml`, so you have a concrete post-scaffold repo to show without running the template live.
-It materializes the *repo outcome*, not a built/running image (the lab's build is interactive).
-
-. *`adm smoke` passes for a sample attendee — the only pre-flight check that runs as the attendee, in the real cockpit terminal.*
-+
-[source,sh,role=execute]
-----
-adm smoke developer-hub-golden-paths user1
-----
-+
-Every module declares `smokeCommands` in `ws-meta.yaml`; unlike the checks above (run from an admin context), `adm smoke` execs into the attendee's own Showroom terminal as `user1` and proves the representative commands work under their real identity, PATH, and namespace isolation — not just that the objects exist.
 
 [NOTE]
 .What "done" looks like
 ====
-You do not need a separate rubric for when the room is ready to move on: each exercise in the lab ends on its own ✔ *Verify:* line, which is the per-exercise move-on signal — when an attendee's output matches it, that exercise is done. For a whole-module self-check, attendees can run `ws verify developer-hub-golden-paths` themselves at any point in the Showroom terminal; it is the same script pre-flight step 1 above runs for you (with `--entry-only`).
+Each exercise ends on a ✔ *Verify:* line. For the whole module, `ws verify developer-hub-golden-paths` grades the end state: a build Succeeded, prod runs a released digest, and stage runs the same one.
 ====
 
 == Demo-mode notes
 
-Beyond the Say/Show/Do arc in the demo flavor:
-
-* *Do the scaffold live — it is fast.*
-The scaffolder task finishes in ~10–15 seconds, so the "one button becomes a service" beat lands *live*; you do not need to pre-bake it.
-Keep `adm solve developer-hub-golden-paths --user {user}` (`{user}-svcs/parasol-golden`) as a fallback if the portal is sluggish, and to show a "here's one from earlier" repo.
-* *Sign in ahead of time and pin the catalog.*
-Click *Sign In* before the room (it signs you in through single sign-on) and open the *Catalog* filtered to `parasol-claims`, so beat 1 is one glance.
-* *Drive the scaffold from the portal, verify from the terminal.*
-Fill the form on screen for the visual; then confirm the outcome with the two ``curl``s in the demo arc (the repo in Gitea, the Component in the catalog) so the audience sees it is *real*, not a mock.
-* *Do not build live.*
-The in-cluster build is ~8–9 minutes — too long for a demo.
-The demo stops at "scaffolded + registered"; the *running* service is a workshop exercise, or show the `parasol-golden` repo from `adm solve` as the artifact.
-* *Skip the internal "Open the new repository" link on screen* — it points at `gitea.ogsr-gitea.svc:3000` and will not open.
-Open the repo via the Gitea route instead ({gitea_url}/{user}-svcs/parasol-golden).
+* *Stage with `adm solve` the evening before.* It creates the project and releases `v1.0.0`, so the demo opens on a component page with history in *CI*, four applications in *CD*, and pods in three environments.
+* *Start the build early.* Step 2's build takes about 2.5 minutes; talk through its task table while it runs. Do not tag in step 3 until the build has Succeeded, or the release is refused (that refusal is the lab's break-and-fix, and makes a fine extra beat if you mean it).
+* *Each demo run needs a new tag.* Solve released `v1.0.0`; use `v1.1.0`, then `v1.2.0` on a rehearsal, and so on.
 
 == Top questions attendees ask
 
-*1. "Why didn't the portal ask for my password?"*::
-It uses the same Keycloak single sign-on as the cluster: the attendee already has a Keycloak session from signing in to the workshop, so *Sign In* completes without a prompt and the portal knows them as `user:default/{user}`.
-Scaffolder runs are recorded under that identity, and the catalog's User and Group entries are imported from the same Keycloak realm.
-What the workshop leaves off is a *permission policy* — every signed-in attendee can change everything in the portal; production adds role-based access on top of the same sign-in.
-Attendee *isolation* here comes from each person scaffolding into their *own* Gitea org (`{user}-svcs`) — and because the *catalog* is shared and keyed by name, the scaffolded service name carries the username (`parasol-policy-{user}`) so every attendee registers a *distinct* Component on the one portal. If an attendee drops the suffix and two people use the same bare name, they collide on the shared catalog.
+*1. "Who created the Argo CD applications and the webhooks? I only filled a form."*::
+The platform team's per-team wiring, which `ws prep` lays for each attendee: an ApplicationSet in the attendees' Argo CD watches the `{user}-svcs` organization and makes four applications for every `-gitops` repository in it, and two org-level webhooks send every push to Pipelines-as-Code and to Argo CD. The template only writes files; nothing in Developer Hub holds a credential that can deploy.
 
-*2. "The 'Open the new repository' link (or the catalog 'source' link) doesn't open."*::
-Those links resolve to Gitea's *in-cluster service address* (`gitea.ogsr-gitea.svc:3000`) — the address RHDH uses internally to read and write Git.
-Your browser cannot reach that address.
-Open the repo through the Gitea *route* instead: {gitea_url}/{user}-svcs/parasol-policy-{user}.
-This is a known rough edge of the workshop portal's internal wiring; the *Open in the software catalog* link (which stays inside RHDH) works normally.
+*2. "Why is the pipeline in the GitOps repository, not in my app repo?"*::
+The app repo's `.tekton/` files say *when* to run; the pipeline (*what* runs) is a cluster object applied by Argo CD from `ci/`, so changing it is a reviewed commit like any other configuration, and Conforma can check that a named pipeline built the image. A shared, versioned pipeline in a task library is the other common choice; the wrap-up compares them.
 
-*3. "The template didn't create a pipeline or an Argo app — where's the rest?"*::
-This golden path scaffolds three things: the *service skeleton* (with probes, metrics, tracing, a trusted image, and a build recipe), the *published repository* in your org, and the *catalog registration*.
-Turning it into a *running* service is exercise 4 (build the paved-road image, run it).
-Wiring a pipeline (a separate Pipelines module) and GitOps delivery (a separate GitOps module) on top is the paved road's *next layer* — exactly the kind of thing a platform team adds to the template so every future service inherits it.
-The point of the module is the *pattern*: standards encoded once, applied on every click.
+*3. "Why did my first release go straight to prod, but the second was a canary?"*::
+A canary compares a new version with a running stable one. The first release has nothing to compare against, so Argo Rollouts creates production with it; every later release is a canary with the analysis.
 
-*4. "My scaffold failed with a 409 — did I break something?"*::
-No — that is the deliberate break-and-fix in exercise 2.
-The `publish:gitea` step refuses to create a repository whose name already exists in your org (a Git server will not hold two repos with the same name).
-Fix it by choosing a *unique* name, or delete the existing repo first.
-This is the Gitea *publish* 409, not a catalog conflict — the scaffolded name carries the username (`parasol-policy-{user}`), so the *register* step never collides on the shared catalog.
-The workshop empties your `{user}-svcs` org and deregisters its catalog entry on every `ws prep developer-hub-golden-paths`, so a fresh run always starts from an empty slate.
+*4. "Where is the signing step?"*::
+There is none: Tekton Chains watches the build task and signs the image and its provenance, keyless, as its own workload identity, seconds after the task ends. The pipeline only verifies the result, with Conforma, before dev and again before stage.
 
-*5. "Why does the build take so long?"*::
-The first in-cluster build pulls the UBI9 Java 21 *builder image* and runs a *full Maven build* (downloading every dependency) — about *8–9 minutes*.
-Builds can land on any worker node, so a later build is not reliably faster.
-The lab is structured around this: you *start the build in exercise 3* and inspect the repo while it runs, then *collect it in exercise 4*.
-It is real work happening on the cluster, not a hang.
+*5. "Can I use my own service name?"*::
+Yes, but the declared Dev Spaces workspace clones `parasol-quote-{user}`, and the catalog is shared, so a name must be unique in the room; keep the username in it.
 
 == Watchouts
 
-* *The build is the long pole — protect the interleave.*
-The scaffolded image build is ~8–9 minutes and the lab hides it behind the exercise-3 inspection.
-If an attendee races ahead to exercise 4 before starting the build, they will sit and wait; make sure the room *starts the build at the top of exercise 3* (the `oc apply -f openshift/buildconfig.yaml` + `oc start-build`) and reads while it runs.
-Budget the module's wall clock around one ~9-minute build, not around the ~30 minutes of activity.
-* *One shared portal, per-attendee sign-in, no permission policy.*
-Everyone signs in as themselves, but nothing stops one attendee from unregistering another's Component.
-If the `backstage-developer-hub` pod restarts mid-session, attendees reload and click *Sign In* again; an attendee idle long enough for their Keycloak session to end gets the Keycloak sign-in form inside the tab and enters the workshop username and password.
-Repo isolation is by *Gitea org* (`{user}-svcs`), but the *catalog is shared* and keyed by name — so the scaffolded service carries the username (`parasol-policy-{user}`) to stay a distinct Component. Two attendees using the *same bare name* would publish fine into their different orgs yet *collide on the one catalog*; the per-user name is what prevents that. (Re-running the *same* name into your *own* org is the deliberate Gitea publish `409` in the lab.)
-* *Links inside RHDH point at the internal Gitea address.*
-The catalog `source`/`view`/`edit` links and the scaffolder's "Open the new repository" link resolve to `gitea.ogsr-gitea.svc:3000` and are not browser-clickable.
-Steer attendees to the Gitea *route* ({gitea_url}) to view repos; set the expectation early so it does not read as "broken."
-* *TechDocs is annotated but not built.*
-The Parasol Components carry a `backstage.io/techdocs-ref` annotation, but no docs are built in this workshop, so the *TechDocs* tab shows "not found."
-Do not promise a rendered docs experience; TechDocs is a "go deeper" capability (it needs a docs build or an external builder), not a lab step here.
-* *The scaffolded README's build command does not match the repo.*
-The generated `README.md` suggests `oc new-build --strategy=docker --binary` (which defaults to looking for `Dockerfile`), but the repo ships a `Containerfile` — so that exact command *fails* with `open .../Dockerfile: no such file or directory`.
-The lab deliberately uses `oc apply -f openshift/buildconfig.yaml` instead (the repo's `BuildConfig` correctly sets `dockerfilePath: Containerfile`).
-If an attendee copies the README command and it fails, that is why — point them at the lab's build steps.
-* *Applying the `BuildConfig` claims build number 1.*
-The repo's `BuildConfig` carries a trigger that increments the build counter on apply, so the attendee's first *manual* build is numbered `-2`, not `-1` (there is no failed `-1` object — it is cosmetic).
-The exercise-4 poll finds the build *by label*, so the number does not matter; do not chase a "missing build 1."
-* *Developer Hub & Golden Paths shares `{user}-dev` with several modules.*
-Its entry state (and the service you build) lives in `{user}-dev`, which many of the other `{user}-dev` modules also use.
-`ws prep`/`adm start developer-hub-golden-paths` evicts those modules' entry apps and purges `{user}-dev` automatically — so switching to Developer Hub & Golden Paths from any of them is clean, and switching back re-materializes the other module's world.
+* *`{user}-cicd` is shared with the pipeline modules.* Starting this module evicts pipelines-fundamentals, app-security-testing and trusted-supply-chain for that attendee and purges `{user}-cicd` (and the reverse). Switching either way is clean.
+* *A reset of a finished lab takes a few minutes.* `ws prep` deletes the four Applications, and the `ci` one waits for Kubernetes to delete the Pipelines-as-Code `Repository` (foreground deletion; about two minutes measured) before the purge goes on.
+* *The first Dev Spaces start on a node pulls the developer image* (about two minutes). Have the room open the workspace at the start of exercise 3 and read the pipeline table while it starts.
+* *The Git password prompt appears at the top of the editor*, not in the terminal; attendees think the push hung.
+* *A tag pushed before its build passed is refused* (exercise 5's break-and-fix). If an attendee deletes and re-pushes a tag instead of using the next version, Pipelines-as-Code also runs the release for the deletion; both runs promote the same digest, so the result is the same, but the run list shows two.
+* *Developer Hub restarts when its Argo CD access changes.* The workshop layer's `devhub-argocd-access` hook rewrites the portal's plugin Secret and restarts the pod only when the Secret's content changes (the first install, or a changed workshop password); the portal is unavailable for about three minutes while the dynamic plugins reinstall.
+* *Links inside Developer Hub that point at Gitea* resolve to its in-cluster address (`gitea.ogsr-gitea.svc:3000`) and do not open in a browser; use the Gitea route ({gitea_url}).
 
 == Provenance
 
-Developer Hub & Golden Paths is built fresh on *Red Hat Developer Hub 1.10.2* (a shared portal; guest sign-in when built, single sign-on through the cluster's Keycloak since 2026-11-12, re-verified end to end as `user6` on RHDH 1.10.7), with a Parasol software catalog fed from the `parasol/+++*+++` Gitea repositories (Components `parasol-claims`/`parasol-web`/`parasol-notifications`, three `parasol-+++*+++-api` APIs, the `parasol-insurance` System, the `parasol` Group) via `app-config-rhdh` `catalog.locations`, and a golden-path Software Template ("New Parasol microservice") that scaffolds a Quarkus {quarkus_version} / Java 21 service and publishes it into each attendee's own Gitea organization (`{user}-svcs`) with the first-party `publish:gitea` scaffolder action, then registers it with `catalog:register`.
-Every command, output, and timing — the guest catalog query, the scaffolder task (`fetch:template` → `publish:gitea` → `catalog:register`, ~10–15s), the `409` on a duplicate name, the paved-road repo contents (Quarkus/JDK-21, health/metrics/OTel, a UBI9 non-root `Containerfile`, `catalog-info.yaml`, `devfile.yaml`, `openshift/buildconfig.yaml`), the in-cluster UBI9 build (~8.5 min), `oc new-app` + `oc create route edge`, and the `/api/info` + `/q/health/ready` + `/q/metrics` responses — was performed and measured on Red Hat Developer Hub 1.10.2 / OpenShift 4.21.22 as `user6` on 2026-07-11.
-Developer Lightspeed for Red Hat Developer Hub (a `lightspeed-core` sidecar ships with the portal) is *not* wired to a usable chat UI in this environment and is treated as a *Red Hat Advanced Developer Suite* (RHADS) "go deeper" capability, not a lab step.
-No content ported from stale material.
+Rebuilt on 2026-11-16 around one golden template (`apps/parasol-golden-path` in the workshop repository, seeded to `parasol/parasol-golden-path`), on Red Hat Developer Hub 1.10.7 with the Kubernetes, Topology, Tekton and Argo CD plugins enabled by the portal component (the Kubernetes backend reads the cluster with the pod's own projected ServiceAccount token and a read-only ClusterRole; the Argo CD backend reads the attendees' Argo CD as the read-only `rhdh-reader` account).
+Every exercise was performed as `user25` on cluster-gn67x: the template run, the four applications, the Dev Spaces edit and push, the build (Conforma `Violations: 0, Successes: 5`), `v1.0.0` to stage and prod, the refused early tag, and the `v1.1.1` canary with a `Successful` AnalysisRun. Developer Hub's views were proven at the API level (its Kubernetes backend returned the component's pods, Deployments, Rollout, Routes, PipelineRuns and TaskRuns; its Argo CD backend returned the four applications); the pages themselves were not opened in a browser.

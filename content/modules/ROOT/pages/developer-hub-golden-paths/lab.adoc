@@ -2,23 +2,20 @@
 :module-id: developer-hub-golden-paths
 include::partial$version-attributes.adoc[]
 
-// Lab page for Developer Hub & Golden Paths. Workshop exercises are guarded ifndef::demo[]; the DEMO rendering shows only the
-// SA demo page. The Red Hat Developer Hub portal is a WEB UI — the catalog browse and the golden-path
-// scaffold happen in the browser (single sign-on through the cluster's Keycloak, as the attendee, since
-// 2026-11-12; guest sign-in before that), so those are UI steps, and ALL SIX of them carry a real
-// captured screenshot, re-shot 2026-11-12 signed in through that SSO as user1 (RHDH 1.10.7). Every
-// OUTCOME (the published Gitea repo, the registered catalog Component, the built image, the running
-// service) is still verified from the terminal with oc + curl and is load-bearing/verifiable. Terminal commands run in the Showroom Terminal as {user}, so blocks are
-// [source,sh,role=execute]; subs="attributes" is used where {user}/{gitea_url}/{rhdh_url} appear, and
-// jsonpath/brace-bearing blocks use $DEV/$ORG/$SVC with NO subs (same idiom as gitops-fundamentals/gitops-at-scale). Everything —
-// the guest catalog query, the scaffolder task (fetch/publish:gitea/register), the paved-road repo
-// contents, the in-cluster UBI9 build (~8 min cold), oc new-app + expose, and the /api/info +
-// /q/health/ready + /q/metrics responses — was performed on the shared RHDH 1.10.2 portal (a frozen
-// provenance literal, not {rhdh_version} — the `fast` channel rolled the operator to 1.10.3 on
-// 2026-08-05, well after this run), OCP 4.21.22, on 2026-07-11 (not recalled). The scaffolded entity name is per-user-unique
-// (parasol-policy-{user}): every attendee registers a DISTINCT Component on the ONE shared portal, so
-// the register step never collides. Re-verified end to end as user8 — two distinct names both register
-// with no 409; the deliberate break-fix is the Gitea publish 409 on re-running the SAME name.
+// Lab page for Developer Hub & Golden Paths, rebuilt 2026-11-16 around ONE golden template that carries
+// every practice of the workshop (owner direction): the developer creates a project from Developer Hub,
+// changes the code in Dev Spaces, the push runs the build pipeline (tests, RHACS image check, SBOM,
+// Tekton Chains keyless signature, Conforma, deploy to dev by GitOps), and a tag promotes the SAME
+// digest to stage and then to a canary in prod. Workshop exercises are guarded ifndef::demo[]; the DEMO
+// rendering shows only the SA demo page.
+//
+// GROUNDING. Performed end to end on cluster-gn67x (OCP 4.22, RHDH 1.10.7, OpenShift Pipelines 1.24.3,
+// OpenShift GitOps 1.22.3) on 2026-11-16 as user25, every terminal block in user25's own cockpit
+// terminal. The template was run through the scaffolder API (POST /api/scaffolder/v2/tasks) with the
+// same three values the form takes; the Dev Spaces edit was made in the started parasol-quote workspace
+// pod; tags were pushed with git. Outputs below are that run's, timings measured from it.
+// Developer Hub UI labels come from the served plugin bundles and the existing module captures; every
+// UI step not seen in a browser carries a UI-UNVERIFIED marker for the coordinator.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -28,81 +25,58 @@ image::solution-map/developer-hub-golden-paths.svg["The Parasol solution map wit
 
 include::partial$idp-choice.adoc[]
 
-In this lab you are a new Parasol engineer: tour the *software catalog*, scaffold a service from a *golden-path template* into your *own* Git organization, then build and run it in `{user}-dev`.
+In this lab you are a Parasol engineer who needs a new *quote* service in production.
+You will not assemble a pipeline, a GitOps repository or a release process: the platform team has put all of that in one *golden-path template*.
+You create the project with one form, change the code, push, and tag a release, and you watch every step from Red Hat Developer Hub.
 
-Set three shortcuts you will reuse in the terminal commands below:
+Set the shortcuts the terminal commands below reuse:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
-DEV={user}-dev
+U={user}
+SVC=parasol-quote-{user}
 ORG={user}-svcs
-SVC=parasol-policy-{user}
-echo "namespace: $DEV · your scaffold org: $ORG · service you will create: $SVC"
+CICD={user}-cicd
+echo "service: $SVC · Git organization: $ORG · pipelines run in: $CICD"
 ----
 
-Exercises 3 and 4 set the two they use again in their first block: *if your terminal reconnects, run the first block of the exercise you are in again*.
+*If your terminal reconnects, run this block again.*
 
-.One terminal, plus two browser tabs
+.One terminal, plus three browser tabs
 [cols="1,3",options="header"]
 |===
 | Tab | Use it for
 
 | *Terminal*, beside these instructions
-| Commands as `{user}`, on your own namespace `{user}-dev` and Git org `{user}-svcs`
+| Commands as `{user}`: pipeline runs in `{user}-cicd`, the service in `{user}-dev`, `{user}-stage` and `{user}-prod`
 
 | {rhdh_url}[Red Hat Developer Hub^]
-| The shared portal: catalog and golden-path template. *Sign In* is single sign-on, no password.
+| The shared portal: the template, and your service's *CI*, *CD* and *Topology* tabs. *Sign In* is single sign-on.
+
+| {devspaces_url}[Dev Spaces^]
+| Your workspace for the code change. Sign in as `{user}` (same credentials as the console).
 
 | {gitea_url}[Gitea^]
-| Where your scaffolded repo lands. Sign in as `{user}` with the workshop password.
+| Your two new repositories. Sign in as `{user}` with the workshop password.
 |===
 
-Open both browser tabs now.
-
-// U8-F-01a (tester report, 2026-08-03): the shared-portal consequence was never stated to the
-// attendee. Grounded in platform-portfolio/components/rhdh/app-config.yaml — ONE RHDH instance,
-// permission.enabled false (no permission policy) — and in the tester's own catalog query, which
-// returned another attendee's parasol-policy-user3 alongside the seeded Parasol components. Since
-// 2026-11-12 each attendee signs in as user:default/<userN> (workshop-config devhub-sso-client.yaml),
-// verified live as user6: the scaffolder records the run as created by user:default/user6.
 [WARNING]
 .The Developer Hub portal is shared with the whole room
 ====
 One Developer Hub serves the room, with no permission policy: every signed-in attendee can change everything in it.
 
-* *You will see other people's work*, such as `parasol-policy-user3`. That is expected.
-* *Touch only your own:* `parasol-policy-{user}` and the `{user}-svcs` organization. Everything else belongs to someone mid-exercise.
-
-.Who owns what, and how a production portal differs
-[%collapsible]
-=====
-You sign in to the portal as yourself, and the templates you run are recorded as yours; signing in does not make you read-only, so you could change or delete another attendee's entries.
-A production portal adds role-based access on top of the same sign-in.
-
-Your Gitea organization (`{user}-svcs`) and your namespace (`{user}-dev`) *are* yours alone.
-The sharing stops at the portal.
-=====
-====
-
-// Review finding (2026-08-05): the captures used to come from two sample attendees (user6 screenshots,
-// one user1 output block). All six screenshots were re-shot as user1 on 2026-11-12, so every captured
-// artefact is now one identity; the fact is stated ONCE here and the two later annotations point back.
-[NOTE]
-.Names inside the screenshots and captured output are a sample attendee's
-====
-Screenshots and one expected-output block show the sample attendee `user1`; the commands you run are templated with *your* user.
-Read the *shape*, not the exact name.
+* *You will see other people's services*, such as `parasol-quote-user3`. That is expected.
+* *Touch only your own:* `parasol-quote-{user}` and the `{user}-svcs` organization.
 ====
 endif::demo[]
 
 // ============================================================================
-// DEMO FLAVOR — the 11-minute SA demo: the catalog, then a service from one form.
-// The title's minutes are the sum of the three step headings below (3+5+3); keep them in step.
+// DEMO FLAVOR: the SA demo, from the `adm solve` end state.
 // ============================================================================
 ifdef::demo[]
-== A new service that starts compliant · 11 min
+== Every practice in one template · 12 min
 
-Parasol's developer portal answers what the organization runs and who owns it, and turns a week of plumbing into a short form that produces a real, standards-compliant service — in the team's own Git organization, registered in the catalog — in under a minute.
+Parasol's platform team packages its whole delivery practice, from pipeline gates to a canary in production, into one Developer Hub template, so a new service ships the way the auditors expect from its first commit, and the developer's work is the code.
 
 [IMPORTANT]
 .Prep — run before the session
@@ -114,709 +88,624 @@ This demo starts from the finished lab state. Stage it before the session:
 adm solve developer-hub-golden-paths
 ----
 
-It empties the `{user}-svcs` scaffold organization and leaves one already-scaffolded service in it, `{user}-svcs/parasol-golden`, as a ready-made example of what the template produces; it takes about a minute.
+It creates `parasol-quote-{user}` from the template, pushes one change through the build pipeline and releases it as `v1.0.0`, so dev, stage and prod all run it. It takes about 15 minutes.
 
-Then sign in to the {rhdh_url}[Developer Hub portal^] — one click on *Sign In*, which signs you in as `{user}` through the workshop's single sign-on — and open the *Catalog* filtered to the `parasol-claims` Component: that page is the opening view for step 1. Keep the cockpit terminal beside it, signed in as `{user}`, for the terminal blocks in the steps.
+Then open three browser tabs, signed in as `{user}`: {rhdh_url}[Developer Hub^] on the `parasol-quote-{user}` component, {gitea_url}/{user}-svcs/parasol-quote-{user}[the service repository^], and {student_argo_url}[Argo CD^]. Keep the cockpit terminal beside them.
 
-Step 2 publishes to `{user}-svcs/parasol-demo-{user}`, and publishing into a name the organization already holds is refused: *Publish to Gitea* fails with `repository already exists [owner: {user}-svcs, repo: parasol-demo-{user}]`, and *Register in the software catalog* is greyed out and never runs. A rehearsal is what leaves that name taken, so list the organization first — this is step 2's own command:
-
-[source,sh,role=execute,subs="attributes+"]
-----
-curl -sk "{gitea_url}/api/v1/orgs/{user}-svcs/repos" \
-  | python3 -c 'import sys,json;[print("repo:",r["full_name"]) for r in json.load(sys.stdin)]'
-----
-
-`parasol-golden` and no `parasol-demo-{user}` is the clean state: staging left the fallback service and the name step 2 needs is free. If `parasol-demo-{user}` is already listed, run the staging command above again — it applies the entry state first, which empties the scaffold organization *and* deregisters its catalog Location on the shared portal, then re-creates `parasol-golden`. Deleting the repository in Gitea by hand is not equivalent: the catalog entry is a separate object, so that clears the *Publish* conflict and leaves a stale registration standing in front of the *Register* step.
-
-NOTE: Inside the portal, *Open the new repository* and the catalog's *View Source* link resolve to Gitea's in-cluster address (`gitea.ogsr-gitea.svc:3000`) and will not open in a browser. Reach a repository through the Gitea route instead — {gitea_url}/{user}-svcs/parasol-demo-{user}. *Open in the software catalog* stays inside the portal and works normally.
-
-NOTE: The catalog query in step 1 is a garnish beside the portal page, which carries the step on its own. A `KeyError` traceback from that one-liner is what an unreachable portal or an unregistered entity looks like from the terminal.
-
-CAUTION: If a live scaffold fails, the staged `{user}-svcs/parasol-golden` service shows the same result — it came from this same template. Either change the *Name* field to `parasol-demo2-{user}` and create again, which costs one field and lands step 2 as written, or run step 3 against `parasol-golden` instead. Staging materializes the golden-path *outcome* — the repository and its registered `catalog-info.yaml` — not the full skeleton, so show that catalog entry rather than a `pom.xml`; the paved-road file list is on `parasol-claims`, which step 1 already has open.
-
-CAUTION: `ws prep developer-hub-golden-paths` returns the entry state and empties the `{user}-svcs` scaffold organization — it also deregisters the catalog entry from the shared portal and purges `{user}-dev`. Run the staging command above again after it.
+Step 2 starts a build that takes about 2.5 minutes; step 3 waits for it. Talk through step 2's table while it runs.
 ====
 
 === Brief
 
-image::developer-hub-golden-paths/developer-hub-golden-paths-02-golden-path-flow.svg["A new engineer fills a short form, which runs the New Parasol microservice software template. The template branches into three steps: scaffold a Quarkus skeleton with probes, metrics and OpenTelemetry; publish it to the engineer's own Git organization; and register it in the catalog with ownership and System. The first two arrive at a new service repository carrying paved-road wiring, the third at the software catalog, where the service appears with an owner."]
+[mermaid]
+....
+include::example$diagrams/developer-hub-golden-paths/09-template-generates.mmd[]
+....
 
-*The problem: cognitive load, and standards nobody follows*
+*The problem: every practice is another thing to assemble*
 
-A platform accumulates capabilities: a container image built the trusted way, a pipeline that ships it, signing and verification, GitOps delivery, safe scaling. Each one is also another tool, another repository layout, another set of conventions an engineer has to learn before writing a line of business logic.
+A platform collects good practices: a pipeline on every push, tests and an image scan as gates, a software bill of materials, a signature that proves who built the image, a policy check before deploy, GitOps promotion, canary releases.
+Each one is sound, and each one is more files, conventions and credentials a developer must get right before writing business logic.
+The tenth service gets them by copying the ninth, with whatever was wrong with it.
 
-The cost is not the tools; it is the cognitive load. The tenth engineer to create a service reverse-engineers how the last nine did it, copies a repository that was already subtly wrong, or asks the platform team to do it by hand. Standards that live in a wiki are standards that drift — the probes get forgotten, the base image goes stale, the pipeline is copied from a service that did it differently. The platform is powerful, and nobody can find the on-ramp.
+*The golden path: the platform team's practice, as a product*
 
-*The golden path: a paved road, not a cage*
-
-A developer portal fixes the on-ramp with two things. A *software catalog* answers "what do we run and who owns it": Components, the APIs they provide, the Systems they belong to, and the Groups that own them — each described by a small file next to the code, so the map is as current as the last commit. A *golden path* answers "how do I start something new, correctly, without asking anyone": a form plus a template that scaffolds a complete service with health, metrics and tracing already wired, a trusted base image, a build recipe and a catalog entry.
-
-The phrase that matters is paved road, not cage. What the template produces is plain, standard source in the team's own repository, theirs to change from the moment it exists. The platform team makes the correct decisions once and gets out of the way — which moves compliance from something audited into a service later to the default state at creation.
-
-Red Hat Developer Hub, Red Hat's supported build of the open-source Backstage project, is that portal.
+Red Hat Developer Hub, Red Hat's build of the open-source Backstage project, puts a *software template* behind a form.
+This template creates two repositories: the service, and its GitOps and CI configuration.
+The platform team's one-time wiring for the team, two webhooks and an Argo CD ApplicationSet, turns them into running pipelines and environments within a minute.
+Keeping that template right, for every team at once, is the platform engineering team's job.
 
 *In this demo*
 
-. The software catalog as the organization's live map — what runs, who owns it, and the API it provides
-. A short form producing a complete, standards-compliant service in the team's own Git organization, registered in the catalog
-. The scaffolded repository — plain, editable code carrying every decision the platform team made once
+. One page for the whole service: code, pipelines, deployments and what is running
+. A push that becomes a tested, scanned, signed and verified deploy, with nobody writing a pipeline
+. A tag that promotes the same digest to stage and then to a canary in production
 
-=== 1 · The catalog: what we run and who owns it — 3 min
+=== 1 · One page for the whole service — 3 min
 
-Everything Parasol runs is in one catalog: the claims service, the APIs it exposes, the team that owns it. The entries are not maintained by hand — they are generated from files that live next to the code.
+The component page is where a developer starts and ends the day: it reads the cluster, the pipelines and Argo CD, and shows them as one service.
 
-image::developer-hub-golden-paths/developer-hub-golden-paths-01-catalog-components.png["The Developer Hub catalog page, Kind filtered to Component, listing all three Parasol Components — parasol-claims, parasol-notifications and parasol-web — with columns for Name, System, Owner, Type, Lifecycle and Description. All three share the parasol-insurance System, the parasol owner and the production lifecycle, while their types differ between service and website. A Self-service button sits above the table."]
+image::developer-hub-golden-paths/developer-hub-golden-paths-01-catalog-components.png["The Developer Hub catalog page, Kind filtered to Component, listing the Parasol Components with columns for Name, System, Owner, Type, Lifecycle and Description, and a Self-service button above the table."]
 
 *Why it matters*
 
-"Who owns claims, what depends on its API, which System is it part of" becomes a query rather than an archaeology project across wikis and chat histories. Because each entry comes from a `catalog-info.yaml` in the service's own repository, ownership and structure are reviewed in pull requests like everything else — so the map an incident responder opens is current, not a diagram three reorganizations out of date.
+The developer never had to learn where pipeline runs live, which Argo CD instance deploys the service, or how to find its pods.
+The template wrote three annotations into `catalog-info.yaml`, and every tab follows from them.
 
-*On screen* — the Developer Hub *Catalog*: open the `parasol-claims` Component and trace its *owner* (the `parasol` group), its *System* (`parasol-insurance`) and the *API* it provides (`parasol-claims-api`); open that API and its OpenAPI definition renders in the portal.
+*On screen* — *Catalog* → `parasol-quote-{user}`: *CD* lists the four Argo CD applications (`-ci`, `-dev`, `-stage`, `-prod`), *CI* lists the build and release runs that staging left, and *Topology* shows the service running in dev, stage and prod.
+// UI-UNVERIFIED: component page tabs CI, CD, Topology.
 
-The same map answers from the terminal, because the catalog is an API and not only a screen:
+The same facts from the terminal:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
-TOKEN=$(curl -sk {rhdh_url}/api/auth/guest/refresh | python3 -c 'import sys,json;print(json.load(sys.stdin)["backstageIdentity"]["token"])')
-curl -sk -H "Authorization: Bearer $TOKEN" \
-  "{rhdh_url}/api/catalog/entities/by-name/component/default/parasol-claims" \
-  | python3 -c 'import sys,json;d=json.load(sys.stdin);s=d["spec"];print("owner:",s["owner"],"| system:",s["system"],"| provides:",s.get("providesApis"))'
+oc get pipelinerun -n {user}-cicd -l backstage.io/kubernetes-id=parasol-quote-{user} \
+  -o custom-columns=RUN:.metadata.name,PIPELINE:.metadata.labels.tekton\\.dev/pipeline,STATUS:.status.conditions[0].reason
 ----
 
 *What just happened*
 
-Owner, System and provided API came back as data. Because the relationships are typed and queryable, the same catalog feeds scorecards, access reviews and incident tooling instead of being one more page someone has to remember to update.
+Two runs, one build and one release, and nobody wrote either pipeline: they came from the template, and Argo CD put them in the cluster.
 
-=== 2 · A form instead of a week of plumbing — 5 min
+=== 2 · A push becomes a verified deploy — 5 min
 
-A new engineer needs a service: one that builds the trusted way, carries probes, metrics and tracing, and is ready for GitOps. Instead of a week of plumbing, they fill in three fields.
+A developer changes one line and pushes; every gate the platform team requires runs on its own.
 
-image::developer-hub-golden-paths/developer-hub-golden-paths-04-template-form.png["Step one of the New Parasol microservice template in Developer Hub, headed Provide service details. Three required fields are filled in — Name, Your Gitea organization, and Owner set to parasol — each with a line of helper text beneath it, and the only button forward is Review. Nothing else is asked: the Java version, health probes, metrics, Containerfile and devfile are all decided by the template."]
+[mermaid]
+....
+include::example$diagrams/developer-hub-golden-paths/10-commit-to-production.mmd[]
+....
 
 *Why it matters*
 
-Everything the earlier modules assembled by hand — the trusted base image, the probes and metrics, the repository layout, the catalog entry — is a decision the platform team makes once and encodes in the template. The new service inherits all of it, so it starts compliant rather than being audited into compliance later. And the leverage compounds: improve the template once, and every service created afterwards inherits that too.
+Compliance is the default, not a review: the change reaches dev only after its tests pass, Red Hat Advanced Cluster Security finds no policy violation, an SBOM is recorded, Tekton Chains has signed the image keyless and Conforma has verified the signature and provenance.
+The pipeline never deploys anything itself; it commits a digest, and Argo CD deploys it.
 
-*On screen* — *Catalog → Self-service* → the *New Parasol microservice* template → the form: *Name* `parasol-demo-{user}`, *Your Gitea organization* `{user}-svcs`, *Owner* `parasol` → *Create*. Three steps run and finish in seconds — fetch the skeleton, publish to Gitea, register in the software catalog — and *Open in the software catalog* leads to the new Component. The name carries the username because this portal's catalog is shared with everyone in the workshop; a per-user name keeps every registered service distinct.
-
-Then the repository the form created:
+*On screen* — in the service repository in Gitea, open `src/main/java/com/parasol/service/InfoResource.java`, *Edit File*, change `"status", "ready"` to `"status", "ready", "demo", "live"`, and *Commit Changes* to `main`. In Developer Hub, *CI* shows the new run of `parasol-quote-{user}-build`; walk through its tasks while it runs.
+// UI-UNVERIFIED: Gitea Edit File / Commit Changes on the template's Java file; CI tab live run.
 
 [source,sh,role=execute,subs="attributes+"]
 ----
-curl -sk "{gitea_url}/api/v1/orgs/{user}-svcs/repos" \
-  | python3 -c 'import sys,json;[print("repo:",r["full_name"]) for r in json.load(sys.stdin)]'
+tkn pipelinerun list -n {user}-cicd --limit 2
 ----
 
 *What just happened*
 
-A form became a real Git repository and a registered, owned service in under a minute — carrying the base image, the probes, the metrics, the tracing and the GitOps wiring that the preceding modules built one command at a time.
+One commit, seven tasks, one Git commit to the GitOps repository at the end, and dev runs the change.
 
-=== 3 · A paved road, not a cage — 3 min
+=== 3 · A release is a tag, and prod is a canary — 4 min
 
-What the template produced is ordinary code in the engineer's own repository, not a locked black box handed back by a platform team.
+The release does not rebuild: it promotes the digest that already passed every gate, first to stage, then to production as a canary.
 
-image::developer-hub-golden-paths/developer-hub-golden-paths-05-what-you-built.svg["What the golden path produced: a short form naming a service and an organization runs the golden-path template, which creates both a new repository holding Quarkus with paved-road wiring and a catalog registration that records the owner and the System. From that repository, an in-cluster UBI9 build produces the image that runs in the engineer's namespace with health and metrics answering."]
+[mermaid]
+....
+include::example$diagrams/developer-hub-golden-paths/12-canary-release.mmd[]
+....
 
 *Why it matters*
 
-A cage forces one way and punishes deviation; a paved road makes the right thing the easy thing and leaves the team free to drive off it when they have a real reason. Ownership transfers at creation — the code, the dependencies and the build recipe are all in the team's repository from the first commit — which is what keeps a golden path from becoming the next thing engineers work around.
+What runs in production is exactly what was tested, by digest, and the GitOps history shows who released what and when.
+Production gets a canary with an automated analysis that the developer did not have to design.
 
-*On screen* — the scaffolded repository in Gitea, at {gitea_url}/{user}-svcs/parasol-demo-{user}: `pom.xml` (Quarkus, Java 21), `src/.../InfoResource.java`, an `application.properties` with health, metrics and OpenTelemetry, a non-root UBI9 `Containerfile`, `catalog-info.yaml` and `devfile.yaml`. Then the wiring that arrived with it:
+*On screen* — when step 2's run has succeeded, in Gitea open *Releases* → *New Release*, tag `v1.1.0` on `main`, *Publish Release*. Developer Hub *CI* shows `parasol-quote-{user}-release`; when it ends, *Topology* shows the prod pods change over.
+// UI-UNVERIFIED: Gitea New Release form; whether Gitea delivers the tag push to PaC for a UI-created release.
 
 [source,sh,role=execute,subs="attributes+"]
 ----
-curl -sk "{gitea_url}/{user}-svcs/parasol-demo-{user}/raw/branch/main/catalog-info.yaml" | grep -E 'kind:|owner:'
+oc get rollout parasol-quote-{user} -n {user}-prod
 ----
 
 *What just happened*
 
-Nobody hand-wrote any of that. The ownership and System that make the service findable came from the same scaffold as the code, so the service is on the organization's map from the moment it exists — and the engineer owns it from that moment too.
+A tag became two Git commits, stage then prod, and Argo Rollouts moved half the pods, ran its analysis and promoted the release.
 
 == Frequently asked questions
 
-*How does the portal know who I am?*::
-It uses the same Keycloak single sign-on as the cluster, so the session you already have signs you in with one click and no second password. Every scaffold is recorded under the identity of the person who ran it, and the people and teams in the catalog are imported from the same directory. What this workshop leaves off is a permission policy, so isolation comes from each person scaffolding into their own Git organization; a production portal adds role-based access on top of the same sign-in.
+*Where does the pipeline live, and who can change it?*::
+In the service's GitOps repository, `ci/pipeline-build.yaml`, applied by Argo CD. The team can change it with a commit; the platform team improves it for new services by changing the template, and many organizations move it into a shared, versioned pipeline instead so one change reaches every service.
 
-*The template did not create a pipeline or a GitOps application — where is the rest?*::
-This golden path scaffolds three things: the service skeleton with probes, metrics, tracing, a trusted image and a build recipe; the published repository; and the catalog registration. A pipeline and GitOps delivery are the paved road's next layer — exactly the kind of thing a platform team adds to the template so every future service inherits it. The pattern is the point: standards encoded once, applied on every click.
+*What happens if a test fails or the image has a critical vulnerability?*::
+The run stops at that task, nothing is committed to the GitOps repository, and the environments keep running the last image that passed.
 
-*Can two teams scaffold the same service name?*::
-Not into the same place. A Git server refuses a second repository with a name it already holds, so the publish step fails with a `409 Conflict` that names the exact conflict rather than half-completing the scaffold; and a catalog keyed by name needs distinct entries, which is why the name here carries the username. In a real deployment the naming convention lives in the template, so the collision is prevented at the form rather than discovered at the push.
+*Why is the image not checked again at deploy time?*::
+It is checked twice before Git ever names it: by Conforma in the build pipeline and again by the release pipeline before stage. A cluster admission policy can add a third check at deploy time; this workshop applies one to the trusted supply chain module's image only.
 
-*The scaffold took seconds — how long until that service is actually running?*::
-The first in-cluster build of a new service pulls the Java builder image and runs a full Maven build, about eight to nine minutes; a later build can land on any worker node, so it is not reliably faster. That part is ordinary work the platform already does the same way for every service. Scaffolding is the part that used to take a week.
+*Does the developer need to know Tekton or Argo CD?*::
+No. They push code and tag releases; the template and the platform's wiring do the rest, and Developer Hub shows what happened.
 endif::demo[]
 
 // ============================================================================
-// WORKSHOP FLAVOR — hands-on exercise groups
-// Each exercise opens the same way (the solution map appears once, at the top of the lab): a one-line story beat, and
-// "You'll end with" plus a picture of the result. Steps come next; the why follows as a short
-// *What just happened* and, where it runs long, a collapsible block.
+// WORKSHOP FLAVOR: hands-on exercise groups
 // ============================================================================
 ifndef::demo[]
 
-== 1. Tour the software catalog
-⏱ *~7 min* · learn what Parasol runs, and who owns it
+== 1. Create the project from the golden path
+⏱ *~8 min* · one form creates two repositories, four Argo CD applications and a catalog entry
 
-Day one on Parasol's claims team: before you build anything, find out what the org already runs and who owns it.
+The quote service starts the way every Parasol service should: from the platform team's template, not from a copy of the last service someone built.
 
-*You'll end with:* the `parasol-claims` entry read two ways, in the portal and from the catalog API: its owner, its System and the API it provides.
+*You'll end with:* `{user}-svcs/parasol-quote-{user}` (the code) and `{user}-svcs/parasol-quote-{user}-gitops` (how it is built and where it runs), the service in the software catalog, and its pipelines and environments created by GitOps.
 
-image::developer-hub-golden-paths/developer-hub-golden-paths-02-component-and-api.png["The parasol-claims Component page in Developer Hub: Owner parasol, Lifecycle production, System parasol-insurance, and tabs for Overview, API, Dependencies and Docs. The About panel carries the description, View Source and View TechDocs links, and the java, quarkus, rest and postgresql tags. The top bar shows the signed-in attendee, User1 Demo."]
-
-Open the {rhdh_url}[Developer Hub portal^] and click *Sign In*: single sign-on lands you as `{user}`, no password (and next time, no click).
-
-// U8-F-08 (tester report, 2026-08-03): first-run orientation was missing, so the attendee landed in
-// an unfamiliar portal with no map, and the stock onboarding card read as "the platform is not set
-// up" in the first five seconds of a module about a platform that IS set up. The sidebar contents
-// are the ones grounded on the live portal 2026-07-26 (see the note above exercise 2); the card's
-// four items are as observed on the shared portal 2026-08-03.
-You land on *Home*. Get your bearings before you click:
-
-* *The left sidebar is the whole map:* *Home*, *My Group*, *Catalog*, *APIs*, *Learning Paths*, *Docs*, and *Administration* at the bottom.
-No *Create* item: templates sit behind a button on *Catalog*.
-* *Ignore the "Let's get you started with Developer Hub" card:* its items (*Set up authentication*, *Configure RBAC*, *Configure Git*, *Manage plugins*) all read *Not started*.
-
-.The "Not started" onboarding card is not about you
-[%collapsible]
-====
-That card is Developer Hub's stock checklist for whoever *installs* a portal — an administrator task, not a developer one, and not part of this workshop.
-
-It says *Not started* because nobody used it.
-This portal is configured *declaratively*: its Git integration, its catalog locations and its golden-path template all come from a GitOps-managed `app-config` that Argo CD applies at install time, so the click-through wizard never learned the work was done.
-Everything the card asks for is already in place — the next few minutes are the proof.
-
-That includes *authentication*: you signed in through the same Keycloak single sign-on as the console, and the catalog's *User* entries are imported from it.
-What is deliberately left off is a permission policy (see the shared-portal warning above).
-
-The same card reappears on the *Self-service* page in exercise 2 — same card, same answer.
-====
-
-Click *Catalog*. It opens on *Components*, the things Parasol builds and runs: `parasol-claims`, `parasol-web`, `parasol-notifications`.
-Your list is longer than this fresh-portal screenshot: it also holds your neighbours' `parasol-policy-userN` services.
-
-.The catalog filtered to Components: every Parasol service on one screen, with the team that owns it
-image::developer-hub-golden-paths/developer-hub-golden-paths-01-catalog-components.png["The Developer Hub page titled My Org Catalog, with the Kind filter set to Component and the table headed \"All Components (3)\". Columns are Name, System, Owner, Type, Lifecycle and Description. The three rows are parasol-claims, parasol-notifications and parasol-web; all three share the System parasol-insurance, the Owner parasol, and the Lifecycle production, while Type differs — service, service, and website. Notice that ownership and system membership are properties of the catalog entry rather than tribal knowledge, so \"who do I ask about this service\" is answered by the list itself. The blue Self-service button sits above the table on the right — that is the way in to the templates used in the next exercise."]
-
-Click *parasol-claims*. Without opening a YAML file, read its *Owner* (the `parasol` group), *System* (`parasol-insurance`), *Provides API* (`parasol-claims-api`) and *Tags* (`java`, `quarkus`, `rest`, `postgresql`).
-
-Click *parasol-claims-api* (or the *API* tab): its *OpenAPI* definition, the contract other services consume, renders in the portal.
-
-The catalog is also an *API*.
-*Predict, then run:* nobody typed this entry into the portal. Where will the catalog say it came from?
-
-[source,sh,role=execute,subs="attributes+"]
-----
-TOKEN=$(curl -sk {rhdh_url}/api/auth/guest/refresh | python3 -c 'import sys,json;print(json.load(sys.stdin)["backstageIdentity"]["token"])')
-curl -sk -H "Authorization: Bearer $TOKEN" \
-  "{rhdh_url}/api/catalog/entities/by-name/component/default/parasol-claims" \
-  | python3 -c 'import sys,json
-d=json.load(sys.stdin); s=d["spec"]; a=d["metadata"]["annotations"]
-print("kind:      ", d["kind"])
-print("owner:     ", s["owner"])
-print("system:    ", s["system"])
-print("providesApi:", ",".join(s.get("providesApis",[])))
-print("source:    ", a.get("backstage.io/managed-by-location"))'
-----
-
-.Expected output
-[%collapsible]
-====
-[source,texinfo]
-----
-kind:       Component
-owner:      parasol
-system:     parasol-insurance
-providesApi: parasol-claims-api
-source:     url:http://gitea.ogsr-gitea.svc:3000/parasol/parasol-claims/raw/branch/main/catalog-info.yaml
-----
-====
-
-*What just happened:* the API returned the page's facts, and `source:` names a `catalog-info.yaml` in the `parasol-claims` repo.
-The entry is generated from a file that lives *with the code*, reviewed in pull requests, not kept by hand elsewhere.
-
-[mermaid]
-....
-include::example$diagrams/developer-hub-golden-paths/06-catalog-from-code.mmd[]
-....
-
-.Where the token comes from, and why the `source:` link will not open
-[%collapsible]
-====
-The token comes from the portal's built-in `guest` identity, which scripts use for API calls; the sign-in page no longer offers it, and reading the catalog does not depend on who asks.
-
-The `source:` URL points at Gitea's *in-cluster service address* (`gitea.ogsr-gitea.svc:3000`), which the portal uses to read catalog files — it is *not* a link your browser can open.
-When you want to view a repository in your browser, use the Gitea *route* instead: {gitea_url}[Gitea^].
-This is a known rough edge of the workshop portal's internal wiring; note it and move on.
-====
-
-Last, open the *System* `parasol-insurance` (the About card, or *Catalog → Kind: System*): every Component and API *part of* it, on one screen.
-
-[.checkpoint]
-****
-✔ *Verify:* portal and terminal agree on `parasol-claims`: owner `parasol` group, System `parasol-insurance`, API `parasol-claims-api`, sourced from a `catalog-info.yaml` in the service's repo.
-****
-
-== 2. Scaffold a service from the golden path
-⏱ *~10 min* · turn a short form into a complete, registered Parasol service
-
-The claims team needs a new policy-lookup service.
-Start it the way a new engineer should: from the golden path, not by copying an existing repo.
-
-*You'll end with:* `{user}-svcs/parasol-policy-{user}` published in Gitea and registered in the catalog as part of `parasol-insurance`.
-
-[mermaid]
-....
-include::example$diagrams/developer-hub-golden-paths/02-golden-path-flow.mmd[]
-....
-
-// CORRECTED 2026-07-26 against the live portal: there is NO "Create" item in the left sidebar.
-// The sidebar is Home · Catalog · APIs · Learning Paths · Docs (with Administration pinned at the
-// bottom). The templates page is titled *Self-service* and is reached from the blue Self-service
-// button on the Catalog page — the /create URL still resolves to it, which is why the old
-// instruction looked right to anyone who typed the path instead of clicking.
-Open *Catalog* and click the blue *Self-service* button (top right).
-On the recommended *New Parasol microservice* template (a Quarkus, Java 21 service, everything pre-wired), click *Choose*.
-
-image::developer-hub-golden-paths/developer-hub-golden-paths-03-create-templates.png["The Developer Hub Self-service page: the \"New Parasol microservice\" template card tagged recommended, quarkus, java and parasol, describing a paved-road Quarkus service with health probes, Prometheus metrics, OpenTelemetry, a UBI9 Containerfile and a Dev Spaces devfile, with a Choose button. The top bar shows the signed-in attendee, User1 Demo."]
-
-Fill in the form, click *Review* (the only button; there is no *Next*), then *Create*:
-
+// UI-UNVERIFIED: the "Parasol service, build to production" card on the Self-service page, its form
+// (step title "Provide service details", fields Name / Your team's Gitea organization / Owner, buttons
+// Review then Create) and the five step names on the task page. Labels are the template's own
+// (apps/parasol-golden-path/template.yaml); the page chrome (Catalog -> Self-service, Choose, Review,
+// Create) is as captured for the previous template on 2026-11-12. Run through the scaffolder API as
+// user25 on 2026-11-16: all five steps completed in 10 s; the four Argo CD applications were
+// Synced/Healthy, and the Repository and both Pipelines existed in user25-cicd, 27 s after the run started.
+. In {rhdh_url}[Developer Hub^], open *Catalog* and click *Self-service* (top right).
+. On the *Parasol service, build to production* template, click *Choose*.
+. Fill in the form, click *Review*, then *Create*:
++
 [cols="1,3",options="header"]
 |===
 | Field | Value
 
-| Name | `parasol-policy-{user}`
-| Your Gitea organization | `{user}-svcs`
+| Name | `parasol-quote-{user}`
+| Your team's Gitea organization | `{user}-svcs`
 | Owner | `parasol` _(the default)_
 |===
++
+The name ends in your username because everyone in the room shares one catalog, and a catalog entry needs a unique name.
 
-.Why your username is in the service name
-[%collapsible]
-====
-`parasol-policy-{user}` is a believable new service for the claims team (a policy lookup).
-The `-{user}` on the end is not a workaround — it is the platform lesson: every service in the software catalog needs a *unique identity*, so yours carries your username.
-In a real organization each team names its own services (`parasol-billing`, `parasol-quote`, …) and uniqueness comes for free; in this workshop everyone scaffolds the *same* example service against *one shared* Developer Hub portal, so the username is what keeps your catalog entry from colliding with your neighbour's.
-The *Your Gitea organization* is your *own* scaffold org, `{user}-svcs` — this is where the new repo will be published, isolated from everyone else's.
-====
+. Watch the five steps finish, each with its own log:
+.. *Generate the service*: the code, its Containerfile, its devfile, its catalog entry and its two `.tekton/` pipeline triggers.
+.. *Generate its GitOps and CI configuration*: the pipelines and the dev, stage and prod configuration.
+.. *Publish the GitOps repository* and *Publish the service repository*: two new repositories in `{user}-svcs`.
+.. *Register in the software catalog*.
 
-// The two screenshots below (and the 409 one further down) were captured as user1 and stay
-// byte-faithful — the values are baked into the PNGs. Pointer only: the identity fact is stated
-// once in the intro NOTE "Names inside the screenshots and captured output are a sample attendee's".
-The screenshots below carry ``user1``'s names: read the *shape*.
-
-// Captured 2026-11-12 signed in as user1 through Keycloak SSO, filled but NOT submitted for this
-// shot — see tools/media/capture_rhdh_sso.py. The values are user1's, matching the two task pages
-// embedded below, so the form-then-run-then-collide sequence reads as one story.
-.The whole golden path is three fields: what to call it, where to publish it, and who owns it
-image::developer-hub-golden-paths/developer-hub-golden-paths-04-template-form.png["The Developer Hub Self-service page, step 1 \"Provide service details\" of the New Parasol microservice template. Three required fields are filled: Name is parasol-policy-user1, Your Gitea organization is user1-svcs, and Owner is parasol. Under each field is its helper text, and the only button forward is Review. Notice how little the developer is asked for — every other decision (Java version, health probes, metrics, Containerfile, devfile) is already made by the template."]
-
-Watch the task run three steps, each with a live log:
-
-. *Fetch skeleton and substitute values*: the paved-road skeleton, with your name.
-. *Publish to Gitea*: a new repository in `{user}-svcs`, initial commit pushed.
-. *Register in the software catalog*: the service, next to `parasol-claims`.
-
-// Captured 2026-11-12 from the real task page at /create/tasks/<taskId>, signed in as user1
-// through Keycloak SSO. The task IDs are per-cluster — enumerate them with the guest token
-// against /api/scaffolder/v2/tasks rather than hardcoding one (see tools/media/jobs-anon-surfaces.yaml).
-.The task page: three steps, three green checks, and a repository that now exists
-image::developer-hub-golden-paths/developer-hub-golden-paths-05-scaffold-steps.png["The Developer Hub scaffolder task page, headed \"Run of New Parasol microservice\" with its task ID. A green bar tops the step panel and all three steps carry green check icons: Fetch skeleton and substitute values (0 seconds), Publish to Gitea (1 second), Register in the software catalog (1 second). Below are two output links, \"Open the new repository\" and \"Open in the software catalog\", then a Scaffolded panel confirming the service was published to the user1-svcs Gitea org and registered in the catalog. The streaming log at the foot shows the git init, commit and push, and the catalog registration. Notice the elapsed times — the entire paved road took about two seconds."]
-
-Of the two links it ends with, *Open in the software catalog* works.
-*Open the new repository* resolves to Gitea's in-cluster address, like the `source:` link in exercise 1, so use {gitea_url}/{user}-svcs/parasol-policy-{user}[{user}-svcs/parasol-policy-{user}^] instead.
-
-Confirm both halves from the terminal. The repository is in *your* org:
+Confirm from the terminal that both repositories exist:
 
 [source,sh,role=execute,subs="attributes+"]
 ----
 curl -sk "{gitea_url}/api/v1/orgs/{user}-svcs/repos" \
   | python3 -c 'import sys,json
-for r in json.load(sys.stdin):
-    print("repo:", r["full_name"], "|", r["description"])'
+for r in json.load(sys.stdin): print(r["full_name"])'
 ----
 
 .Expected output
 [source,texinfo,subs="attributes+"]
 ----
-repo: {user}-svcs/parasol-policy-{user} | parasol-policy-{user} — scaffolded from parasol-service-template
+{user}-svcs/parasol-quote-{user}-gitops
+{user}-svcs/parasol-quote-{user}
 ----
 
-The catalog registered it, already *part of the parasol-insurance System*:
+Nobody asked you for a pipeline, a webhook or an Argo CD application, yet within a minute they exist.
+The platform team's *ApplicationSet* watches your organization; it found the new `-gitops` repository and created one Argo CD application per folder.
+One of them, `ci`, put your service's pipelines and its Pipelines-as-Code registration into `{user}-cicd`:
 
-[source,sh,role=execute,subs="attributes+"]
+[source,sh,role=execute]
 ----
-TOKEN=$(curl -sk {rhdh_url}/api/auth/guest/refresh | python3 -c 'import sys,json;print(json.load(sys.stdin)["backstageIdentity"]["token"])')
-curl -sk -H "Authorization: Bearer $TOKEN" \
-  "{rhdh_url}/api/catalog/entities/by-name/component/default/parasol-policy-{user}" \
-  | python3 -c 'import sys,json;d=json.load(sys.stdin);s=d["spec"];print("registered:", d["metadata"]["name"], "| owner:", s["owner"], "| system:", s["system"], "| lifecycle:", s["lifecycle"])'
+oc get repository,pipeline -n $CICD
 ----
 
-.Expected output
+.Expected output (run it again after a few seconds if it reports no resources)
 [source,texinfo,subs="attributes+"]
 ----
-registered: parasol-policy-{user} | owner: parasol | system: parasol-insurance | lifecycle: experimental
+NAME                                                         URL
+repository.pipelinesascode.tekton.dev/parasol-quote-{user}   https://gitea-.../{user}-svcs/parasol-quote-{user}
+NAME                                               AGE
+pipeline.tekton.dev/parasol-quote-{user}-build     40s
+pipeline.tekton.dev/parasol-quote-{user}-release   40s
 ----
 
-*What just happened:* three form fields produced a real repository and a registered, owned Component that did not exist two minutes ago.
-In the portal's *Catalog* it now sits beside `parasol-claims`.
-
-=== Break and fix: run the template again with the same name
-The golden path publishes to a *real* Git server, which will not hold two repositories with the same name.
-
-*Predict, then run:* in *Self-service → New Parasol microservice*, *Create* again with the *same* name `parasol-policy-{user}` and org `{user}-svcs`.
-Which of the three steps fails?
-
-It fails at *Publish*. Open the failed step's log:
-
-[source,texinfo,subs="attributes+"]
-----
-Publish to Gitea
-  Error: Unable to create repository, 409 Conflict,
-  {"message":"repository already exists [owner: {user}-svcs, repo: parasol-policy-{user}]"}
-----
-
-// Captured 2026-11-12, same user1 session as the green run above. The 409 renders TWICE on this
-// page — once in a red banner above the steps, once in the step log — which is why the capture job
-// waits on the banner text rather than on "Run completed with status: failed" (that string exists
-// only in the task's API event stream, never in the rendered page).
-.The same template, the same name, a second time: fetch succeeds, publish refuses
-image::developer-hub-golden-paths/developer-hub-golden-paths-06-scaffold-409.png["The Developer Hub scaffolder task page for the repeated run. A red error banner across the top reads \"Error: Unable to create repository, 409 Conflict\" with the message \"repository already exists [owner: user1-svcs, repo: parasol-policy-user1]\" The step panel is topped in red: Fetch skeleton and substitute values has a green check, Publish to Gitea carries a red error icon, and Register in the software catalog is greyed out and never ran. A Start Over button sits beside Cancel and Hide Logs, and the step log repeats the same 409 with the scaffolder stack trace beneath it. Notice that the failure is specific and readable — it names the exact conflict rather than half-completing the scaffold."]
-
-*What just happened:* the skeleton *fetched* fine, but *publishing* into an existing repository is refused: no silent overwrite of your service.
-
-*The fix*, as in real life: a *unique* name (`parasol-quote-{user}`, `parasol-billing-{user}`, …), or delete the old repo first if you truly meant to replace it.
-(`ws prep developer-hub-golden-paths` empties your `{user}-svcs` org and deregisters its catalog entry, so a fresh run starts empty.)
-
-[.checkpoint]
-****
-✔ *Verify:* Gitea and the catalog API both show `{user}-svcs/parasol-policy-{user}`, registered as a Component (`owner: parasol`, `system: parasol-insurance`); the same-name re-run failed at *Publish* with `409 … already exists`.
-****
-
-== 3. Inspect the paved road — and start its build
-⏱ *~7 min* · see everything the template pre-wired, while the cluster builds it
-
-Before the claims team builds on it, check what the template really gave you: a *standards-compliant* service, not just a folder.
-
-*You'll end with:* a clone of your scaffold, its image building on the cluster, and a map of which file carries which standard.
-
-[mermaid]
-....
-include::example$diagrams/developer-hub-golden-paths/07-binary-build.mmd[]
-....
-
-Clone your scaffolded repo:
-
-[source,sh,role=execute,subs="attributes+"]
-----
-DEV={user}-dev; SVC=parasol-policy-{user}
-cd ${HOME:-/tmp}
-rm -rf "${SVC:?}"   # a re-run leaves a stale clone behind; the scaffold in Gitea is the source of truth
-git clone {gitea_url}/{user}-svcs/$SVC
-cd $SVC
-find . -type f -not -path './.git/*' | sort
-----
-
-.Expected output
-[%collapsible]
-====
-[source,texinfo]
-----
-./.dockerignore
-./.gitignore
-./.mvn/wrapper/maven-wrapper.properties
-./Containerfile
-./README.md
-./catalog-info.yaml
-./devfile.yaml
-./mvnw
-./mvnw.cmd
-./openshift/buildconfig.yaml
-./pom.xml
-./src/main/java/com/parasol/service/InfoResource.java
-./src/main/resources/application.properties
-./src/test/java/com/parasol/service/InfoResourceTest.java
-----
-====
-
-The repo ships its own *build recipe* (a UBI9 `Containerfile` plus `openshift/buildconfig.yaml`).
-The build takes *4 to 9 minutes*: start it now and read on while it runs:
+And the three environments exist, with nothing running yet:
 
 [source,sh,role=execute]
 ----
-oc apply -f openshift/buildconfig.yaml -n $DEV
-oc start-build $SVC --from-dir=. -n $DEV
-----
-
-.Expected output
-[%collapsible]
-====
-[source,texinfo,subs="attributes+"]
-----
-imagestream.image.openshift.io/parasol-policy-{user} created
-buildconfig.build.openshift.io/parasol-policy-{user} created
-Uploading directory "." as binary input for the build ...
-Uploading finished
-build.build.openshift.io/parasol-policy-{user}-2 started
-----
-====
-
-*What just happened:* the cluster is turning your clone into an image, with no Dockerfile or pipeline authoring from you; exercise 4 collects it.
-
-.Why 4 to 9 minutes, and why build `-2`?
-[%collapsible]
-====
-The build runs *on the cluster*: it pulls the UBI9 Java 21 builder image and runs a full Maven build, so its length depends on whether the node already has that image.
-It may well finish before you finish reading; the next exercise picks it up either way and waits out whatever is left.
-
-The build is numbered `-2` rather than `-1`: applying the `BuildConfig` registers its trigger, which claims build number 1, so your first manual build is 2 — cosmetic, and the next exercise finds it by label regardless.
-====
-
-Now walk the paved road. Each file is a decision the platform team made *once*, and you inherited.
-
-*The runtime is current and pinned:* *Quarkus {quarkus_version}* on *Java 21*, the LTS the whole Parasol portfolio runs, so services move in lockstep.
-
-[source,sh,role=execute]
-----
-grep -E '<maven.compiler.release>|<quarkus.platform.version>' pom.xml
-----
-
-.Expected output
-[source,texinfo]
-----
-    <maven.compiler.release>21</maven.compiler.release>
-    <quarkus.platform.version>3.33.3.1</quarkus.platform.version>
-----
-
-*Observability is on by default:* `pom.xml` and `application.properties` wire health, metrics and tracing.
-
-[source,sh,role=execute]
-----
-grep -E 'smallrye-health|micrometer-registry-prometheus|quarkus-opentelemetry' pom.xml
-----
-
-.Expected output
-[source,texinfo]
-----
-      <artifactId>quarkus-smallrye-health</artifactId>
-      <artifactId>quarkus-micrometer-registry-prometheus</artifactId>
-      <artifactId>quarkus-opentelemetry</artifactId>
-----
-
-So every scaffolded service gets `/q/health/live`, `/q/health/ready` and `/q/metrics` for free.
-
-*The image is trusted and non-root.*
-*Predict, then run:* the `Containerfile` needs `root` to compile. Will the image that ships run as `root`?
-
-[source,sh,role=execute]
-----
-grep -E 'FROM |USER ' Containerfile
-----
-
-.Expected output
-[source,texinfo]
-----
-FROM registry.access.redhat.com/ubi9/openjdk-21:1.24 AS build
-USER root
-FROM registry.access.redhat.com/ubi9/openjdk-21-runtime:1.24
-USER 185
-----
-
-*What just happened:* no. In this UBI9 *multi-stage* build on Red Hat's `openjdk-21` images, `USER root` belongs to the *build* stage, which is thrown away.
-Only the *runtime* stage ships, as the numeric non-root user `185`: the trusted-base, non-root discipline from the build modules.
-
-*The rest of the road:*
-
-[cols="1,2",options="header"]
-|===
-| File | What it gives you
-
-| `catalog-info.yaml` | The entry that put the service in the catalog you saw in exercise 2
-| `devfile.yaml` | An "Open in Dev Spaces" workspace, Java 21 pinned
-| `openshift/buildconfig.yaml` | The declarative in-cluster build recipe you just applied
-|===
-
-The only real code is `InfoResource.java`, a starter endpoint you are meant to replace:
-
-[source,sh,role=execute]
-----
-cat src/main/java/com/parasol/service/InfoResource.java | grep -A2 'public Map'
-----
-
-.Expected output
-[source,texinfo]
-----
-    public Map<String, String> info() {
-        return Map.of("service", appName, "status", "ready");
-    }
-----
-
-That is the paved road: a correct starting line, with the business logic left to you.
-
-[.checkpoint]
-****
-✔ *Verify:* in your clone you can point to each standard, none of which you wrote: Java 21 + Quarkus {quarkus_version} (`pom.xml`), health/metrics/tracing (`pom.xml` + `application.properties`), the UBI9 non-root image (`Containerfile`), and the catalog registration (`catalog-info.yaml`).
-****
-
-== 4. Deploy your scaffolded service into {user}-dev
-⏱ *~6 min* · collect the build and run the new service
-
-The claims team wants the new service running, not just sitting in Git.
-
-*You'll end with:* `parasol-policy-{user}` running in `{user}-dev` on its own HTTPS Route, with its info, readiness and metrics endpoints answering.
-
-[mermaid]
-....
-include::example$diagrams/developer-hub-golden-paths/05-what-you-built.mmd[]
-....
-
-Collect the build from exercise 3: this loop polls until it reports `Complete`.
-Measured: *8–9 minutes* on a cold node, *3m57s* on one that already holds the UBI9 Java 21 builder image (2026-08-02). Either is normal.
-
-[source,sh,role=execute,subs="attributes+"]
-----
-DEV={user}-dev; SVC=parasol-policy-{user}
-for i in $(seq 1 90); do
-  B=$(oc get build -n $DEV -l buildconfig=$SVC --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null)
-  P=$(oc get build "$B" -n $DEV -o jsonpath='{.status.phase}' 2>/dev/null)
-  echo "  $(date +%T)  ${B:-build}: ${P:-Pending}"
-  case "$P" in
-    Complete) echo "  ✔ image built and pushed to the internal registry"; break;;
-    Failed|Error|Cancelled) echo "  ✖ build $P — see: oc logs build/$B -n $DEV"; break;;
-  esac
-  sleep 12
+for env in dev stage prod; do
+  echo "$U-$env: $(oc get deploy,rollout -n $U-$env -l backstage.io/kubernetes-id=$SVC -o jsonpath='{range .items[*]}{.kind}/{.metadata.name} replicas={.spec.replicas}{end}')"
 done
 ----
 
-.Expected output — the build converges (abbreviated)
-[%collapsible]
-====
+.Expected output
 [source,texinfo,subs="attributes+"]
 ----
-  15:59:05  parasol-policy-{user}-2: Running
-  ...
-  16:06:19  parasol-policy-{user}-2: Running
-  16:06:32  parasol-policy-{user}-2: Complete
-  ✔ image built and pushed to the internal registry
-----
-====
-
-Deploy the image and publish it over HTTPS:
-
-// `adm start` does NOT clear a leftover Deployment/Service/Route from a prior pass on this same
-// cluster (only `ws reset`/`ws prep` do). Unlike the git-source builds elsewhere in this workshop,
-// `oc new-app ${SVC}:latest` here reuses the ImageStream the build in exercise 3 already created —
-// it mints no new BuildConfig or build history — so clearing the Deployment/Service/Route first is
-// safe, even on a first run (no-op if absent):
-[source,sh,role=execute]
-----
-oc delete deployment,service,route ${SVC} -n $DEV --ignore-not-found=true
-oc new-app ${SVC}:latest -n $DEV
-oc create route edge ${SVC} --service=${SVC} -n $DEV --port=8080 --insecure-policy=Allow
-oc rollout status deploy/${SVC} -n $DEV --timeout=120s
+{user}-dev: Deployment/parasol-quote-{user} replicas=0
+{user}-stage: Deployment/parasol-quote-{user} replicas=0
+{user}-prod:
 ----
 
-.Expected output
+*What just happened:* the template wrote files, and the platform turned them into a working delivery path in under a minute.
+Zero replicas in dev and stage, and nothing at all in prod yet, is deliberate: no environment runs anything until an image has passed the pipeline's gates.
+
+.What is in each repository, and which module taught it
 [%collapsible]
 ====
-[source,texinfo,subs="attributes+"]
-----
-warning: Cannot check if git requires authentication.
---> Found image ... in image stream "{user}-dev/parasol-policy-{user}" under tag "latest" for "parasol-policy-{user}:latest"
-    Java Applications
-    ...
---> Creating resources ...
-    deployment.apps "parasol-policy-{user}" created
-    service "parasol-policy-{user}" created
---> Success
-    Application is not exposed. You can expose services to the outside world by executing one or more of the commands below:
-     'oc expose service/parasol-policy-{user}'
-    Run 'oc status' to view your app.
-route.route.openshift.io/parasol-policy-{user} created
-deployment "parasol-policy-{user}" successfully rolled out
-----
+[cols="2,2,3",options="header"]
+|===
+| Practice | Learned in | Where it lives now
+
+| Pipelines-as-Code: a push or a tag starts a run
+| Pipelines Fundamentals & Task Libraries
+| `parasol-quote-{user}/.tekton/push.yaml` and `release.yaml`
+
+| Build pipeline with test and image-scan gates
+| Application Security Testing
+| `-gitops/ci/pipeline-build.yaml`: `unit-tests`, `scan` (Red Hat Advanced Cluster Security)
+
+| SBOM, keyless signature, Conforma, deploy by digest
+| Trusted Software Supply Chain
+| `-gitops/ci/pipeline-build.yaml`: `sbom`, `verify-conforma`; Tekton Chains signs with no pipeline step
+
+| One Git commit per promotion, same digest everywhere
+| GitOps Fundamentals
+| `-gitops/overlays/{dev,stage,prod}/release.yaml`, written by the pipelines
+
+| Canary release with an automated analysis
+| GitOps at Scale & Progressive Delivery
+| `-gitops/overlays/prod/rollout.yaml` and `analysis-template.yaml`
+
+| A ready-made workspace
+| Dev Spaces & the Inner Loop
+| `parasol-quote-{user}/devfile.yaml`
+
+| Catalog entry that lights up CI, CD and Topology
+| this module
+| `parasol-quote-{user}/catalog-info.yaml`
+|===
 ====
-
-*What just happened:* `oc new-app` made a `Deployment` and `Service` from the image tag; `oc create route edge` published it over HTTPS.
-
-[mermaid]
-....
-include::example$diagrams/developer-hub-golden-paths/08-deploy-and-probe.mmd[]
-....
-
-.Two lines in that output look like problems, and are not
-[%collapsible]
-====
-`warning: Cannot check if git requires authentication` is `oc new-app` noting it did not probe the
-source repository — it is building from an image stream here, so there is nothing to probe.
-`Application is not exposed` is `oc new-app` reporting on the moment it finished, and the *very next
-line* creates the Route that exposes it. Read the block as a whole before reacting to either.
-====
-
-Now prove the service is live and its observability real, not just wired.
-*Predict, then run:* you never added a health endpoint or a metrics library. What will readiness and metrics return?
-
-[source,sh,role=execute]
-----
-ROUTE=$(oc get route $SVC -n $DEV -o jsonpath='{.spec.host}')
-curl -sf --retry 30 --retry-all-errors --retry-delay 2 "http://$ROUTE/api/info" | jq -Sc .
-curl -s -o /dev/null -w "readiness /q/health/ready : %{http_code}\n" "http://$ROUTE/q/health/ready"
-curl -s -o /dev/null -w "metrics   /q/metrics      : %{http_code}\n" "http://$ROUTE/q/metrics"
-----
-
-// This capture stays byte-faithful and gets an annotation instead of {user} templating: the JSON
-// payload carries `{` braces, and subs="attributes" on a brace-bearing block invites Asciidoctor to
-// resolve them. The service name in the checkpoint below is templated, where it renders as prose.
-// Pointer only — see the intro NOTE for why this page shows more than one sample identity.
-The captured output below is ``user1``'s: read the *shape*.
-
-.Expected output
-[source,texinfo]
-----
-{"service":"parasol-policy-user1","status":"ready"}
-readiness /q/health/ready : 200
-metrics   /q/metrics      : 200
-----
-
-.A `503` for a few seconds right after creating the route is normal
-[%collapsible]
-====
-Immediately after you create the Route, it needs a moment to program and the pod a moment to finish starting.
-If `/api/info` returns `503` on the first try, wait a few seconds and retry — it becomes `200` once the pod is ready.
-====
-
-*What just happened:* both return `200`.
-You never wrote a Dockerfile, chose a base image, or set up health, metrics or tracing: from a form, the golden path carried every one of those decisions to a running service.
 
 [.checkpoint]
 ****
-✔ *Verify:* `parasol-policy-{user}` built from its paved-road `Containerfile` (`build … Complete`), runs in `{user}-dev`, and answers on its Route: `/api/info` returns `{"status":"ready","service":"parasol-policy-{user}"}`, and `/q/health/ready` and `/q/metrics` both return `200`.
+✔ *Verify:* `{user}-svcs` holds both repositories, and `oc get repository -n {user}-cicd` lists `parasol-quote-{user}`.
+****
+
+== 2. See your service in Developer Hub
+⏱ *~5 min* · one page for code, pipelines, deployments and what is running
+
+*You'll end with:* the `parasol-quote-{user}` component page open, its *CI*, *CD* and *Topology* tabs in view.
+
+// UI-UNVERIFIED: the component page tabs (Overview, CI, CD, Topology, Kubernetes) and their contents.
+// The tabs come from the plugin mount points enabled in platform-portfolio/components/rhdh
+// (entity.page.ci = Tekton, entity.page.cd = Argo CD, entity.page.topology = Topology); the API-level
+// proof (the Kubernetes backend returning the Deployments, Rollout and PipelineRuns for this component,
+// the Argo CD backend returning its four applications) is in the module's instructor provenance.
+. In Developer Hub, open *Catalog*, then *parasol-quote-{user}*.
+. *CD*: four Argo CD applications, `parasol-quote-{user}-ci`, `-dev`, `-stage` and `-prod`, each *Synced* and *Healthy*.
+. *CI*: no pipeline runs yet. The first push will start one.
+. *Topology*: the service's dev and stage Deployments, with no pods yet. Prod appears with the first release.
+
+Every tab reads the same thing: labels and annotations the template wrote.
+`catalog-info.yaml` says which objects belong to the service, and Developer Hub finds them in the cluster and in Argo CD:
+
+[source,sh,role=execute,subs="attributes+"]
+----
+curl -sk "{gitea_url}/{user}-svcs/parasol-quote-{user}/raw/branch/main/catalog-info.yaml" | grep -A3 'annotations:'
+----
+
+.Expected output
+[source,texinfo,subs="attributes+"]
+----
+  annotations:
+    backstage.io/kubernetes-id: parasol-quote-{user}
+    tekton.dev/cicd: "true"
+    argocd/app-selector: backstage-name=parasol-quote-{user}
+----
+
+[.checkpoint]
+****
+✔ *Verify:* the component page shows four applications under *CD*.
+****
+
+== 3. Change the code in Dev Spaces
+⏱ *~15 min* · edit, push, and watch the build pipeline take the change to dev
+
+*You'll end with:* your change running in `{user}-dev`, built, tested, scanned, signed and verified on the way.
+
+=== Open the workspace
+
+// UI-UNVERIFIED: Dev Spaces dashboard list and the "Open" link for the parasol-quote workspace.
+// The workspace is the DevWorkspace parasol-quote in {user}-devspaces, declared by ws prep (same
+// mechanism as the Dev Spaces module; Dev Spaces cannot open a Gitea repo from a factory URL).
+// Started on 2026-11-16 for user25: Running in 2 min 13 s (first start on the node pulls the UDI image),
+// /projects/parasol-quote-user25 cloned from the Gitea route, java -version 21.0.12.
+. Open the {devspaces_url}[Dev Spaces dashboard^] and click *Open* beside the *parasol-quote* workspace.
+. Wait for the editor to open with `parasol-quote-{user}` loaded (about two minutes the first time, while the node pulls the developer image).
+If asked whether you trust the authors, click *Continue*: it is your own repository.
+
+=== Make a change
+
+. Open `src/main/java/com/parasol/service/InfoResource.java`.
+. Replace the `info()` method's return line with:
++
+[source,java]
+----
+        return Map.of("service", appName, "status", "ready", "quote", "golden-path");
+----
+. Open a terminal (*Terminal → New Terminal*) and push:
++
+[source,sh,subs="attributes+"]
+----
+git config --global user.email "{user}@parasol.example.com"
+git config --global user.name "{user}"
+git config --global credential.helper store
+git add -A
+git commit -m "Add a quote field to /api/info"
+git push origin main
+----
++
+// UI-UNVERIFIED: the che-code credential input box on first push. Same workspace image and editor as the
+// Dev Spaces module, where it is captured; the 2026-11-16 proof pushed from inside the workspace pod with
+// user25's golden-pac-secret token instead of typing a password.
+IMPORTANT: The first push asks for your Git username and password in an input box at the *top of the editor*, not in the terminal. Enter `{user}` and the workshop password.
+
+=== Watch the pipeline
+
+The push started the build pipeline. In Developer Hub, open the *CI* tab: a run of `parasol-quote-{user}-build` is in progress.
+// UI-UNVERIFIED: CI tab run list and its task graph.
+
+Follow it from the terminal:
+
+[source,sh,role=execute]
+----
+tkn pipelinerun list -n $CICD --limit 3
+----
+
+.Expected output (while it runs)
+[source,texinfo,subs="attributes+"]
+----
+NAME                              STARTED         DURATION   STATUS
+parasol-quote-{user}-push-x8776   5 seconds ago   ---        Running
+----
+
+Each task is one practice, in order:
+
+[cols="1,3",options="header"]
+|===
+| Task | What it guarantees
+
+| `fetch-source`
+| The exact commit you pushed.
+
+| `unit-tests`
+| The tests pass. A failing test stops the run here.
+
+| `build-image`
+| The image is built once and pushed, tagged with the commit.
+
+| `scan`
+| Red Hat Advanced Cluster Security finds no policy violation in the image.
+
+| `sbom`
+| A software bill of materials is recorded for the image (ConfigMap `parasol-quote-{user}-sbom`).
+
+| `verify-conforma`
+| Tekton Chains has signed the image and its provenance, keyless, and Conforma verifies both before anything ships.
+
+| `deploy-dev`
+| The verified digest is committed to the GitOps repository; Argo CD deploys it to `{user}-dev`.
+|===
+
+When the run ends (about 2.5 minutes), read its last task:
+
+[source,sh,role=execute]
+----
+tkn pipelinerun logs -n $CICD --last -t deploy-dev
+----
+
+.Expected output
+[source,texinfo,subs="attributes+"]
+----
+[deploy-dev : commit] dev now runs image-registry.openshift-image-registry.svc:5000/{user}-cicd/parasol-quote-{user}:09e6ff0b…@sha256:41d74ee33d94…
+[deploy-dev : commit] gitops commit: 1492333
+----
+
+The pipeline never touched `{user}-dev`.
+It wrote one file in Git; Argo CD did the deploy:
+
+[source,sh,role=execute]
+----
+curl -sk "https://$(oc get route $SVC -n $U-dev -o jsonpath='{.spec.host}')/api/info"; echo
+----
+
+.Expected output
+[source,texinfo,subs="attributes+"]
+----
+{"status":"ready","quote":"golden-path","service":"parasol-quote-{user}"}
+----
+
+The keys may print in any order.
+
+*What just happened:* a `git push` was the only thing you did.
+Every gate the earlier modules built by hand ran on it, in a pipeline you never wrote, and the change reached dev only after all of them passed.
+
+[.checkpoint]
+****
+✔ *Verify:* the `parasol-quote-{user}-build` run is *Succeeded* and `/api/info` in `{user}-dev` shows `"quote":"golden-path"`.
+****
+
+== 4. Release to stage and prod
+⏱ *~8 min* · a tag promotes the image you already tested, it does not build a new one
+
+*You'll end with:* release `v1.0.0` running in `{user}-stage` and `{user}-prod`, the same digest as dev.
+
+In the Dev Spaces terminal, tag the commit you pushed and push the tag:
+
+[source,sh]
+----
+git tag v1.0.0
+git push origin v1.0.0
+----
+
+The tag started the release pipeline, `parasol-quote-{user}-release`.
+It finds the image the build pipeline made from the tagged commit, checks it with Conforma again, then promotes it: stage first, and prod only once stage runs it.
+
+[source,sh,role=execute]
+----
+until tkn pipelinerun list -n $CICD -o name | grep -q release; do sleep 2; done
+tkn pipelinerun logs -n $CICD -f $(tkn pipelinerun list -n $CICD -o name | grep -m1 release | cut -d/ -f2)
+----
+
+.Expected output (abridged; it takes about 40 seconds)
+[source,texinfo,subs="attributes+"]
+----
+[resolve-image : resolve] release v1.0.0 is image-registry.openshift-image-registry.svc:5000/{user}-cicd/parasol-quote-{user}@sha256:41d74ee33d94…
+[verify-conforma : conforma] CONFORMA POLICY SATISFIED: image-registry…/parasol-quote-{user}@sha256:41d74ee33d94…
+[promote : to-stage] stage: release v1.0.0 committed (599e651)
+[promote : wait-for-stage] waiting for Argo CD to roll v1.0.0 out in {user}-stage...
+[promote : wait-for-stage] deployment "parasol-quote-{user}" successfully rolled out
+[promote : wait-for-stage] stage runs v1.0.0 and is ready
+[promote : to-prod] prod: release v1.0.0 committed (c604890); Argo Rollouts takes it from here
+----
+
+Compare what runs where:
+
+[source,sh,role=execute]
+----
+for env in dev stage prod; do
+  echo "$env: $(oc get deploy,rollout -n $U-$env -l backstage.io/kubernetes-id=$SVC -o jsonpath='{.items[0].spec.template.spec.containers[0].image}' | sed 's/.*@sha256:\(.\{12\}\).*/sha256:\1…/')"
+done
+----
+
+.Expected output (your digest differs, but it is the same on all three lines)
+[source,texinfo]
+----
+dev: sha256:41d74ee33d94…
+stage: sha256:41d74ee33d94…
+prod: sha256:41d74ee33d94…
+----
+
+In Developer Hub, *CD* shows `-stage` and `-prod` on the new revision, and *Topology* shows pods in all three environments.
+// UI-UNVERIFIED: CD and Topology after the release.
+
+*What just happened:* nothing was rebuilt.
+The release moved one signed, verified digest from dev to stage to prod, by two Git commits, which is exactly what an auditor wants to read in the GitOps repository's history.
+
+[.checkpoint]
+****
+✔ *Verify:* `ws verify developer-hub-golden-paths` passes its end-state checks: a build Succeeded, prod runs a released digest, and stage runs the same one.
+****
+
+== 5. Release again: a canary in production
+⏱ *~12 min* · the second release meets a stable version, so prod runs it as a canary
+
+The first release had nothing to compare against, so Argo Rollouts put it straight into production.
+A second release meets the stable one: half the pods move to it, an automated analysis checks them, and only then does it take over.
+
+. In Dev Spaces, change the `quote` value in `InfoResource.java` to `"golden-path-2"`, then commit and push:
++
+[source,sh]
+----
+git commit -am "Second quote release"
+git push origin main
+----
+
+=== Break and fix: tag before the build is done
+
+. *Right away*, without waiting for the build, tag the new commit and push the tag:
++
+[source,sh]
+----
+git tag v1.1.0
+git push origin v1.1.0
+----
+
+*Predict:* the release pipeline promotes the image built from the tagged commit. That build is still running. What does the release find?
+
+Give the release run about ten seconds to start and fail, then read it:
+
+[source,sh,role=execute]
+----
+tkn pipelinerun logs -n $CICD $(tkn pipelinerun list -n $CICD -o name | grep -m1 release | cut -d/ -f2) -t resolve-image
+----
+
+.Expected output (your commit differs)
+[source,texinfo,subs="attributes+"]
+----
+task resolve-image has failed: "step-resolve" exited with code 1: Error
+[resolve-image : resolve] No image was built from commit 689d91cdc990d76744cdf02dcf98af92552624ba.
+[resolve-image : resolve] Only a commit that passed the build pipeline can be released. Wait until its
+[resolve-image : resolve] parasol-quote-{user}-build run Succeeded, then tag it with the next version.
+...
+Tasks Completed: 1 (Failed: 1, Cancelled 0), Skipped: 2
+----
+
+The release refused, and stage and prod still run `v1.0.0`: only a commit that passed every gate of the build pipeline can be released, however it is tagged.
+
+*Fix:* wait until the new `parasol-quote-{user}-build` run reads `Succeeded`:
+
+[source,sh,role=execute]
+----
+tkn pipelinerun list -n $CICD --limit 3
+----
+
+Then release the same commit under the next version (a tag that names a release that never happened is best left alone):
+
+[source,sh]
+----
+git tag v1.1.1
+git push origin v1.1.1
+----
+
+=== Watch the canary
+
+The release pipeline promotes `v1.1.1` to stage and, once stage runs it, commits it to prod.
+Argo Rollouts then moves one of the two prod pods to it, pauses, runs the analysis, and promotes it.
+Follow it for a minute:
+
+[source,sh,role=execute]
+----
+for i in $(seq 1 24); do
+  oc get rollout $SVC -n $U-prod -o jsonpath='{.status.phase} · step {.status.currentStepIndex} of 4 · {.status.message}{"\n"}'
+  sleep 5
+done
+----
+
+.Expected output (abridged; prod stays `Healthy` on `v1.0.0` for about 40 seconds while the release promotes stage, then the canary starts)
+[source,texinfo]
+----
+Healthy · step 4 of 4 ·
+Progressing · step 0 of 4 · more replicas need to be updated
+Paused · step 1 of 4 · CanaryPauseStep
+Progressing · step 2 of 4 · more replicas need to be updated
+Progressing · step 3 of 4 · old replicas are pending termination
+Healthy · step 4 of 4 ·
+----
+
+If it reads `Healthy` throughout, the release has not reached prod yet: run the block again.
+
+The step that decided it was the analysis, which ran as a Job against the canary pods:
+
+[source,sh,role=execute]
+----
+oc get analysisrun -n $U-prod
+curl -sk "https://$(oc get route $SVC -n $U-prod -o jsonpath='{.spec.host}')/api/info"; echo
+----
+
+.Expected output (the newest AnalysisRun is the canary's)
+[source,texinfo,subs="attributes+"]
+----
+NAME                                 STATUS       AGE
+parasol-quote-{user}-8549764f6-2-2   Successful   56s
+{"service":"parasol-quote-{user}","quote":"golden-path-2","status":"ready"}
+----
+
+In Developer Hub, *Topology* shows the prod pods change version, and *CD* shows `-prod` on the new revision.
+// UI-UNVERIFIED: Topology during and after the canary.
+
+*What just happened:* production got a safer release than most teams would write by hand on their first day, and you did not have to know how.
+Every practice in this workshop can live in a template like this one, and keeping that template right, for every team at once, is the platform engineering team's job.
+
+[.checkpoint]
+****
+✔ *Verify:* `{user}-prod` answers `"golden-path-2"`, and its newest AnalysisRun is `Successful`.
 ****
 
 == Challenge (optional)
 ⏱ *no hand-holding*
 
-You scaffolded, inspected, and ran a golden-path service.
-Try these on your own:
+* *Make the template yours.* Open `{user}-svcs/parasol-quote-{user}-gitops/ci/pipeline-build.yaml` and add a gate (for example, fail the run when the SBOM lists more than 200 components). Commit it: Argo CD applies the new pipeline, and your next push runs it. Then ask: which file would the platform team change to give *every* service this gate?
+* *Fail a canary on purpose.* Change `/q/health/ready` in `overlays/prod/analysis-template.yaml` to a path that answers 404, release again, and watch Argo Rollouts abort and roll back.
+* *Create a second service* from the same template under another name, and count how many files you wrote to get it to production.
 
-* *Wire the platform probe to the app's health endpoint.*
-`oc new-app` did not add a Kubernetes readiness probe — but the app already serves one.
-Connect them: `oc set probe deploy/$SVC --readiness --get-url=http://:8080/q/health/ready --initial-delay-seconds=10 -n $DEV`, then confirm the pod is gated on real readiness (`oc get pod -n $DEV -l deployment=$SVC`).
-Then *break it* — point the probe at `/q/health/WRONG`, watch the pod go `NotReady`, read the event, and fix it.
-* *Make your first change on the paved road.*
-Edit `InfoResource.java` to add a field to the JSON (say `"team": "claims"`), commit, and rebuild with another `oc start-build $SVC --from-dir=. -n $DEV` — the image redeploys and `/api/info` shows your change.
-* *Open the service in Dev Spaces.*
-The scaffold shipped a `devfile.yaml`. From your Dev Spaces module knowledge, open the repo in a Java 21 workspace and run `./mvnw quarkus:dev` (a separate module covers Dev Spaces in depth).
-* *Scaffold a second service under a new name.*
-Run the template again with a *unique* name and watch it register beside the first — reason about what the platform team would change in *one* place to give every future service a new standard (hint: the template's skeleton).
-
-When you are done, run `ws verify {module-id}` to confirm your scaffold outcome, or `ws prep {module-id} --yes` to empty your `{user}-svcs` org, deregister its catalog entry, and purge `{user}-dev` for a clean start.
+When you are done, run `ws verify {module-id}` to check your work, or `ws prep {module-id} --yes` for a clean start.
 
 .Clean up when you are done
 [%collapsible]
 ====
-`ws prep {module-id} --yes` returns everything to a clean entry state: it empties your `{user}-svcs` scaffold org and deregisters its catalog entry (so the template can publish and register fresh), and purges `{user}-dev` (removing the service you built and ran).
-Your seeded Parasol forks in your personal Git namespace are never touched.
+`ws prep {module-id} --yes` empties your `{user}-svcs` organization, deregisters the service from the catalog, and purges `{user}-cicd`, `{user}-dev`, `{user}-stage`, `{user}-prod` and your workspace.
+Your other Git repositories are not touched.
 ====
 
 endif::demo[]

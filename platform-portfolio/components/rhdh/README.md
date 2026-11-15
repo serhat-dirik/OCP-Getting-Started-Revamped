@@ -11,7 +11,8 @@ browsed and run by every attendee.
 | `namespace.yaml` | `rhdh` — the Backstage CR, config, bundled PostgreSQL, and route live here |
 | `app-config.yaml` | `app-config-rhdh` ConfigMap — guest auth (default), redirect sign-in flow, the Gitea integration, and the Parasol catalog locations, appended to the operator's base app-config |
 | `dynamic-plugins.yaml` | `dynamic-plugins-rhdh` ConfigMap — the default plugin set **plus** the Gitea scaffolder module (external dynamic plugin) and the bundled Keycloak catalog module (inert until configured) |
-| `backstage.yaml` | the `developer-hub` Backstage CR (`rhdh.redhat.com/v1alpha4`), wiring the two ConfigMaps + the `rhdh-gitea` secret + the optional `rhdh-auth` secret + the route |
+| `backstage.yaml` | the `developer-hub` Backstage CR (`rhdh.redhat.com/v1alpha4`), wiring the two ConfigMaps + the `rhdh-gitea` secret + the optional `rhdh-auth` and `rhdh-plugin-config` secrets + the route; runs the pod as `developer-hub-reader` with its token mounted and the cluster CA added to Node's store |
+| `kubernetes-reader.yaml` | ServiceAccount `developer-hub-reader` + a read-only ClusterRole (pods, workloads, routes, PipelineRuns/TaskRuns, Rollouts) for the Kubernetes plugin |
 
 The RHDH **operator** is a separate component (`components/rhdh-operator`), installed at wave 0 of the
 portal stack; this component (wave 1) is the instance.
@@ -66,6 +67,26 @@ plugin (integrity-pinned) — **v0.2.19**, version-matched to the image (`@backs
 clean, `publish:gitea` runs. Note: the module publishes into a Gitea **organization** (it rejects a user
 namespace) — the M15 entry state gives each attendee a `<user>-svcs` org; and its `repoContentsUrl`
 output omits the branch, so the golden-path template registers with an explicit `catalogInfoUrl`.
+
+## Component views: Kubernetes, Topology, Tekton, Argo CD
+
+`dynamic-plugins.yaml` enables the plugins behind a component's *Kubernetes*, *Topology*, *CI* and *CD*
+tabs. Kubernetes and Topology are bundled in the image; Tekton is inherited (`{{inherit}}`) from the image's
+default catalog; the Argo CD frontend and backend (community, Red Hat-supported builds) are pinned OCI
+artifacts. A component opts in with annotations: `backstage.io/kubernetes-id` (objects labelled with it, in
+any namespace), `tekton.dev/cicd: "true"`, `argocd/app-selector`.
+
+* **Kubernetes backend** (`kubernetes:` in `app-config.yaml`): the local cluster at
+  `https://kubernetes.default.svc`, `authProvider: serviceAccount` *without* a token, so the backend uses the
+  pod's own projected ServiceAccount token (kubelet-rotated, never stored). The pod runs as
+  `developer-hub-reader` with automount on (the operator turns it off by default). The backend's requests
+  go through Node's own fetch, which ignores the CA it loads, so `NODE_EXTRA_CA_CERTS` points at the
+  ServiceAccount CA (without it: `self-signed certificate in certificate chain`, measured 2026-11-16).
+* **Argo CD backend**: no instance by default (`argocd.appLocatorMethods: []`). A consumer adds its instance
+  and a read-only account through the optional Secret `rhdh/rhdh-plugin-config`, key `APP_CONFIG_argocd`:
+  `{"username":"…","password":"…","appLocatorMethods":[{"type":"config","instances":[{"name":"…","url":"…"}]}]}`.
+  The workshop layer writes it for the attendees' Argo CD (`gitops/workshop-config/templates/devhub-argocd-access.yaml`).
+  Its API is served under `/api/backstage-community-argocd/`.
 
 ## Developer Lightspeed is ON by default
 
