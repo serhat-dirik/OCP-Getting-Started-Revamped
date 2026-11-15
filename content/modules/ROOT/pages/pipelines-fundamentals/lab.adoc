@@ -1383,11 +1383,13 @@ Try it on a new, deliberately small project.
 .Already have `pac-demo` from an earlier pass?
 [%collapsible]
 ====
-Keep it: `ws prep` and `ws reset` delete the `pac-demo` `Repository` and its runs from `{user}-cicd`, but they never touch Gitea.
+Keep it: `ws prep` and `ws reset` delete the `pac-demo` `Repository`, its Secret and its runs from `{user}-cicd`, but they never touch Gitea.
 Three things differ on a second pass:
 
 * Skip creating the repo.
-* Before the webhook step, delete the old webhook: `pac-demo` → *Settings* → *Webhooks*, open the `pipelines-as-code-controller` entry and *Delete Webhook*. It still signs with the previous pass's webhook secret, which no longer matches `gitea-pac-secret`.
+* Before you create the token, delete the old token and webhook, or Gitea refuses the token name `pac-demo` and every push is delivered twice:
+** the old `pac-demo` token: avatar → *Settings* → *Applications*, then *Delete* beside `pac-demo`;
+** the old webhook: `pac-demo` → *Settings* → *Webhooks*, open the `pipelines-as-code-controller` entry and *Delete Webhook*.
 * `.tekton/hello.yaml` already exists, so instead of adding it, edit it (any change) and commit.
 ====
 
@@ -1395,12 +1397,37 @@ Three things differ on a second pass:
 . Set *Repository Name* to `pac-demo`, check *Initialize Repository (Adds .gitignore, License and README)*, and click *Create Repository*.
 
 *Connect it to Pipelines-as-Code.*
-A `Repository` in `{user}-cicd` tells PaC to run the pipelines from `pac-demo` in this namespace.
-It reuses exercise 4's `gitea-pac-secret`:
+PaC needs two things from Gitea: a *token*, to read `.tekton/` from your repo and report each run's status back to the commit, and a *webhook secret*, so it trusts the push that arrives.
 
+// Owner hit this 2026-11-15 on user23: exercise 5 reused exercise 4's `gitea-pac-secret`, which
+// `ws prep` deletes, so skipping exercise 4 (or prepping after it) ended in NotFound then HTTP 401.
+// Exercise 5 now creates its own token and Secret and needs nothing from exercise 4.
+. In Gitea, click your avatar (top right) → *Settings* → *Applications*.
+. Under *Manage Access Tokens*, name a token `pac-demo` with scope *write:repository*.
+Click *Generate Token* and *copy the value* (Gitea shows it once).
+. Run this block; it ends at a silent prompt and waits.
+Paste the token and press *Enter*; nothing appears as you paste:
+// DO NOT merge this block with the one below it: an interactive `read` must be the LAST line of a
+// click-to-run block, or the lines after it are swallowed as the token (see exercise 4's note).
++
+[source,sh,role=execute]
+----
+read -rsp "paste your Gitea token, then press Enter: " GITEA_TOKEN; echo
+----
+
+. Run this block once.
+It stores the token and a new webhook secret in a Secret, creates a `Repository` in `{user}-cicd` that tells PaC to run the pipelines from `pac-demo` in this namespace, and creates the webhook through Gitea's API:
++
 [source,sh,role=execute,subs="attributes+"]
 ----
 NS={user}-cicd
+if [ -z "$GITEA_TOKEN" ]; then
+  echo "GITEA_TOKEN is empty (did your terminal reconnect?) — run the read block above again, then this one"
+else
+HOOK_SECRET="parasol-$(python3 -c 'import secrets; print(secrets.token_hex(6))')"
+oc delete secret pac-demo-secret -n $NS --ignore-not-found=true
+oc create secret generic pac-demo-secret -n $NS \
+  --from-literal=token="$GITEA_TOKEN" --from-literal=webhook-secret="$HOOK_SECRET"
 oc apply -n $NS -f - <<EOF
 apiVersion: pipelinesascode.tekton.dev/v1alpha1
 kind: Repository
@@ -1412,45 +1439,32 @@ spec:
     type: gitea
     url: {gitea_url}
     secret:
-      name: gitea-pac-secret
+      name: pac-demo-secret
       key: token
     webhook_secret:
-      name: gitea-pac-secret
+      name: pac-demo-secret
       key: webhook-secret
 EOF
-----
-
-.Expected output
-[source,texinfo]
-----
-repository.pipelinesascode.tekton.dev/pac-demo created
-----
-
-Now the webhook, created through Gitea's API rather than the form you filled in for exercise 4.
-The block reads the token and the webhook secret from `gitea-pac-secret`, so it works in a fresh terminal and prints neither:
-
-[source,sh,role=execute,subs="attributes+"]
-----
-NS={user}-cicd
-TOKEN=$(oc get secret gitea-pac-secret -n $NS -o jsonpath='{.data.token}' | base64 -d)
-HOOK_SECRET=$(oc get secret gitea-pac-secret -n $NS -o jsonpath='{.data.webhook-secret}' | base64 -d)
 curl -s -o /dev/null -w "webhook: HTTP %\{http_code}\n" -X POST \
-  -H "Authorization: token $TOKEN" -H "Content-Type: application/json" \
+  -H "Authorization: token $GITEA_TOKEN" -H "Content-Type: application/json" \
   {gitea_url}/api/v1/repos/{user}/pac-demo/hooks --data @- <<EOF
 {"type": "gitea", "active": true, "events": ["push"],
  "config": {"url": "https://pipelines-as-code-controller-openshift-pipelines.{cluster_domain}",
             "content_type": "json", "secret": "$HOOK_SECRET"}}
 EOF
+fi
 ----
-
++
 .Expected output
 [source,texinfo]
 ----
+secret/pac-demo-secret created
+repository.pipelinesascode.tekton.dev/pac-demo created
 webhook: HTTP 201
 ----
-
-`201` means Gitea created the webhook; run the block once only, because a second run adds a second webhook.
-A `NotFound` error followed by `HTTP 401` means `gitea-pac-secret` is missing: create it with exercise 4's Secret step, then run this block again.
++
+`201` means Gitea created the webhook. Run the block once only: a second run adds a second webhook, and every push then starts two runs.
+`HTTP 401` means Gitea rejected the token: check you copied all of it, run the read block again, then this one.
 
 *Write the pipeline in Git.*
 
