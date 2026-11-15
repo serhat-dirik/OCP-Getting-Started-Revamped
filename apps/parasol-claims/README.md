@@ -159,7 +159,7 @@ its compact, un-prettified format stay covered by `RootResourceSiteTest`.
 - A **CycloneDX SBOM** is emitted on every build.
 - Health, metrics, tracing and externalized configuration are **on by default**. They are
   curriculum for *Config, Secrets & Multi-Environment*, *Health, Resources & Autoscaling* and
-  *Observability: Metrics, Alerts, Dashboards & Traces*, not optional extras.
+  *Observability*, not optional extras.
 
 ## Logging — structured on request, and never a credential
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify observability-metrics-traces — Observability: Metrics, Alerts, Dashboards & Traces.
+# Verify observability-metrics-traces — Observability.
 #   Entry: {user}-dev has the INSTRUMENTED claims app (OTLP export ON → the shared collector) + an
 #          ephemeral claims-db + a load generator, plus a per-user ServiceMonitor; /q/metrics exposes
 #          the golden signals and the custom claims_created_total. The alert rule the lab builds

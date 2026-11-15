@@ -105,7 +105,7 @@ only blur that.
 
 The workshop's deliberate faults live elsewhere: a seeded vulnerable dependency on the
 `parasol-claims` `seed-vulnerable` branch (*Trusted Software Supply Chain*), an N+1 query
-endpoint on `parasol-claims` (*Observability: Metrics, Alerts, Dashboards & Traces*).
+endpoint on `parasol-claims` (*Observability*).
 
 ### That claim is now checkable — it did not used to be
 

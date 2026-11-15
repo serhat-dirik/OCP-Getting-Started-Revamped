@@ -1,6 +1,6 @@
 # stack: observability
 
-The platform prerequisite for **M08 — Observability: Metrics, Alerts, Dashboards & Traces**. Installs shared, cluster-wide
+The platform prerequisite for **M08 — Observability**. Installs shared, cluster-wide
 observability infrastructure as an Argo CD app-of-apps. Everything here is a **single shared install** —
 never per-user; per-user isolation is done with namespaced `ServiceMonitor`/`PrometheusRule` and RBAC
 (the M08 entry state's job, below).
