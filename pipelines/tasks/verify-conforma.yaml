@@ -1,0 +1,174 @@
+# verify-conforma — the Conforma gate of the curated Parasol task library (trusted-supply-chain).
+# Runs Red Hat's Conforma (`ec validate image`) against an image built in the same pipeline. Tekton
+# Chains signs every build keyless, as its SPIFFE identity, with a 10-minute Fulcio certificate and
+# a Rekor entry; this Task proves, before deploy:
+#   * the image signature verifies against that identity and Rekor (Conforma built-in check)
+#   * the SLSA provenance attestation verifies the same way (Conforma built-in check)
+#   * the provenance says the expected pipeline task built the image (policy below)
+#   * the image is referenced by digest, not a tag (policy below)
+# Any violation fails the Task, so the pipeline never reaches deploy.
+#
+# CONTRACT: the caller passes Chains' signer identity and OIDC issuer (spiffe://<apps domain>/ns/
+# openshift-pipelines/sa/tekton-chains-controller, https://oidc-discovery.<apps domain>). Rekor and
+# TUF default to the trust stack's in-cluster Trusted Artifact Signer Services. The ec and cosign
+# binaries come from Red Hat's Trusted Artifact Signer CLI server image (digest-pinned below).
+#
+# CANONICAL SOURCE. The identical Task is installed into the shared parasol-tasks library by the
+# workshop layer (gitops/workshop-config/templates/parasol-tasks.yaml) — kept in lockstep by
+# tools/lint/copy-drift-guard.py (pair "parasol-task-verify-conforma", lint workflow's copy-drift job).
+# The library copy is identical to this one except for an injected workshop.redhat.com/owner label.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: verify-conforma
+  namespace: ogsr-parasol-tasks
+  labels:
+    app.kubernetes.io/part-of: parasol
+    workshop.redhat.com/library: parasol-tasks
+spec:
+  description: >-
+    Conforma gate: `ec validate image` proves the image's signature and SLSA provenance were made by
+    Tekton Chains' keyless identity and recorded in Rekor, that the expected pipeline task built it,
+    and that it is referenced by digest. Fails the Task on any violation.
+  params:
+    - name: IMAGE
+      type: string
+      description: The image by digest (registry/namespace/name@sha256:...).
+    - name: CERTIFICATE_IDENTITY
+      type: string
+      description: The signer, Tekton Chains' SPIFFE ID (spiffe://<trust domain>/ns/openshift-pipelines/sa/tekton-chains-controller).
+    - name: CERTIFICATE_OIDC_ISSUER
+      type: string
+      description: The OIDC issuer Fulcio verified the signer against (https://oidc-discovery.<apps domain>).
+    - name: EXPECTED_PIPELINE
+      type: string
+      description: The pipeline the provenance must name.
+      default: parasol-claims-trusted-build
+    - name: EXPECTED_TASK
+      type: string
+      description: The pipeline task the provenance must name (the one that built the image).
+      default: build-image
+    - name: REKOR_URL
+      type: string
+      description: Rekor, the transparency log.
+      default: http://rekor-server.trusted-artifact-signer.svc
+    - name: TUF_URL
+      type: string
+      description: The TUF repository that publishes Fulcio's CA and Rekor's key.
+      default: http://tuf.trusted-artifact-signer.svc
+    - name: WAIT_SECONDS
+      type: string
+      description: How long to wait for Tekton Chains to sign and attest the image (it signs after the build task ends).
+      default: "180"
+  volumes:
+    - name: service-ca
+      configMap:
+        name: openshift-service-ca.crt
+    - name: home
+      emptyDir: {}
+  steps:
+    - name: conforma
+      # Red Hat Trusted Artifact Signer CLI server: ships the ec (Conforma) and cosign binaries.
+      image: registry.redhat.io/rhtas/client-server-rhel9@sha256:050f362dc6b245851e58348e82a057fac7a6efc31e274fe03f3420a440b8ef11
+      env:
+        - name: HOME
+          value: /tekton-home
+        # The internal registry's TLS certificate is signed by the service CA.
+        - name: SSL_CERT_FILE
+          value: /service-ca/service-ca.crt
+        - name: IMAGE
+          value: $(params.IMAGE)
+        - name: IDENTITY
+          value: $(params.CERTIFICATE_IDENTITY)
+        - name: ISSUER
+          value: $(params.CERTIFICATE_OIDC_ISSUER)
+        - name: EXPECTED_PIPELINE
+          value: $(params.EXPECTED_PIPELINE)
+        - name: EXPECTED_TASK
+          value: $(params.EXPECTED_TASK)
+        - name: REKOR_URL
+          value: $(params.REKOR_URL)
+        - name: TUF_URL
+          value: $(params.TUF_URL)
+        - name: WAIT_SECONDS
+          value: $(params.WAIT_SECONDS)
+      volumeMounts:
+        - name: service-ca
+          mountPath: /service-ca
+          readOnly: true
+        - name: home
+          mountPath: /tekton-home
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        case "$(uname -m)" in x86_64) ARCH=amd64 ;; aarch64) ARCH=arm64 ;; *) ARCH="$(uname -m)" ;; esac
+        mkdir -p "$HOME/bin" "$HOME/.docker" "$HOME/policy"
+        for t in ec cosign; do
+          gunzip -c "/var/www/html/clients/linux/${t}-${ARCH}.gz" > "$HOME/bin/$t"
+          chmod +x "$HOME/bin/$t"
+        done
+        export PATH="$HOME/bin:$PATH"
+
+        # Read the image as this pipeline's ServiceAccount (it may pull from its own namespace).
+        TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+        AUTH="$(printf 'pipeline:%s' "$TOKEN" | base64 -w0)"
+        printf '{"auths":{"image-registry.openshift-image-registry.svc:5000":{"auth":"%s"}}}' "$AUTH" > "$HOME/.docker/config.json"
+
+        # Trust THIS cluster's Trusted Artifact Signer: Fulcio's CA and Rekor's key, from its TUF repository.
+        cosign initialize --mirror "$TUF_URL" --root "$TUF_URL/root.json" >/dev/null
+        ec sigstore initialize --mirror "$TUF_URL" --root "$TUF_URL/root.json" >/dev/null
+        KEYLESS=(--certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" --rekor-url "$REKOR_URL")
+
+        echo "Waiting for Tekton Chains to sign and attest ${IMAGE} ..."
+        SIGNED=""
+        for _ in $(seq 1 $(( WAIT_SECONDS / 6 ))); do
+          if cosign verify-attestation "${KEYLESS[@]}" --type slsaprovenance "$IMAGE" >/dev/null 2>&1; then SIGNED=1; break; fi
+          sleep 6
+        done
+        [[ -n "$SIGNED" ]] || echo "No Chains attestation after ${WAIT_SECONDS}s; Conforma reports what is missing."
+
+        # The release policy: Conforma's built-in signature and attestation checks run first, then these rules.
+        cat > "$HOME/policy/parasol.rego" <<REGO
+        package parasol
+
+        import rego.v1
+
+        # METADATA
+        # title: Image is pinned by digest
+        # description: The image reference must be pinned by digest, not a tag.
+        # custom:
+        #   short_name: image_pinned_by_digest
+        #   failure_msg: Image reference is not pinned by digest
+        deny contains result if {
+          not contains(input.image.ref, "@sha256:")
+          result := {"code": "parasol.image_pinned_by_digest", "msg": "Image reference is not pinned by digest"}
+        }
+
+        # METADATA
+        # title: Built by the expected pipeline task
+        # description: A Tekton Chains SLSA provenance says task ${EXPECTED_TASK} of pipeline ${EXPECTED_PIPELINE} built this image.
+        # custom:
+        #   short_name: built_by_expected_task
+        #   failure_msg: No Tekton Chains provenance from the expected pipeline task
+        deny contains result if {
+          not built_by_expected_task
+          result := {"code": "parasol.built_by_expected_task", "msg": "No Tekton Chains provenance from task ${EXPECTED_TASK} of pipeline ${EXPECTED_PIPELINE}"}
+        }
+
+        built_by_expected_task if {
+          some att in input.attestations
+          att.statement.predicateType == "https://slsa.dev/provenance/v0.2"
+          p := att.statement.predicate
+          p.builder.id == "https://tekton.dev/chains/v2"
+          p.buildType == "tekton.dev/v1/TaskRun"
+          p.invocation.environment.labels["tekton.dev/pipeline"] == "${EXPECTED_PIPELINE}"
+          p.invocation.environment.labels["tekton.dev/pipelineTask"] == "${EXPECTED_TASK}"
+        }
+        REGO
+
+        echo "===== Conforma: ec validate image ====="
+        ec validate image --image "$IMAGE" "${KEYLESS[@]}" \
+          --policy "{\"sources\":[{\"name\":\"parasol\",\"policy\":[\"$HOME/policy\"]}]}" \
+          --output text --show-successes \
+          || { echo "CONFORMA POLICY VIOLATED: ${IMAGE} must not be deployed"; exit 1; }
+        echo "CONFORMA POLICY SATISFIED: ${IMAGE}"

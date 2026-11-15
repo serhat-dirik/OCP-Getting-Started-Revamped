@@ -216,12 +216,12 @@ except ImportError:  # pragma: no cover - exercised only on a machine without Py
     sys.exit(2)
 
 
-# The eight curated Tasks that the workshop layer republishes into the shared library namespace.
+# The nine curated Tasks that the workshop layer republishes into the shared library namespace.
 # One pair each: the standalone artifact the module and PipelineRuns reference, versus the body
 # embedded in the workshop-config chart. Drifted once already (fixed in 9549990).
 PARASOL_TASKS = (
     "acs-image-check", "image-size-report", "k6-load-test", "maven-jdk21",
-    "roxctl-deployment-check", "sonar-scan", "trivy-scan", "zap-baseline",
+    "roxctl-deployment-check", "sonar-scan", "trivy-scan", "verify-conforma", "zap-baseline",
 )
 
 # Every hand-maintained duplicate this repo is willing to gate. See the module docstring for the
@@ -334,7 +334,7 @@ for _task in PARASOL_TASKS:
 # shrink its own floor. Truncating the list the driver iterates (`PAIRS[:1]`) collapses the "pairs
 # compared" count below this; editing PAIRS itself trips the self-test, which asserts the two agree.
 # Adding a pair means bumping this number in the same change.
-MIN_PAIRS = 13
+MIN_PAIRS = 14
 
 # Structural comparison nodes across all pairs, measured 2026-08-01: 995. The floor is well under
 # that (Task bodies and pipelines grow and shrink) and far over what a fragment comparison yields.

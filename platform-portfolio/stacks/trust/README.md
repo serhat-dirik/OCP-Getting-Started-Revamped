@@ -20,7 +20,9 @@ shared install** — never per-user; the per-user wiring is the module's entry s
 | `rhacs-central` | — (uses the operator) | `Central` + init-bundle hook (sensor bundle + CI token) + `SecuredCluster` + delegated-scanning + "Block Log4Shell at build" `SecurityPolicy` | 1 |
 | `zero-trust-workload-identity-operator` | `openshift-zero-trust-workload-identity-manager` (`stable-v1` = v1.1.3) | AllNamespaces OperatorGroup. Operator only, so an adopting cluster skips it | 1 |
 | `workload-identity` | — (uses the operator) | PostSync hook: creates the SPIRE operands (trust domain = apps domain, issuer `https://oidc-discovery.<apps domain>`) unless the cluster already runs SPIRE, waits for OIDC discovery, then points Fulcio at it | 2 |
-| `rhtas` | `rhtas-operator` (`stable` = v1.5.1) | v1 `Securesign` (Fulcio/Rekor/CTlog/Trillian/TUF/TSA) + the Fulcio SPIFFE-issuer hook | 3 |
+| `rhtas` | `rhtas-operator` (`stable` = v1.5.1) | v1 `Securesign` (Fulcio/Rekor/CTlog/Trillian/TUF/TSA) + the Fulcio SPIFFE-issuer hook, which then makes Tekton Chains sign keyless | 3 |
+| `policy-controller-operator` | `policy-controller-operator` (`stable` = v1.1.2) | AllNamespaces OperatorGroup in `openshift-policy-controller`. Operator only, so an adopting cluster skips it | 4 |
+| `policy-controller` | — (uses the operator) | `PolicyController` webhook in `policy-controller-operator` (enforced on `policy.rhtas.com/include=true` namespaces, `no-match-policy: allow`) + PostSync hook → `TrustRoot trusted-artifact-signer` from this cluster's TUF root | 5 |
 
 App-waves order **creation** only: child Applications carry no health, so nothing here assumes a
 lower-wave app is ready. Each hook waits for exactly what it needs (the operands hook for the ZTWIM
@@ -34,19 +36,30 @@ finishes last completes it). The ZTWIM operator needs a connected cluster (its c
   built image; the shipped **"Block Log4Shell (CVE-2021-44228) at build"** `SecurityPolicy` (BUILD +
   `FAIL_BUILD_ENFORCEMENT`) fails the build on the seeded log4j-core. Deterministic (feed-independent
   of severity thresholds): a clean image lacks the CVE and passes.
-- **Signing (LAB):** `trust-signing` gives Tekton Chains a cosign key, so **every pipeline-built image
-  is signed + gets in-toto SLSA provenance** with no per-run wiring. `cosign verify --key` (the public
-  key is exported as `chains-cosign-pub`) is the attendee's terminal beat. **This needs neither RHTAS
-  nor keyless OIDC.**
+- **Signing (LAB):** Tekton Chains signs **every pipeline-built image and its in-toto SLSA provenance
+  keyless**, with no per-run wiring: the rhtas hook gives the Chains controller the SPIFFE ID
+  `spiffe://<trust domain>/ns/openshift-pipelines/sa/tekton-chains-controller` (static SPIRE entries
+  `ogsr-spire-agents` + `ogsr-tekton-chains-controller`: SPIRE skips `openshift-*` namespaces) and points
+  TektonConfig `spec.chain` at Fulcio (`provider: spiffe`), Rekor and TUF through their in-cluster
+  Services. A 10-minute certificate per signature; Rekor's entry time keeps it verifiable afterwards.
+  Verify: `cosign initialize --mirror http://tuf.trusted-artifact-signer.svc --root
+  http://tuf.trusted-artifact-signer.svc/root.json`, then `cosign verify --certificate-identity <that ID>
+  --certificate-oidc-issuer https://oidc-discovery.<apps domain> <image@digest>`. `trust-signing`'s
+  cosign key stays in `signing-secrets` but Chains no longer uses it once Fulcio is on.
+- **Admission (LAB):** the `policy-controller` webhook refuses, in a labelled namespace, an image a
+  consumer's `policy.sigstore.dev` `ClusterImagePolicy` matches unless it satisfies it
+  (`trustRootRef: trusted-artifact-signer`). Every image in a labelled namespace must resolve to a
+  digest: the webhook resolves tags with the pod's pull secrets, so a tag it cannot read (e.g.
+  `registry.redhat.io/...:tag`, which only the node's global pull secret can pull) is refused with
+  "must be an image digest" — pin such images by digest.
 - **Block-unsigned (LAB, [OCP]):** the attendee applies a native namespaced `ImagePolicy`
   (`policyType: PublicKey`, the exported cosign public key) — no operator required.
 - **Keyless signing + Rekor transparency (LAB):** a workload's SPIFFE identity is the signer. ZTWIM
   runs SPIRE; Fulcio trusts SPIRE's OIDC issuer (`type: spiffe`, `clientID: sigstore`, scoped by
   `spiffeTrustDomain`), so a pod holding a JWT-SVID gets a short-lived certificate whose URI SAN is
-  its own ID — `spiffe://<apps domain>/ns/<namespace>/sa/<service account>`. Tekton Chains stays
-  key-based (its signer is exclusive: Fulcio OR a key), so the Chains key, `cosign verify --key` and
-  native admission above are unchanged. On a cluster that already runs SPIRE, Fulcio trusts THAT
-  issuer and trust domain instead; nothing of theirs is changed.
+  its own ID — `spiffe://<apps domain>/ns/<namespace>/sa/<service account>`. Tekton Chains is one such
+  workload (above). On a cluster that already runs SPIRE, Fulcio trusts THAT issuer and trust domain
+  instead; nothing of theirs is changed.
 
 ## The fragile install step (RHACS bootstrap)
 
@@ -95,14 +108,24 @@ oc get zerotrustworkloadidentitymanager,spireserver,spireagent,spiffecsidriver,s
 ISSUER=$(oc get spireoidcdiscoveryprovider cluster -o jsonpath='{.spec.jwtIssuer}')
 curl -s "$ISSUER/.well-known/openid-configuration"                      # issuer + jwks_uri on the same host
 oc get securesign securesign -n trusted-artifact-signer -o jsonpath='{.spec.fulcio.config.oidcIssuers}'   # type spiffe
+oc get tektonconfig config -o jsonpath='{.spec.chain}'                 # signers.x509.fulcio.* + transparency.*
+oc get clusterstaticentry ogsr-tekton-chains-controller                # Chains' SPIFFE ID
+oc get csv -n openshift-policy-controller                               # policy-controller Succeeded
+oc get cm config-policy-controller -n policy-controller-operator -o jsonpath='{.data}'   # no-match-policy allow
+oc get trustroot trusted-artifact-signer
 ```
 
 ## Uninstall
 
 Delete the stack Applications (`oc delete application pp-rhacs-operator pp-rhacs-central pp-rhtas
-pp-trust-signing pp-workload-identity pp-zero-trust-workload-identity-operator -n openshift-gitops`) —
+pp-trust-signing pp-workload-identity pp-zero-trust-workload-identity-operator pp-policy-controller
+pp-policy-controller-operator -n openshift-gitops`) —
 prune removes the components. The cosign key in `signing-secrets` is left in place (deleting it would
 unsign Chains); remove manually if desired.
+
+Hooks also create the `TrustRoot trusted-artifact-signer`, the `ClusterStaticEntry`s
+`ogsr-spire-agents` + `ogsr-tekton-chains-controller` (labelled `workshop.redhat.com/owner=ogsr`) and the
+TektonConfig `spec.chain` signer keys; no prune removes them.
 
 The SPIRE operands are created by a hook, so no prune removes them. Delete the ones carrying
 `workshop.redhat.com/owner=ogsr` BEFORE the operator Application, in this order (the product docs'):

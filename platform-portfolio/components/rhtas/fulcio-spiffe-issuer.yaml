@@ -7,6 +7,11 @@
 # SPIFFE ID, and spiffeTrustDomain keeps it to that one trust domain (an adopted SPIRE included).
 # Without workload identity the script changes nothing and Fulcio keeps the default issuer.
 #
+# THEN TEKTON CHAINS SIGNS KEYLESS (when OpenShift Pipelines is installed): static SPIRE entries give
+# the Chains controller spiffe://<trust domain>/ns/openshift-pipelines/sa/tekton-chains-controller,
+# and TektonConfig spec.chain points its x509 signer at Fulcio (provider spiffe), Rekor and TUF. The
+# controller's cosign key in signing-secrets (trust-signing) is no longer used once Fulcio is on.
+#
 # WHY A SCRIPT RUN BY TWO HOOKS. It needs both halves ready: the Securesign (this component) and the
 # issuer (the workload-identity component). Child Applications carry no health, so their app-waves
 # order creation, not readiness, and either half can finish first. This component's PostSync hook
@@ -72,16 +77,90 @@ data:
     fi
 
     echo "▶ waiting for Fulcio to serve that issuer…"
+    SERVED=""
     for i in $(seq 1 60); do
       CFG="$(curl -sf --max-time 10 "http://fulcio-server.${NS}.svc/api/v2/configuration" 2>/dev/null | tr -d ' \t\r\n' || true)"
       if [[ "$CFG" == *"\"issuerUrl\":\"${ISSUER}\""* && "$CFG" == *"\"issuerType\":\"spiffe\""* ]]; then
         echo "✅ Fulcio issues certificates to SPIFFE workloads of ${TD} (try ${i})"
+        SERVED=1
+        break
+      fi
+      sleep 10
+    done
+    if [[ -z "$SERVED" ]]; then
+      echo "❌ Fulcio did not serve the spiffe issuer within 10m"
+      echo "   look: oc get securesign securesign -n ${NS} -o jsonpath='{.status.conditions}'; oc logs deploy/fulcio-server -n ${NS}"
+      exit 1
+    fi
+
+    # TEKTON CHAINS SIGNS KEYLESS, as its own SPIFFE identity: the controller presents its JWT-SVID
+    # (audience sigstore) to Fulcio, signs every image and SLSA provenance with the 10-minute
+    # certificate it gets back, and records each signature in Rekor. In-cluster Service URLs, so no
+    # route or ingress CA is involved. Artifact storage and formats stay as they are. Argo does not
+    # revert this: pp-openshift-pipelines' TektonConfig manifest sets no spec.chain field.
+    TC=tektonconfigs.operator.tekton.dev/config
+    if ! oc get "$TC" >/dev/null 2>&1; then
+      echo "➖ no TektonConfig (OpenShift Pipelines absent) — Tekton Chains is not configured"
+      exit 0
+    fi
+    CLUSTER="$(oc get "zerotrustworkloadidentitymanagers.${G}" cluster -o jsonpath='{.spec.clusterName}')"
+    [[ -n "$CLUSTER" ]] || { echo "❌ ZeroTrustWorkloadIdentityManager/cluster has no spec.clusterName"; exit 1; }
+    SIGNER="spiffe://${TD}/ns/openshift-pipelines/sa/tekton-chains-controller"
+    # SPIRE's controller manager skips openshift-* namespaces, so the Chains controller gets a static
+    # entry, parented by an alias that covers every SPIRE agent of this cluster.
+    echo "▶ SPIRE entry ${SIGNER}"
+    oc apply -f - >/dev/null <<EOF
+    apiVersion: spire.spiffe.io/v1alpha1
+    kind: ClusterStaticEntry
+    metadata:
+      name: ogsr-spire-agents
+      labels: {workshop.redhat.com/owner: ogsr}
+    spec:
+      className: zero-trust-workload-identity-manager-spire
+      spiffeID: spiffe://${TD}/k8s-nodes/${CLUSTER}
+      parentID: spiffe://${TD}/spire/server
+      selectors: ["k8s_psat:cluster:${CLUSTER}"]
+    ---
+    apiVersion: spire.spiffe.io/v1alpha1
+    kind: ClusterStaticEntry
+    metadata:
+      name: ogsr-tekton-chains-controller
+      labels: {workshop.redhat.com/owner: ogsr}
+    spec:
+      className: zero-trust-workload-identity-manager-spire
+      spiffeID: ${SIGNER}
+      parentID: spiffe://${TD}/k8s-nodes/${CLUSTER}
+      selectors: ["k8s:ns:openshift-pipelines", "k8s:sa:tekton-chains-controller"]
+    EOF
+    echo "▶ Tekton Chains → Fulcio, Rekor and TUF of ${NS} (keyless)"
+    oc patch "$TC" --type merge -p "{\"spec\":{\"chain\":{
+      \"signers.x509.fulcio.enabled\": true,
+      \"signers.x509.fulcio.address\": \"http://fulcio-server.${NS}.svc\",
+      \"signers.x509.fulcio.issuer\": \"${ISSUER}\",
+      \"signers.x509.fulcio.provider\": \"spiffe\",
+      \"signers.x509.tuf.mirror.url\": \"http://tuf.${NS}.svc\",
+      \"transparency.enabled\": \"true\",
+      \"transparency.url\": \"http://rekor-server.${NS}.svc\",
+      \"options\": {\"deployments\": {\"tekton-chains-controller\": {\"spec\": {\"template\": {\"spec\": {
+        \"containers\": [{\"name\": \"tekton-chains-controller\",
+          \"env\": [{\"name\": \"SPIFFE_ENDPOINT_SOCKET\", \"value\": \"/spiffe-workload-api/spire-agent.sock\"}],
+          \"volumeMounts\": [{\"name\": \"spiffe-workload-api\", \"mountPath\": \"/spiffe-workload-api\", \"readOnly\": true}]}],
+        \"volumes\": [{\"name\": \"spiffe-workload-api\", \"csi\": {\"driver\": \"csi.spiffe.io\", \"readOnly\": true}}]}}}}}}}}}" >/dev/null
+    echo "▶ waiting for the Chains controller to run with the SPIFFE socket…"
+    for i in $(seq 1 60); do
+      DEP="deploy/tekton-chains-controller -n openshift-pipelines"
+      # shellcheck disable=SC2086 # DEP is two words on purpose
+      VOLS="$(oc get $DEP -o jsonpath='{.spec.template.spec.volumes[*].name}' 2>/dev/null || true)"
+      # shellcheck disable=SC2086
+      IFS=/ read -r GEN OBS REP UPD AV TOT <<<"$(oc get $DEP -o jsonpath='{.metadata.generation}/{.status.observedGeneration}/{.spec.replicas}/{.status.updatedReplicas}/{.status.availableReplicas}/{.status.replicas}' 2>/dev/null || true)"
+      if [[ "$VOLS" == *spiffe-workload-api* && -n "$GEN" && "$GEN" == "$OBS" && "$UPD" == "$REP" && "$AV" == "$REP" && "$TOT" == "$REP" ]]; then
+        echo "✅ Tekton Chains signs keyless as ${SIGNER} (issuer ${ISSUER}; try ${i})"
         exit 0
       fi
       sleep 10
     done
-    echo "❌ Fulcio did not serve the spiffe issuer within 10m"
-    echo "   look: oc get securesign securesign -n ${NS} -o jsonpath='{.status.conditions}'; oc logs deploy/fulcio-server -n ${NS}"
+    echo "❌ the Chains controller did not roll out with the SPIFFE socket within 10m"
+    echo "   look: oc get tektonconfig config -o jsonpath='{.status.conditions}'; oc describe deploy/tekton-chains-controller -n openshift-pipelines"
     exit 1
 ---
 # Identity of this component's issuer hook.
@@ -217,6 +296,57 @@ subjects:
   - kind: ServiceAccount
     name: fulcio-spiffe-issuer
     namespace: trusted-artifact-signer
+---
+# Tekton Chains keyless (end of the script): the Chains controller's static SPIRE entries, the
+# TektonConfig chain keys, and a read of the controller Deployment to wait for its rollout.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  annotations:
+    # Wave -1 = prerequisite: in place before the rest of the component, removed after it.
+    argocd.argoproj.io/sync-wave: "-1"
+  name: ogsr-chains-keyless
+  labels:
+    portfolio.redhat.com/component: rhtas
+rules:
+  - apiGroups: ["operator.tekton.dev"]
+    resources: ["tektonconfigs"]
+    resourceNames: ["config"]
+    verbs: ["get", "patch"]
+  # create cannot be narrowed by name; the script only applies the two ogsr-* entries.
+  - apiGroups: ["spire.spiffe.io"]
+    resources: ["clusterstaticentries"]
+    verbs: ["create"]
+  - apiGroups: ["spire.spiffe.io"]
+    resources: ["clusterstaticentries"]
+    resourceNames: ["ogsr-spire-agents", "ogsr-tekton-chains-controller"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["tekton-chains-controller"]
+    verbs: ["get"]
+---
+# Both hooks run the script, so both get the Chains rules.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  annotations:
+    # Wave -1 = prerequisite: in place before the rest of the component, removed after it.
+    argocd.argoproj.io/sync-wave: "-1"
+  name: ogsr-chains-keyless
+  labels:
+    portfolio.redhat.com/component: rhtas
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ogsr-chains-keyless
+subjects:
+  - kind: ServiceAccount
+    name: fulcio-spiffe-issuer
+    namespace: trusted-artifact-signer
+  - kind: ServiceAccount
+    name: workload-identity-operands
+    namespace: ogsr-workload-identity
 ---
 # This component's run of the script, after every pp-rhtas sync (idempotent: no patch when nothing changed).
 apiVersion: batch/v1

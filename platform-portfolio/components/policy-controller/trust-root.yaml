@@ -1,0 +1,121 @@
+# Identity of the TrustRoot hook.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  annotations:
+    # Wave -1 = prerequisite: in place before the rest of the component, removed after it.
+    argocd.argoproj.io/sync-wave: "-1"
+  name: trust-root
+  namespace: policy-controller-operator
+  labels:
+    portfolio.redhat.com/component: policy-controller
+---
+# Manage the one TrustRoot; read the CRD to wait for it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  annotations:
+    # Wave -1 = prerequisite: in place before the rest of the component, removed after it.
+    argocd.argoproj.io/sync-wave: "-1"
+  name: ogsr-policy-controller-trust-root
+  labels:
+    portfolio.redhat.com/component: policy-controller
+rules:
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    resourceNames: ["trustroots.policy.sigstore.dev", "securesigns.rhtas.redhat.com"]
+    verbs: ["get"]
+  # create cannot be narrowed by name; the hook only applies trusted-artifact-signer.
+  - apiGroups: ["policy.sigstore.dev"]
+    resources: ["trustroots"]
+    verbs: ["create"]
+  - apiGroups: ["policy.sigstore.dev"]
+    resources: ["trustroots"]
+    resourceNames: ["trusted-artifact-signer"]
+    verbs: ["get", "patch"]
+---
+# Binds the hook to the rules above.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  annotations:
+    # Wave -1 = prerequisite: in place before the rest of the component, removed after it.
+    argocd.argoproj.io/sync-wave: "-1"
+  name: ogsr-policy-controller-trust-root
+  labels:
+    portfolio.redhat.com/component: policy-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ogsr-policy-controller-trust-root
+subjects:
+  - kind: ServiceAccount
+    name: trust-root
+    namespace: policy-controller-operator
+---
+# TrustRoot trusted-artifact-signer = this cluster's RHTAS (Fulcio CA, Rekor and CT log keys) as its
+# TUF repository publishes them. The initial root.json is cluster data, so a hook renders it; the
+# webhook then follows the in-cluster TUF mirror. A ClusterImagePolicy names it in trustRootRef.
+# Re-runs on every sync; an unchanged root is a no-op.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trust-root
+  namespace: policy-controller-operator
+  labels:
+    portfolio.redhat.com/component: policy-controller
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 1500
+  template:
+    metadata:
+      labels:
+        app: trust-root
+    spec:
+      serviceAccountName: trust-root
+      restartPolicy: Never
+      containers:
+        - name: trust-root
+          # Digest-pinned; el8 `ose-cli:latest` was frozen on v4.15.0 with unapplied Critical errata.
+          image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              TUF=http://tuf.trusted-artifact-signer.svc
+              if ! oc get crd securesigns.rhtas.redhat.com >/dev/null 2>&1; then
+                echo "➖ no Trusted Artifact Signer on this cluster — no TrustRoot to publish"
+                exit 0
+              fi
+              ROOT=""
+              for i in $(seq 1 80); do
+                if oc get crd trustroots.policy.sigstore.dev >/dev/null 2>&1; then
+                  ROOT="$(curl -sf --max-time 10 "${TUF}/root.json" | base64 -w0 || true)"
+                  [[ -n "$ROOT" ]] && break
+                fi
+                echo "  waiting for the TrustRoot CRD and ${TUF}/root.json (${i}/80)"
+                sleep 15
+              done
+              [[ -n "$ROOT" ]] || { echo "❌ no TrustRoot CRD or TUF root after 20m"; echo "   look: oc get csv -n openshift-policy-controller; oc get securesign -n trusted-artifact-signer"; exit 1; }
+              oc apply -f - <<YAML
+              apiVersion: policy.sigstore.dev/v1alpha1
+              kind: TrustRoot
+              metadata:
+                name: trusted-artifact-signer
+                labels: {workshop.redhat.com/owner: ogsr, portfolio.redhat.com/component: policy-controller}
+              spec:
+                remote:
+                  mirror: ${TUF}
+                  targets: targets
+                  root: ${ROOT}
+              YAML
+              echo "✅ TrustRoot trusted-artifact-signer = this cluster's Trusted Artifact Signer (TUF ${TUF})"

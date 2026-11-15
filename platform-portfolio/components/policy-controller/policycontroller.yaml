@@ -1,0 +1,49 @@
+# The Sigstore admission webhook. Enforced only on namespaces labelled policy.rhtas.com/include=true;
+# there, an image some ClusterImagePolicy matches must satisfy it, and every other image is allowed
+# (no-match-policy: allow), so pipeline pods and tools in an enforced namespace keep running.
+# failurePolicy Fail: if the webhook cannot decide, the deploy is refused.
+apiVersion: rhtas.charts.redhat.com/v1alpha1
+kind: PolicyController
+metadata:
+  annotations:
+    # Wave 1 = operand, after its namespace; the operator (policy-controller-operator component)
+    # registers the CRD, hence SkipDryRunOnMissingResource on a first sync.
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+  name: policy-controller
+  namespace: policy-controller-operator
+  labels:
+    portfolio.redhat.com/component: policy-controller
+spec:
+  policy-controller:
+    cosign:
+      webhookName: policy.rhtas.com
+    webhook:
+      name: webhook
+      failurePolicy: Fail
+      configData:
+        no-match-policy: allow
+      # Trust the OpenShift service-serving CA so the webhook reads signatures from the internal
+      # registry (image-registry.openshift-image-registry.svc) over TLS.
+      env:   # a name -> value map in this chart, not a list
+        SSL_CERT_FILE: /var/run/service-ca/service-ca.crt
+      volumes:
+        - name: service-ca
+          configMap:
+            name: openshift-service-ca.crt
+      volumeMounts:
+        - name: service-ca
+          mountPath: /var/run/service-ca
+          readOnly: true
+      namespaceSelector:
+        matchExpressions:
+          - key: policy.rhtas.com/include
+            operator: In
+            values: ["true"]
+      extraArgs:
+        webhook-name: policy.rhtas.com
+        mutating-webhook-name: defaulting.clusterimagepolicy.rhtas.com
+        validating-webhook-name: validating.clusterimagepolicy.rhtas.com
+      webhookNames:
+        defaulting: defaulting.clusterimagepolicy.rhtas.com
+        validating: validating.clusterimagepolicy.rhtas.com

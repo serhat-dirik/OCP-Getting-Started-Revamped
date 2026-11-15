@@ -1,0 +1,47 @@
+{{- /*
+  trusted-supply-chain-admission — the trusted-supply-chain module's admission rule (Sigstore
+  policy-controller, the trust stack's policy-controller component).
+
+  In a namespace labelled policy.rhtas.com/include=true (the module's entry state labels the
+  attendee's {user}-cicd), an image from any attendee's parasol-claims-secure repository (the M12
+  pipeline's own) is admitted only
+  with a signature by Tekton Chains' keyless identity (a Fulcio certificate for
+  spiffe://<apps domain>/ns/openshift-pipelines/sa/tekton-chains-controller, issued against SPIRE's
+  OIDC issuer) and its Rekor entry. Rekor's entry time proves the signature was made while the
+  10-minute certificate was valid. Images no policy matches are allowed (no-match-policy: allow).
+
+  Globs: `*` is one path segment (any userN-cicd); `:**` any tag, `@**` any digest; the repository
+  name is matched exactly. M12-only on purpose: the label outlives the module, and other modules
+  deploy {user}-cicd/parasol-claims there, which this policy must never check. Nor does it cover
+  parasol-claims-trusted (the native ogsr-signed-parasol-claims policy's repository).
+
+  Rendered only once the ClusterImagePolicy API exists (Argo passes the cluster's API versions), so
+  a cluster without the trust stack never fails this app. The trust domain is the apps domain: the
+  portfolio's workload-identity hook sets it so on a cluster without SPIRE of its own.
+*/ -}}
+{{- if and (include "workshop-config.moduleEnabled" (dict "root" $ "slug" "trusted-supply-chain")) (.Capabilities.APIVersions.Has "policy.sigstore.dev/v1beta1") }}
+{{- $d := required "clusterDomain is required" .Values.clusterDomain }}
+# Only Tekton Chains-signed parasol-claims-secure images run in an enforced namespace.
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata:
+  name: ogsr-parasol-claims-keyless
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+spec:
+  images:
+    - glob: "image-registry.openshift-image-registry.svc:5000/*-cicd/parasol-claims-secure:**"
+    - glob: "image-registry.openshift-image-registry.svc:5000/*-cicd/parasol-claims-secure@**"
+  authorities:
+    - name: tekton-chains-keyless
+      keyless:
+        url: http://fulcio-server.trusted-artifact-signer.svc
+        trustRootRef: trusted-artifact-signer
+        identities:
+          - issuer: https://oidc-discovery.{{ $d }}
+            subject: spiffe://{{ $d }}/ns/openshift-pipelines/sa/tekton-chains-controller
+      ctlog:
+        url: http://rekor-server.trusted-artifact-signer.svc
+        trustRootRef: trusted-artifact-signer
+{{- end }}
