@@ -1,14 +1,17 @@
-# The claims service in {user}-dev with its logging LEFT ALONE — that absence is the entry state.
+# The claims service in {user}-dev with its logging configuration LEFT ALONE but for one setting.
+# What is deliberately here, and why:
+#   * Parasol's own code (the com.parasol category) at DEBUG, set by the platform rather than by the
+#     attendee. Exercise 3's correlation query finds seven records for one request id across three
+#     pods because the six reads each write a DEBUG "claim list served" record; at the image's INFO
+#     default the same query returns one line and the exercise has no punchline. Attendees never type
+#     a runtime-specific level variable: OpenShift has no runtime-neutral level switch, so the lab
+#     does not teach one (owner decision 2026-11-15).
 # What is deliberately NOT here, and why:
-#   * no ConfigMap named claims-logging. Exercise 3 creates it with `oc create configmap`, a
-#     CREATE-only verb at a fixed name, so a pre-existing one is a hard "already exists" collision
-#     rather than harmless residue. It is rendered ONLY under .Values.solve (solve-endstate.yaml).
 #   * QUARKUS_LOG_CONSOLE_JSON_ENABLED unset. Exercise 2's whole discovery is switching structured
 #     output on with one setting; shipping it on spends the lesson before the attendee arrives.
-#   * no QUARKUS_LOG_LEVEL and no QUARKUS_HTTP_ACCESS_LOG_ENABLED. Exercise 1 sets the first to an
-#     invalid value on purpose and exercise 4 turns the second on; both are removed again by the
-#     lab, and both must start from "not present" for `oc set env …-` to read as a clean removal.
-# The only logging-adjacent thing the entry state owns is the image, which ships the
+#   * no QUARKUS_LOG_LEVEL. Exercise 1 sets it to an invalid value on purpose and removes it again,
+#     and it must start from "not present" for `oc set env …-` to read as a clean removal.
+# The only other logging-adjacent thing the entry state owns is the image, which ships the
 # quarkus-logging-json extension with its OUTPUT off and the X-Request-Id -> MDC filter installed.
 # Runs the SHARED prebuilt image so application-logging never depends on any per-user build.
 ---
@@ -27,11 +30,7 @@ metadata:
     #
     # Replace=true, and ONLY on this Deployment. This is the object the whole lab mutates: exercise 1
     # adds and removes an env var and scales 1 -> 3 -> 1, exercise 2 adds
-    # QUARKUS_LOG_CONSOLE_JSON_ENABLED as an inline value, exercise 3 removes that and adds TWO
-    # per-key `valueFrom` entries (`oc set env --from=configmap/claims-logging` writes per-key
-    # configMapKeyRef, not envFrom — the lab's own captured `--list` output shows both keys as
-    # "from configmap claims-logging, key …"), the console path adds an `envFrom` block instead,
-    # exercise 4 adds and removes the access-log flag, and exercise 5 scales to 3 and stops there.
+    # QUARKUS_LOG_CONSOLE_JSON_ENABLED as an inline value, and exercise 3 scales to 3 and stops there.
     #
     # A three-way merge preserves every one of those: they are fields this chart does not name, so
     # neither the desired manifest nor last-applied claims them, and re-running `ws start` would
@@ -51,9 +50,9 @@ metadata:
     workshop.redhat.com/module: application-logging
     workshop.redhat.com/owner: ogsr
 spec:
-  # Entry = ONE replica: exercises 2-4 are quicker to read on one log stream, and the lab scales up
-  # itself (exercise 1 briefly, exercise 5 for good). Solve = THREE, because the demo page's step 1,
-  # "A log a human can read and nothing else can", and step 4, "One request, three pods, one query",
+  # Entry = ONE replica: exercise 2 is quicker to read on one log stream, and the lab scales up
+  # itself (exercise 1 briefly, exercise 3 for good). Solve = THREE, because the demo page's step 1,
+  # "A log a human can read and nothing else can", and step 2, "One request, three pods, one query",
   # are both about one request landing on one of several pods, and its Prep block asserts `ready=3`.
   replicas: {{ if .Values.solve }}3{{ else }}1{{ end }}
   selector:
@@ -70,7 +69,7 @@ spec:
           # Shared image built once into parasol-images. THIS TAG MUST CARRY THIS MODULE'S ADDITIONS:
           # the quarkus-logging-json extension, RequestIdFilter (X-Request-Id -> MDC) and the
           # per-request statements in ClaimResource. Without them exercise 2 shows a jq parse error
-          # where the lab promises an object and exercise 5's correlation query returns nothing —
+          # where the lab promises an object and exercise 3's correlation query returns nothing —
           # both of which look like attendee error and are not. The instructor guide's pre-flight
           # checks 2-4 exist to catch a stale rebuild before a session, not during one.
           image: image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims:1.0
@@ -80,23 +79,24 @@ spec:
             - name: http
               containerPort: 8080
           env:
-            # Point the %prod datasource at the claims-db Service in this namespace. This is the ONLY
-            # inline env var the chart renders — deliberately, so that exercise 3's
-            # `oc set env deploy/parasol-claims --list | tail -2` shows the attendee's own two
-            # claims-logging keys and nothing else competing for the last two lines.
+            # Point the %prod datasource at the claims-db Service in this namespace.
             - name: POSTGRESQL_HOST
               value: claims-db
+            # Parasol's own code at DEBUG — see the header comment. The double underscores around
+            # the quoted segment are the property name quarkus.log.category."com.parasol".level, not
+            # a typo: with single underscores Quarkus ignores the variable without a warning.
+            - name: QUARKUS_LOG_CATEGORY__COM_PARASOL__LEVEL
+              value: DEBUG
+{{- if .Values.solve }}
+            # SOLVE (end state) ONLY: structured output on, the one setting exercise 2 adds. The
+            # demo's Prep block asserts it (a parseable .loggerName), and its step 2 needs it.
+            - name: QUARKUS_LOG_CONSOLE_JSON_ENABLED
+              value: "true"
+{{- end }}
           envFrom:
             # POSTGRESQL_USER / _PASSWORD / _DATABASE — the same Secret the DB was initialized with.
             - secretRef:
                 name: claims-db
-{{- if .Values.solve }}
-            # SOLVE (end state) ONLY: the logging configuration a completed lab produces, wired the
-            # way the console path wires it (envFrom). The CLI path produces per-key valueFrom
-            # entries instead — ws verify's end mode accepts BOTH, because both are correct.
-            - configMapRef:
-                name: claims-logging
-{{- end }}
           # THE READINESS PROBE IS LOAD-BEARING CONTENT, not hygiene. Exercise 1 sets an invalid log
           # level on purpose; the new pod fails config validation and crash-loops, never becomes
           # Ready, and the rolling update therefore holds the old healthy pod in the Service. The two
@@ -143,7 +143,7 @@ spec:
       targetPort: http
 ---
 # why: publishes the claims API at parasol-claims-{user}-dev.{clusterDomain} (host auto-generated) —
-# every exercise drives traffic through it with curl, and exercise 5 sends the X-Request-Id header there.
+# every exercise drives traffic through it with curl, and exercise 3 sends the X-Request-Id header there.
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
