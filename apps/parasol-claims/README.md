@@ -287,9 +287,10 @@ green.
 
 1. **N+1 query on `GET /api/claims/{claimNumber}/history`** — for *Observability: Metrics,
    Alerts, Dashboards & Traces*. The endpoint fetches the claim's event IDs in one query, then loads each event by
-   primary key in a loop: `1 + N` SELECTs, one JDBC span per event in the trace. `CLM-1001` has
-   five events, so six queries. The one-line fix is that module's payoff — do **not** optimize
-   it here.
+   primary key in a loop: `1 + N` SELECTs, one JDBC span per event in the trace
+   (`quarkus.datasource.jdbc.telemetry=true`). `CLM-1001` has five events, so six queries, plus
+   the one that loads the claim: seven `SELECT` spans in its trace. The one-line fix is that
+   module's go-deeper item — do **not** optimize it here.
 
 2. **A seeded vulnerable dependency, on the `seed-vulnerable` branch only** — for *Trusted
    Software Supply Chain*. `main` is clean. That branch pins an older base image and a

@@ -173,15 +173,39 @@ curl -s -o /dev/null "$CLAIMS/api/claims/CLM-1001/history"
 Then refresh with a *Last 15 minutes* range.
 If it is still empty, the collector may be down — that is a shared-stack issue for your instructor (`oc get pods -n ogsr-observability-workshop`), not something in your namespace.
 
+== My history query finds no traces
+
+Symptom:: In *Observe → Traces*, the exercise 5 query `{ span.server.address = "parasol-claims-<user>-dev.<cluster domain>" && … }` returns *No results found*, although the load generator is running.
+Cause:: The filter matches only requests that came in through *your* Route.
+The load generator calls the in-cluster Service, so its spans carry `server.address = "parasol-claims"` and never match; a request you sent with `curl http://parasol-claims:8080/…` from inside the cluster does not match either.
+A request also takes 10 to 20 seconds to become searchable after you send it.
+Fix:: Send the request through your Route (the exercise's `$CLAIMS` shortcut), wait about 20 seconds, and run the query again.
+Check the host in the query: it is exactly the host of your Route, `oc get route parasol-claims -n <user>-dev -o jsonpath='{.spec.host}'`.
+
 == The trace only shows one span — where are the database queries?
 
-Symptom:: You open a `parasol-claims` trace expecting to see the N+1 database queries, but there is a single HTTP request span and no `SELECT` children.
-Cause:: The claims image emits the *HTTP request* span but not per-query *database* spans — database-span instrumentation is a build-time flag on the image, tracked as an enhancement.
-The N+1 is real in the code, but invisible in the trace today.
-Fix:: There is nothing to fix in your namespace.
-Use the trace to identify *which* endpoint is the latency outlier (rank by duration), and read the code to see *why* (`GET /api/claims/\{claimNumber}/history` issues one query per event).
-The database-span "staircase" appears once the image ships that flag.
+Symptom:: You open a `parasol-claims` trace and see a single HTTP request span, with no `SELECT` or `DataSource.getConnection` spans under it.
+Cause:: Your `parasol-claims` pod started before the shared claims image was rebuilt with database spans (2026-11-15).
+A running pod keeps the image it started with; only a restart pulls the current build.
+Fix:: Restart the claims service; it pulls the current image on start:
++
+[source,sh,role=execute]
+----
+oc rollout restart deploy/parasol-claims -n <user>-dev
+oc rollout status deploy/parasol-claims -n <user>-dev
+----
++
+Send a new request: its trace shows the database spans.
+Traces recorded before the restart keep their single span.
+
+== The outage trace has no `Connection refused`
+
+Symptom:: An exercise 4 error trace shows a different database error: `FATAL: the database system is shutting down` on `DataSource.getConnection`, or a failed `SELECT` span with `terminating connection due to unexpected postmaster exit`.
+Cause:: Nothing is wrong.
+Those requests ran in the first seconds of the outage, while the database was still shutting down; once it was gone, every request failed with `Connection to claims-db:5432 refused`.
+On the build run, 280 of the 285 error traces said `refused`, 4 said `shutting down` and 1 said `postmaster exit`.
+Fix:: Open one of the traces that take about 2 seconds: those are the `refused` ones.
 
 '''
 
-_Last verified on OpenShift 4.21.22 with the Cluster Observability Operator 1.5.1 / Tempo 0.21.0-2 / Red Hat build of OpenTelemetry 0.152.0-1 stack — 2026-07-11; the alert-beat entries (fire timing, scrape mechanics) re-verified against the 10s-scrape entry state on 2026-07-19; the "Observe → Alerting shows no rules" entry grounded in an authenticated attendee console on 2026-07-28. The three dashboard entries were grounded as `user13` in the cockpit terminal on 2026-11-14, through the Perses API with the attendee's own token._
+_Last verified on OpenShift 4.21.22 with the Cluster Observability Operator 1.5.1 / Tempo 0.21.0-2 / Red Hat build of OpenTelemetry 0.152.0-1 stack — 2026-07-11; the alert-beat entries (fire timing, scrape mechanics) re-verified against the 10s-scrape entry state on 2026-07-19; the "Observe → Alerting shows no rules" entry grounded in an authenticated attendee console on 2026-07-28. The three dashboard entries were grounded as `user13` in the cockpit terminal on 2026-11-14, through the Perses API with the attendee's own token. The three trace entries (history query, single span, outage errors) were grounded as `user21` on 2026-11-15, read back from the Tempo search API._
