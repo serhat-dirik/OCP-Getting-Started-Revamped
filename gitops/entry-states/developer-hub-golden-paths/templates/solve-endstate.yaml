@@ -56,18 +56,24 @@ spec:
               ADMIN_USER="$(oc get gitea gitea -n "$NS" -o jsonpath='{.spec.giteaAdminUser}' 2>/dev/null || echo gitea-admin)"
               ADMIN_PASS="$(oc get gitea gitea -n "$NS" -o jsonpath='{.status.adminPassword}' 2>/dev/null || true)"
               [[ -n "$ADMIN_PASS" ]] || ADMIN_PASS="$(oc get secret gitea-admin-credentials -n "$NS" -o jsonpath='{.data.password}' | base64 -d)"
-              export AUTH="${ADMIN_USER}:${ADMIN_PASS}" GITEA_URL="http://gitea.${NS}.svc:3000"
+              # Through the ROUTE, not the in-cluster service: Gitea builds the webhook payload's repository
+              # URL from the address an API call came in on, and Pipelines-as-Code matches the Repository by
+              # the route URL. A release created on the service address was ignored ("cannot find a
+              # repository match for http://gitea.<ns>.svc:3000/…", measured 2026-11-16).
+              HOST="$(oc get route gitea -n "$NS" -o jsonpath='{.spec.host}')"
+              export AUTH="${ADMIN_USER}:${ADMIN_PASS}" GITEA_URL="https://${HOST}"
               python3 - <<'PY'
               import base64, json, os, ssl, subprocess, sys, time, urllib.request, urllib.error
               g = os.environ["GITEA_URL"]; auth = os.environ["AUTH"]; user = os.environ["FORK_USER"]
               org = os.environ["ORG"]; svc = os.environ["SVC"]; rhdh = os.environ["RHDH_URL"].rstrip("/")
               cicd = os.environ["CICD_NS"]; prod = os.environ["PROD_NS"]
+              ctx = ssl._create_unverified_context()
               def call(method, url, body=None, headers=None):
                   h = {"Content-Type": "application/json", **(headers or {})}
                   data = json.dumps(body).encode() if body is not None else None
                   req = urllib.request.Request(url, data=data, headers=h, method=method)
                   try:
-                      with urllib.request.urlopen(req, timeout=30) as r:
+                      with urllib.request.urlopen(req, timeout=30, context=ctx) as r:
                           raw = r.read().decode(); return r.status, (json.loads(raw) if raw else None)
                   except urllib.error.HTTPError as e:
                       return e.code, None
