@@ -10,6 +10,14 @@
 # prep): BeforeHookCreation clears the prior Job so a re-sync always re-fires; every step is
 # idempotent. Same admin-credential-discovery + Sudo idiom as the config-multienv/gitops-fundamentals/gitops-at-scale fork jobs (compose,
 # don't chain). Wave 1 = before the solve hook (wave 2), so solve's demo repo survives the empty pass.
+#
+# It also lays the platform team's per-team CI wiring for the parasol-golden-path template:
+#   (d) a fresh Gitea token for {user} (scope write:repository) + a webhook secret, as Secret
+#       golden-pac-secret in {user}-cicd: Pipelines-as-Code reads the repo and reports status with
+#       it, and the pipelines commit promotions to the GitOps repo with it
+#   (e) two ORG webhooks on {user}-svcs, so every repo the template creates is wired at birth:
+#       push -> Pipelines-as-Code (runs .tekton/), push -> the attendees' Argo CD (syncs in seconds)
+#   (f) the shared RHACS CI token copied into {user}-cicd for the pipeline's image check
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -61,6 +69,73 @@ subjects:
     name: gitea-scaffold-org-developer-hub-golden-paths-{{ .Values.user }}
     namespace: {{ .Values.giteaNamespace }}
 ---
+# why: write the CI Secrets (golden-pac-secret, rox-api-token) into the attendee's own {user}-cicd.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gitea-scaffold-org-developer-hub-golden-paths-{{ .Values.user }}
+  namespace: {{ .Values.user }}-cicd
+  labels:
+    workshop.redhat.com/module: developer-hub-golden-paths
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gitea-scaffold-org-developer-hub-golden-paths-{{ .Values.user }}
+  namespace: {{ .Values.user }}-cicd
+  labels:
+    workshop.redhat.com/module: developer-hub-golden-paths
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gitea-scaffold-org-developer-hub-golden-paths-{{ .Values.user }}
+subjects:
+  - kind: ServiceAccount
+    name: gitea-scaffold-org-developer-hub-golden-paths-{{ .Values.user }}
+    namespace: {{ .Values.giteaNamespace }}
+---
+# why: read the shared RHACS CI token (that one Secret only) to copy it into {user}-cicd.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: developer-hub-golden-paths-read-rox-token-{{ .Values.user }}
+  namespace: {{ .Values.stackroxNamespace }}
+  labels:
+    workshop.redhat.com/module: developer-hub-golden-paths
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["rox-api-token"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: developer-hub-golden-paths-read-rox-token-{{ .Values.user }}
+  namespace: {{ .Values.stackroxNamespace }}
+  labels:
+    workshop.redhat.com/module: developer-hub-golden-paths
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: developer-hub-golden-paths-read-rox-token-{{ .Values.user }}
+subjects:
+  - kind: ServiceAccount
+    name: gitea-scaffold-org-developer-hub-golden-paths-{{ .Values.user }}
+    namespace: {{ .Values.giteaNamespace }}
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -100,6 +175,15 @@ spec:
             # a re-prep leaves no orphan Component on the SHARED portal (guest token; svc URL is stable).
             - name: RHDH_URL
               value: {{ .Values.rhdhInClusterUrl | quote }}
+            - name: CICD_NS
+              value: {{ .Values.user }}-cicd
+            - name: ROX_NS
+              value: {{ .Values.stackroxNamespace | quote }}
+            # Org webhook targets: the Pipelines-as-Code controller and the attendees' Argo CD.
+            - name: PAC_URL
+              value: "https://pipelines-as-code-controller-openshift-pipelines.{{ .Values.clusterDomain }}"
+            - name: ARGO_WEBHOOK_URL
+              value: "https://student-gitops-server-student-gitops.{{ .Values.clusterDomain }}/api/webhook"
           command: ["/bin/bash", "-c"]
           args:
             - |
@@ -223,4 +307,67 @@ spec:
                           print(f"  ! HTTP {dst} deregistering {lid} -> {target}")
                   print(f"✅ catalog dereg for {org}: {removed} Location(s) removed")
               PY
+              # (d)+(e) CI token Secret + org webhooks. Secret values go Gitea -> python -> oc stdin; never echoed.
+              echo "▶ golden-path CI wiring for ${SCAFFOLD_ORG}: token Secret in ${CICD_NS} + org webhooks…"
+              ARGO_SECRET="$(oc get secret argo-webhook-secret -n "$NS" -o jsonpath='{.data.secret}' 2>/dev/null | base64 -d || true)"
+              GITEA_URL="$GITEA_URL" AUTH="$AUTH" FORK_USER="$FORK_USER" SCAFFOLD_ORG="$SCAFFOLD_ORG" \
+              ARGO_SECRET="$ARGO_SECRET" python3 - <<'PY'
+              import base64, json, os, secrets, ssl, subprocess, urllib.request, urllib.error
+              base = os.environ["GITEA_URL"].rstrip("/"); auth = os.environ["AUTH"]
+              user = os.environ["FORK_USER"]; org = os.environ["SCAFFOLD_ORG"]; ns = os.environ["CICD_NS"]
+              pac_url = os.environ["PAC_URL"]; argo_url = os.environ["ARGO_WEBHOOK_URL"]
+              argo_secret = os.environ.get("ARGO_SECRET", "")
+              ctx = ssl._create_unverified_context()
+              def api(method, path, body=None):
+                  h = {"Authorization": "Basic " + base64.b64encode(auth.encode()).decode(),
+                       "Content-Type": "application/json"}
+                  data = json.dumps(body).encode() if body is not None else None
+                  req = urllib.request.Request(base + path, data=data, headers=h, method=method)
+                  try:
+                      with urllib.request.urlopen(req, context=ctx) as r:
+                          raw = r.read().decode()
+                          return r.status, (json.loads(raw) if raw else None)
+                  except urllib.error.HTTPError as e:
+                      return e.code, None
+              # (d) Gitea shows a token once, so mint a fresh one each run (the old one is deleted).
+              api("DELETE", f"/api/v1/users/{user}/tokens/golden-path")
+              st, tok = api("POST", f"/api/v1/users/{user}/tokens", {"name": "golden-path", "scopes": ["write:repository"]})
+              if st != 201 or not (tok or {}).get("sha1"):
+                  raise SystemExit(f"❌ could not create the golden-path token for {user} (HTTP {st})")
+              hook_secret = secrets.token_hex(16)
+              secret = {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+                        "metadata": {"name": "golden-pac-secret", "namespace": ns,
+                                     "labels": {"workshop.redhat.com/module": "developer-hub-golden-paths"}},
+                        "stringData": {"token": tok["sha1"], "webhook-secret": hook_secret}}
+              subprocess.run(["oc", "apply", "-f", "-"], input=json.dumps(secret).encode(), check=True,
+                             stdout=subprocess.DEVNULL)
+              print(f"  ✓ Secret golden-pac-secret in {ns} (token + webhook secret, values not shown)")
+              # (e) org webhooks: replace ours (the secret changed), leave any other hook alone.
+              st, hooks = api("GET", f"/api/v1/orgs/{org}/hooks")
+              for hk in (hooks or []):
+                  if (hk.get("config") or {}).get("url") in (pac_url, argo_url):
+                      api("DELETE", f"/api/v1/orgs/{org}/hooks/{hk['id']}")
+              want = [("gitea", pac_url, hook_secret, "Pipelines-as-Code")]
+              if argo_secret:
+                  want.append(("gogs", argo_url, argo_secret, "Argo CD"))
+              else:
+                  print("  ! argo-webhook-secret not present yet: Argo CD falls back to polling (~3 min)")
+              for typ, url, sec, label in want:
+                  st, _ = api("POST", f"/api/v1/orgs/{org}/hooks",
+                              {"type": typ, "active": True, "events": ["push"],
+                               "config": {"url": url, "content_type": "json", "secret": sec}})
+                  print(f"  {'✓' if st == 201 else '! HTTP ' + str(st)} org webhook -> {label}")
+              PY
+
+              # (f) the shared RHACS CI token, moved base64-to-base64 (never echoed).
+              echo "▶ copying the RHACS CI token into ${CICD_NS}…"
+              if oc get secret rox-api-token -n "$ROX_NS" >/dev/null 2>&1; then
+                B64TOKEN="$(oc get secret rox-api-token -n "$ROX_NS" -o jsonpath='{.data.rox-api-token}')"
+                B64EP="$(oc get secret rox-api-token -n "$ROX_NS" -o jsonpath='{.data.rox-central-endpoint}')"
+                printf '{"apiVersion":"v1","kind":"Secret","type":"Opaque","metadata":{"name":"rox-api-token","namespace":"%s","labels":{"workshop.redhat.com/module":"developer-hub-golden-paths"}},"data":{"rox-api-token":"%s","rox-central-endpoint":"%s"}}' \
+                  "$CICD_NS" "$B64TOKEN" "$B64EP" | oc apply -f - >/dev/null
+                echo "  ✓ rox-api-token in ${CICD_NS} (value not shown)"
+              else
+                echo "  ! ${ROX_NS}/rox-api-token missing: the pipeline's image check will fail until the trust stack mints it"
+              fi
               echo "✅ ${FORK_USER} can scaffold via the golden path into ${SCAFFOLD_ORG}"

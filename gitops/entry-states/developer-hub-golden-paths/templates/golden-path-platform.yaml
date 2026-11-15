@@ -1,0 +1,131 @@
+{{- /*
+  The platform team's one-time wiring for an attendee's team org ({user}-svcs), so that any service
+  created from the parasol-golden-path template is built, signed, verified and deployed without a
+  ticket. The template writes the repos; this is what turns them into running pipelines and apps.
+
+  1. ApplicationSet golden-path-{user} in the attendees' Argo CD (ogsr-student-gitops, project
+     proj-{user}): an SCM-provider generator lists the repos in {user}-svcs, keeps those named
+     *-gitops that carry ci/kustomization.yaml, and makes four Applications per repo: ci (the PaC
+     Repository + the two pipelines, into {user}-cicd), dev, stage and prod. The Applications are
+     labelled backstage-name=<service>, which is what the component's CD tab selects on.
+     Cluster facts the template cannot know (the Gitea route, Tekton Chains' signing identity) are
+     injected here, into the PaC Repository only, by a kustomize patch.
+  2. dev/stage/prod may pull images from {user}-cicd (where the pipeline pushes them).
+  3. The pipeline ServiceAccount may read {user}-stage (the release pipeline waits for stage).
+  Repo-level wiring (webhooks, the CI token Secret) is in gitea-scaffold-org.yaml.
+*/ -}}
+{{- $gitea := printf "https://gitea-%s.%s" .Values.giteaNamespace .Values.clusterDomain }}
+{{- $org := printf "%s-%s" .Values.user .Values.scaffoldOrgSuffix }}
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: golden-path-{{ .Values.user }}
+  namespace: {{ .Values.studentArgoNamespace }}
+  labels:
+    workshop.redhat.com/module: developer-hub-golden-paths
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - matrix:
+        generators:
+          - scmProvider:
+              # Re-list the org every 20 s, so a new service has its Applications within a minute.
+              requeueAfterSeconds: {{ .Values.goldenPathRequeueSeconds }}
+              cloneProtocol: https
+              gitea:
+                owner: {{ $org }}
+                api: {{ $gitea }}
+                allBranches: false
+              filters:
+                - repositoryMatch: '-gitops$'
+                  pathsExist: [ci/kustomization.yaml]
+          - list:
+              elements:
+                - {stage: ci, namespace: {{ .Values.user }}-cicd, path: ci}
+                - {stage: dev, namespace: {{ .Values.user }}-dev, path: overlays/dev}
+                - {stage: stage, namespace: {{ .Values.user }}-stage, path: overlays/stage}
+                - {stage: prod, namespace: {{ .Values.user }}-prod, path: overlays/prod}
+  template:
+    metadata:
+      name: '{{ "{{" }} trimSuffix "-gitops" .repository {{ "}}" }}-{{ "{{" }} .stage {{ "}}" }}'
+      labels:
+        backstage-name: '{{ "{{" }} trimSuffix "-gitops" .repository {{ "}}" }}'
+        workshop.redhat.com/user: {{ .Values.user | quote }}
+        workshop.redhat.com/module: developer-hub-golden-paths
+      # Deleting an Application (reset, or the repo is removed) deletes what it deployed.
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: proj-{{ .Values.user }}
+      source:
+        repoURL: '{{ "{{" }} .url {{ "}}" }}'
+        targetRevision: main
+        path: '{{ "{{" }} .path {{ "}}" }}'
+        kustomize:
+          patches:
+            - target:
+                group: pipelinesascode.tekton.dev
+                kind: Repository
+              patch: |-
+                - op: replace
+                  path: /spec/url
+                  value: {{ $gitea }}/{{ $org }}/{{ "{{" }} trimSuffix "-gitops" .repository {{ "}}" }}
+                - op: replace
+                  path: /spec/git_provider/url
+                  value: {{ $gitea }}
+                - op: replace
+                  path: /spec/params/0/value
+                  value: spiffe://{{ .Values.clusterDomain }}/ns/openshift-pipelines/sa/tekton-chains-controller
+                - op: replace
+                  path: /spec/params/1/value
+                  value: https://oidc-discovery.{{ .Values.clusterDomain }}
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '{{ "{{" }} .namespace {{ "}}" }}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+---
+# dev, stage and prod pull the image the pipeline pushed to {user}-cicd.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: golden-path-image-pullers
+  namespace: {{ .Values.user }}-cicd
+  labels:
+    workshop.redhat.com/module: developer-hub-golden-paths
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:image-puller
+subjects:
+{{- range list "dev" "stage" "prod" }}
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: system:serviceaccounts:{{ $.Values.user }}-{{ . }}
+{{- end }}
+---
+# The release pipeline waits until stage runs the release before it promotes to prod.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: golden-path-pipeline-view
+  namespace: {{ .Values.user }}-stage
+  labels:
+    workshop.redhat.com/module: developer-hub-golden-paths
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - kind: ServiceAccount
+    name: pipeline
+    namespace: {{ .Values.user }}-cicd

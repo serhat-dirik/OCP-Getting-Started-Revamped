@@ -1,0 +1,43 @@
+# The canary's automated check: the new pods must answer their readiness endpoint, five times in a
+# row, through the canary Service. Any failure fails the analysis and Argo Rollouts rolls back.
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: ${{ values.name }}-canary-check
+  labels:
+    backstage.io/kubernetes-id: ${{ values.name }}
+spec:
+  metrics:
+    - name: canary-ready
+      count: 1
+      failureLimit: 0
+      provider:
+        job:
+          spec:
+            backoffLimit: 0
+            activeDeadlineSeconds: 120
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: probe
+                    image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+                    resources:
+                      requests:
+                        cpu: 50m
+                        memory: 64Mi
+                      limits:
+                        cpu: 200m
+                        memory: 128Mi
+                    command: ["/bin/bash", "-c"]
+                    args:
+                      - |
+                        set -euo pipefail
+                        URL="http://${{ values.name }}-canary:8080/q/health/ready"
+                        for i in 1 2 3 4 5; do
+                          code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$URL" || echo 000)"
+                          echo "probe $i: HTTP $code"
+                          [ "$code" = "200" ] || { echo "canary is not ready: failing the analysis"; exit 1; }
+                          sleep 2
+                        done
+                        echo "canary healthy"

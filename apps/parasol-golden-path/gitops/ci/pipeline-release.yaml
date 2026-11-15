@@ -1,0 +1,160 @@
+# The release pipeline: runs when you push a tag such as v1.0.0 (.tekton/release.yaml).
+#   resolve-image -> verify-conforma -> promote (stage, wait until stage runs it, then prod)
+# It builds nothing. It finds the image the build pipeline made from the tagged commit, checks it
+# with Conforma again, and promotes that SAME digest: first to stage, then to prod, where Argo
+# Rollouts runs it as a canary with an automated analysis.
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: ${{ values.name }}-release
+  labels:
+    backstage.io/kubernetes-id: ${{ values.name }}
+spec:
+  params:
+    - name: revision
+      type: string
+      description: The commit the tag points to.
+    - name: tag
+      type: string
+      description: The release tag (for example v1.0.0).
+    - name: conforma-identity
+      type: string
+    - name: conforma-issuer
+      type: string
+    - name: gitops-url
+      type: string
+      default: http://gitea.ogsr-gitea.svc:3000/${{ values.org }}/${{ values.name }}-gitops.git
+  results:
+    - name: IMAGE_REF
+      value: $(tasks.resolve-image.results.IMAGE_REF)
+  tasks:
+    # The build pipeline tagged the image with the commit; no image means that commit never passed it.
+    - name: resolve-image
+      params:
+        - {name: revision, value: $(params.revision)}
+        - {name: tag, value: $(params.tag)}
+      taskSpec:
+        params:
+          - {name: revision, type: string}
+          - {name: tag, type: string}
+        results:
+          - name: IMAGE_REF
+            description: The image the build pipeline made from this commit, by digest.
+        steps:
+          - name: resolve
+            image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              REF="$(oc get istag ${{ values.name }}:$(params.revision) -o jsonpath='{.image.dockerImageReference}' 2>/dev/null || true)"
+              if [[ -z "$REF" ]]; then
+                echo "No image was built from commit $(params.revision)."
+                echo "Only a commit that passed the build pipeline can be released: push it to main first."
+                exit 1
+              fi
+              oc tag ${{ values.name }}:$(params.revision) ${{ values.name }}:$(params.tag) >/dev/null
+              echo "release $(params.tag) is ${REF}"
+              printf '%s' "$REF" > "$(results.IMAGE_REF.path)"
+
+    # Conforma again, before anything reaches stage: the digest must still verify and policy must hold.
+    - name: verify-conforma
+      runAfter: [resolve-image]
+      taskRef:
+        resolver: cluster
+        params:
+          - {name: kind, value: task}
+          - {name: name, value: verify-conforma}
+          - {name: namespace, value: ogsr-parasol-tasks}
+      params:
+        - {name: IMAGE, value: $(tasks.resolve-image.results.IMAGE_REF)}
+        - {name: CERTIFICATE_IDENTITY, value: $(params.conforma-identity)}
+        - {name: CERTIFICATE_OIDC_ISSUER, value: $(params.conforma-issuer)}
+        - {name: EXPECTED_PIPELINE, value: ${{ values.name }}-build}
+        - {name: EXPECTED_TASK, value: build-image}
+        - {name: WAIT_SECONDS, value: "30"}
+
+    # Promote by Git commit: stage first, wait until stage runs the digest, then prod.
+    - name: promote
+      runAfter: [verify-conforma]
+      params:
+        - {name: image-ref, value: $(tasks.resolve-image.results.IMAGE_REF)}
+        - {name: tag, value: $(params.tag)}
+        - {name: gitops-url, value: $(params.gitops-url)}
+      taskSpec:
+        params:
+          - {name: image-ref, type: string}
+          - {name: tag, type: string}
+          - {name: gitops-url, type: string}
+        volumes:
+          - name: git-token
+            secret:
+              secretName: golden-pac-secret
+        stepTemplate:
+          env:
+            - {name: HOME, value: /tekton/home}
+            - {name: IMAGE_REF, value: $(params.image-ref)}
+            - {name: TAG, value: $(params.tag)}
+            - {name: GITOPS_URL, value: $(params.gitops-url)}
+          volumeMounts:
+            - {name: git-token, mountPath: /git-token, readOnly: true}
+        steps:
+          - name: to-stage
+            image: registry.redhat.io/openshift-pipelines/pipelines-git-init-rhel9@sha256:dca8662e90f308055c660639aa4aea37e76d0c34c7830f2effcb843f1a7b7bcd
+            script: |
+              #!/bin/sh
+              set -eu
+              git config --global credential.helper '!f() { echo username=${{ values.user }}; echo "password=$(cat /git-token/token)"; }; f'
+              git config --global user.name "Parasol pipeline"
+              git config --global user.email "pipeline@parasol.example.com"
+              git clone -q "$GITOPS_URL" /tekton/home/gitops
+              cd /tekton/home/gitops
+              cat > overlays/stage/release.yaml <<EOF
+              # What runs in stage. The release pipeline rewrites this file when you tag a release.
+              - op: replace
+                path: /spec/replicas
+                value: 1
+              - op: replace
+                path: /spec/template/spec/containers/0/image
+                value: ${IMAGE_REF}
+              EOF
+              git add overlays/stage/release.yaml
+              if git diff --cached --quiet; then echo "stage already runs ${IMAGE_REF}"; exit 0; fi
+              git commit -q -m "stage: release ${TAG}"
+              for i in 1 2 3; do git push -q origin main && break; git pull -q --rebase origin main; done
+              echo "stage: release ${TAG} committed ($(git rev-parse --short HEAD))"
+          - name: wait-for-stage
+            image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              NS=${{ values.user }}-stage
+              echo "waiting for Argo CD to roll ${TAG} out in ${NS}..."
+              for i in $(seq 1 60); do
+                IMG="$(oc get deployment ${{ values.name }} -n "$NS" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
+                [[ "$IMG" == "$IMAGE_REF" ]] && break
+                sleep 5
+              done
+              [[ "$IMG" == "$IMAGE_REF" ]] || { echo "stage never picked up ${TAG}: is the ${{ values.name }}-stage Application syncing?"; exit 1; }
+              oc rollout status deployment/${{ values.name }} -n "$NS" --timeout=300s
+              echo "stage runs ${TAG} and is ready"
+          - name: to-prod
+            image: registry.redhat.io/openshift-pipelines/pipelines-git-init-rhel9@sha256:dca8662e90f308055c660639aa4aea37e76d0c34c7830f2effcb843f1a7b7bcd
+            script: |
+              #!/bin/sh
+              set -eu
+              cd /tekton/home/gitops
+              git pull -q --rebase origin main
+              cat > overlays/prod/release.yaml <<EOF
+              # What runs in prod. The release pipeline rewrites this file after stage runs the same digest.
+              - op: replace
+                path: /spec/replicas
+                value: 2
+              - op: replace
+                path: /spec/template/spec/containers/0/image
+                value: ${IMAGE_REF}
+              EOF
+              git add overlays/prod/release.yaml
+              if git diff --cached --quiet; then echo "prod already runs ${IMAGE_REF}"; exit 0; fi
+              git commit -q -m "prod: release ${TAG}"
+              for i in 1 2 3; do git push -q origin main && break; git pull -q --rebase origin main; done
+              echo "prod: release ${TAG} committed ($(git rev-parse --short HEAD)); Argo Rollouts takes it from here"

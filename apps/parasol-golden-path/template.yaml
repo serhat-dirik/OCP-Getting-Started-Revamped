@@ -1,0 +1,120 @@
+# Red Hat Developer Hub Software Template: the Parasol golden path, owned by the platform team.
+#
+# One form creates a service that already follows every practice of the workshop:
+#   * app repo {org}/{name}: Quarkus service, Containerfile, devfile (Dev Spaces), catalog-info.yaml,
+#     .tekton/ push and release PipelineRuns (Pipelines-as-Code)
+#   * GitOps repo {org}/{name}-gitops: ci/ (PaC Repository + build and release pipelines: tests,
+#     RHACS scan, SBOM, Tekton Chains keyless signature, Conforma, deploy by digest), overlays for
+#     dev, stage and prod (prod is an Argo Rollouts canary with an automated analysis)
+#   * a catalog Component whose CI, CD and Topology tabs read the pipeline runs, the Argo CD
+#     Applications and the running pods
+# The platform side is per team, not per template: the org's webhooks, the CI token, and the
+# ApplicationSet that turns every {name}-gitops repo in the org into Argo CD Applications for ci,
+# dev, stage and prod. Gitea is addressed by its in-cluster service, so the template is cluster-agnostic.
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: parasol-golden-path
+  title: Parasol service, build to production
+  description: >-
+    A Quarkus (Java 21) service with its whole delivery path: a Pipelines-as-Code pipeline that
+    tests, scans, generates an SBOM, gets the image signed and verified with Conforma, and GitOps
+    promotion to dev, stage and a canary in prod.
+  tags:
+    - recommended
+    - golden-path
+    - quarkus
+    - parasol
+spec:
+  owner: parasol
+  type: service
+
+  parameters:
+    - title: Provide service details
+      required:
+        - name
+        - orgName
+        - owner
+      properties:
+        name:
+          title: Name
+          type: string
+          description: Unique lowercase service name, ending in your username (for example parasol-quote-user1).
+          pattern: '^[a-z][a-z0-9-]{2,40}$'
+          ui:autofocus: true
+        orgName:
+          title: Your team's Gitea organization
+          type: string
+          description: Your scaffold org, `<your-username>-svcs` (for example `user1-svcs`).
+          pattern: '^[a-z][a-z0-9-]{1,40}-svcs$'
+        owner:
+          title: Owner
+          type: string
+          description: The Backstage group that will own the new service.
+          default: parasol
+
+  steps:
+    - id: fetch-app
+      name: Generate the service
+      action: fetch:template
+      input:
+        url: ./skeleton
+        targetPath: app
+        values:
+          name: ${{ parameters.name }}
+          owner: ${{ parameters.owner }}
+          org: ${{ parameters.orgName }}
+          user: ${{ parameters.orgName | replace("-svcs", "") }}
+
+    - id: fetch-gitops
+      name: Generate its GitOps and CI configuration
+      action: fetch:template
+      input:
+        url: ./gitops
+        targetPath: gitops
+        values:
+          name: ${{ parameters.name }}
+          owner: ${{ parameters.owner }}
+          org: ${{ parameters.orgName }}
+          user: ${{ parameters.orgName | replace("-svcs", "") }}
+
+    # The GitOps repo first: the platform's ApplicationSet picks it up and creates the ci, dev,
+    # stage and prod Applications (ci registers the app repo with Pipelines-as-Code).
+    - id: publish-gitops
+      name: Publish the GitOps repository
+      action: publish:gitea
+      input:
+        repoUrl: gitea.ogsr-gitea.svc:3000?owner=${{ parameters.orgName }}&repo=${{ parameters.name }}-gitops
+        sourcePath: gitops
+        description: '${{ parameters.name }} deployment and CI configuration, created from parasol-golden-path'
+        defaultBranch: main
+        repoVisibility: public
+
+    - id: publish-app
+      name: Publish the service repository
+      action: publish:gitea
+      input:
+        repoUrl: gitea.ogsr-gitea.svc:3000?owner=${{ parameters.orgName }}&repo=${{ parameters.name }}
+        sourcePath: app
+        description: '${{ parameters.name }}, created from parasol-golden-path'
+        defaultBranch: main
+        repoVisibility: public
+
+    - id: register
+      name: Register in the software catalog
+      action: catalog:register
+      input:
+        # The full catalog-info URL with the branch: publish:gitea's repoContentsUrl omits it.
+        catalogInfoUrl: http://gitea.ogsr-gitea.svc:3000/${{ parameters.orgName }}/${{ parameters.name }}/src/branch/main/catalog-info.yaml
+
+  output:
+    links:
+      - title: Open in the software catalog
+        icon: catalog
+        entityRef: ${{ steps.register.output.entityRef }}
+    text:
+      - title: Created
+        content: |
+          `${{ parameters.name }}` and `${{ parameters.name }}-gitops` are in `${{ parameters.orgName }}`,
+          and the service is in the catalog. Argo CD picks up the GitOps repository within a minute;
+          your first push to `main` starts the build pipeline.

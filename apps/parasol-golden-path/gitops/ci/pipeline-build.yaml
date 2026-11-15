@@ -1,0 +1,223 @@
+# The build pipeline: runs on every push to ${{ values.name }}'s main branch (.tekton/push.yaml).
+#   fetch-source -> unit-tests + build-image -> scan + sbom -> verify-conforma -> deploy-dev
+# Signing is not a task: Tekton Chains signs the image build-image pushed, keyless, seconds after
+# that task ends, and verify-conforma refuses to continue until the signature and provenance verify.
+# Only then does deploy-dev write the image digest into overlays/dev/release.yaml, and Argo CD
+# deploys it. Shared tasks come from the cluster's task library through the cluster resolver.
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: ${{ values.name }}-build
+  labels:
+    backstage.io/kubernetes-id: ${{ values.name }}
+spec:
+  params:
+    - name: revision
+      type: string
+      description: The commit to build (Pipelines-as-Code passes the pushed commit).
+    - name: conforma-identity
+      type: string
+      description: Tekton Chains' signing identity (from the Repository's params).
+    - name: conforma-issuer
+      type: string
+      description: The OIDC issuer that certified that identity (from the Repository's params).
+    - name: git-url
+      type: string
+      default: http://gitea.ogsr-gitea.svc:3000/${{ values.org }}/${{ values.name }}.git
+    - name: gitops-url
+      type: string
+      default: http://gitea.ogsr-gitea.svc:3000/${{ values.org }}/${{ values.name }}-gitops.git
+    - name: image
+      type: string
+      default: image-registry.openshift-image-registry.svc:5000/${{ values.user }}-cicd/${{ values.name }}
+    - name: maven-mirror
+      type: string
+      default: http://maven-mirror.ogsr-maven-mirror.svc:8080
+  workspaces:
+    - name: source
+  results:
+    - name: IMAGE_URL
+      value: $(tasks.build-image.results.IMAGE_URL)
+    - name: IMAGE_DIGEST
+      value: $(tasks.build-image.results.IMAGE_DIGEST)
+  tasks:
+    - name: fetch-source
+      taskRef:
+        resolver: cluster
+        params:
+          - {name: kind, value: task}
+          - {name: name, value: git-clone}
+          - {name: namespace, value: openshift-pipelines}
+      params:
+        - {name: URL, value: $(params.git-url)}
+        - {name: REVISION, value: $(params.revision)}
+      workspaces:
+        - {name: output, workspace: source}
+
+    # Gate 1: the unit tests. A failing test stops the run here; nothing is deployed.
+    - name: unit-tests
+      runAfter: [fetch-source]
+      taskRef:
+        resolver: cluster
+        params:
+          - {name: kind, value: task}
+          - {name: name, value: maven-jdk21}
+          - {name: namespace, value: ogsr-parasol-tasks}
+      params:
+        - name: GOALS
+          value: [-B, -ntp, test]
+        - {name: MAVEN_MIRROR_URL, value: $(params.maven-mirror)}
+      workspaces:
+        - {name: source, workspace: source}
+
+    # Build the Containerfile and push the image tagged with the commit; Chains signs IMAGE_URL/IMAGE_DIGEST.
+    # TLS_VERIFY=false: the internal registry serves a service-CA certificate the build pod does not trust.
+    - name: build-image
+      runAfter: [fetch-source]
+      taskRef:
+        resolver: cluster
+        params:
+          - {name: kind, value: task}
+          - {name: name, value: buildah}
+          - {name: namespace, value: openshift-pipelines}
+      params:
+        - {name: IMAGE, value: "$(params.image):$(params.revision)"}
+        - {name: DOCKERFILE, value: ./Containerfile}
+        - name: BUILD_ARGS
+          value:
+            - MAVEN_MIRROR_URL=$(params.maven-mirror)
+        - {name: TLS_VERIFY, value: "false"}
+      workspaces:
+        - {name: source, workspace: source}
+
+    # Gate 2: Red Hat Advanced Cluster Security checks the pushed image against the cluster's
+    # build-time policies; an enforced violation fails the run.
+    - name: scan
+      runAfter: [build-image]
+      taskRef:
+        resolver: cluster
+        params:
+          - {name: kind, value: task}
+          - {name: name, value: acs-image-check}
+          - {name: namespace, value: ogsr-parasol-tasks}
+      params:
+        - {name: IMAGE, value: "$(tasks.build-image.results.IMAGE_URL)@$(tasks.build-image.results.IMAGE_DIGEST)"}
+
+    # The software bill of materials (CycloneDX), stored as ConfigMap ${{ values.name }}-sbom.
+    - name: sbom
+      runAfter: [build-image]
+      params:
+        - {name: image-digest, value: $(tasks.build-image.results.IMAGE_DIGEST)}
+        - {name: maven-mirror, value: $(params.maven-mirror)}
+      workspaces:
+        - {name: source, workspace: source}
+      taskSpec:
+        params:
+          - {name: image-digest, type: string}
+          - {name: maven-mirror, type: string}
+        workspaces:
+          - name: source
+        volumes:
+          - name: sbom
+            emptyDir: {}
+        steps:
+          - name: cyclonedx
+            image: registry.access.redhat.com/ubi9/openjdk-21@sha256:24dad82bd5d25d9b0c85f0e9c976e47ccce787cc73792355462bf54fe03d9a77
+            workingDir: $(workspaces.source.path)
+            computeResources:
+              requests: {memory: 1Gi}
+              limits: {memory: 1536Mi}
+            volumeMounts:
+              - {name: sbom, mountPath: /sbom}
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              printf '<settings><mirrors><mirror><id>mirror.default</id><url>%s</url><mirrorOf>central</mirrorOf></mirror></mirrors></settings>' \
+                "$(params.maven-mirror)" > /tmp/settings.xml
+              /usr/bin/mvn -B -ntp -q -s /tmp/settings.xml org.cyclonedx:cyclonedx-maven-plugin:2.9.2:makeBom
+              cp target/bom.json /sbom/sbom.json
+              echo "SBOM: $(grep -c '"purl"' /sbom/sbom.json) components"
+          - name: publish
+            image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+            volumeMounts:
+              - {name: sbom, mountPath: /sbom}
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              oc delete configmap ${{ values.name }}-sbom --ignore-not-found >/dev/null
+              oc create configmap ${{ values.name }}-sbom --from-file=sbom.json=/sbom/sbom.json >/dev/null
+              oc annotate configmap ${{ values.name }}-sbom workshop.redhat.com/image-digest="$(params.image-digest)" >/dev/null
+              echo "SBOM stored: configmap/${{ values.name }}-sbom (image $(params.image-digest))"
+
+    # Gate 3: Conforma. The signature and SLSA provenance must verify against Tekton Chains' keyless
+    # identity and the transparency log, task build-image of this pipeline must have built the
+    # image, and it must be referenced by digest. Waits for Chains to finish signing.
+    - name: verify-conforma
+      runAfter: [unit-tests, scan, sbom]
+      taskRef:
+        resolver: cluster
+        params:
+          - {name: kind, value: task}
+          - {name: name, value: verify-conforma}
+          - {name: namespace, value: ogsr-parasol-tasks}
+      params:
+        - {name: IMAGE, value: "$(tasks.build-image.results.IMAGE_URL)@$(tasks.build-image.results.IMAGE_DIGEST)"}
+        - {name: CERTIFICATE_IDENTITY, value: $(params.conforma-identity)}
+        - {name: CERTIFICATE_OIDC_ISSUER, value: $(params.conforma-issuer)}
+        - {name: EXPECTED_PIPELINE, value: ${{ values.name }}-build}
+        - {name: EXPECTED_TASK, value: build-image}
+
+    # Deploy to dev the GitOps way: write the verified digest into overlays/dev/release.yaml and
+    # push; Argo CD applies it. The pipeline never touches ${{ values.user }}-dev itself.
+    - name: deploy-dev
+      runAfter: [verify-conforma]
+      params:
+        - {name: image-ref, value: "$(tasks.build-image.results.IMAGE_URL)@$(tasks.build-image.results.IMAGE_DIGEST)"}
+        - {name: revision, value: $(params.revision)}
+        - {name: gitops-url, value: $(params.gitops-url)}
+      taskSpec:
+        params:
+          - {name: image-ref, type: string}
+          - {name: revision, type: string}
+          - {name: gitops-url, type: string}
+        volumes:
+          - name: git-token
+            secret:
+              secretName: golden-pac-secret
+        steps:
+          - name: commit
+            image: registry.redhat.io/openshift-pipelines/pipelines-git-init-rhel9@sha256:dca8662e90f308055c660639aa4aea37e76d0c34c7830f2effcb843f1a7b7bcd
+            volumeMounts:
+              - {name: git-token, mountPath: /git-token, readOnly: true}
+            env:
+              - {name: HOME, value: /tekton/home}
+              - {name: IMAGE_REF, value: $(params.image-ref)}
+              - {name: REVISION, value: $(params.revision)}
+              - {name: GITOPS_URL, value: $(params.gitops-url)}
+            script: |
+              #!/bin/sh
+              set -eu
+              # The token answers git's credential prompt; it never appears in a URL or in the log.
+              git config --global credential.helper '!f() { echo username=${{ values.user }}; echo "password=$(cat /git-token/token)"; }; f'
+              git config --global user.name "Parasol pipeline"
+              git config --global user.email "pipeline@parasol.example.com"
+              git clone -q "$GITOPS_URL" /tekton/home/gitops
+              cd /tekton/home/gitops
+              cat > overlays/dev/release.yaml <<EOF
+              # What runs in dev. The build pipeline rewrites this file after every push that passes all gates.
+              - op: replace
+                path: /spec/replicas
+                value: 1
+              - op: replace
+                path: /spec/template/spec/containers/0/image
+                value: ${IMAGE_REF}
+              EOF
+              git add overlays/dev/release.yaml
+              if git diff --cached --quiet; then echo "dev already runs ${IMAGE_REF}"; exit 0; fi
+              git commit -q -m "dev: deploy ${{ values.name }} built from ${REVISION}"
+              for i in 1 2 3; do
+                git push -q origin main && break
+                git pull -q --rebase origin main
+              done
+              echo "dev now runs ${IMAGE_REF}"
+              echo "gitops commit: $(git rev-parse --short HEAD)"

@@ -1,0 +1,77 @@
+{{- /*
+  The attendee's Dev Spaces workspace for the service the lab creates (parasol-quote-{user}), declared
+  ahead of time exactly like devspaces-inner-loop does: Dev Spaces' factory URL cannot open a Gitea
+  repository (it only knows GitHub, GitLab, Bitbucket and Azure DevOps), so the workspace is a
+  DevWorkspace that clones the repo over the Gitea route when the attendee starts it. started:false:
+  it waits, harmlessly, until the template has created the repo. Its tools container mirrors the
+  template skeleton's devfile.yaml (UDI, Java 21, Quarkus dev mode).
+*/ -}}
+{{- $svc := printf "%s-%s" .Values.goldenServicePrefix .Values.user }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.user }}-devspaces
+  labels:
+    app.kubernetes.io/component: workspaces-namespace
+    app.kubernetes.io/part-of: che.eclipse.org
+    workshop.redhat.com/module: developer-hub-golden-paths
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+  annotations:
+    che.eclipse.org/username: {{ .Values.user | quote }}
+---
+apiVersion: workspace.devfile.io/v1alpha2
+kind: DevWorkspace
+metadata:
+  name: {{ .Values.goldenServicePrefix }}
+  namespace: {{ .Values.user }}-devspaces
+  annotations:
+    che.eclipse.org/che-editor: {{ .Values.cheEditorId | quote }}
+  labels:
+    workshop.redhat.com/module: developer-hub-golden-paths
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+spec:
+  started: false
+  routingClass: che
+  contributions:
+    - name: editor
+      kubernetes:
+        name: {{ .Values.cheEditorTemplateName }}
+  template:
+    projects:
+      - name: {{ $svc }}
+        git:
+          remotes:
+            origin: https://gitea-{{ .Values.giteaNamespace }}.{{ .Values.clusterDomain }}/{{ .Values.user }}-{{ .Values.scaffoldOrgSuffix }}/{{ $svc }}.git
+          checkoutFrom:
+            revision: main
+    components:
+      - name: tools
+        container:
+          image: registry.redhat.io/devspaces/udi-rhel9:3.29
+          memoryLimit: 3Gi
+          cpuLimit: "2"
+          mountSources: true
+          env:
+            - name: QUARKUS_HTTP_HOST
+              value: 0.0.0.0
+            - name: JAVA_HOME
+              value: /usr/lib/jvm/java-21
+            - name: PATH
+              value: /usr/lib/jvm/java-21/bin:/home/user/.local/bin:/home/user/.java/current/bin:/usr/share/maven/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          endpoints:
+            - name: quarkus-http
+              targetPort: 8080
+              exposure: public
+              protocol: http
+    commands:
+      - id: dev
+        exec:
+          label: Quarkus dev mode (live reload)
+          component: tools
+          commandLine: ./mvnw quarkus:dev
+          workingDir: ${PROJECT_SOURCE}
+          group:
+            kind: run
+            isDefault: true

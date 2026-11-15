@@ -1,0 +1,149 @@
+{{- /*
+  Hands Developer Hub a read-only view of the attendees' Argo CD, so a golden-path component's CD tab
+  lists its ci/dev/stage/prod Applications. Writes the portfolio's optional plugin overlay, Secret
+  rhdh/rhdh-plugin-config, key APP_CONFIG_argocd: the student instance's in-cluster address and the
+  rhdh-reader local account (declared in student-argocd.yaml; student-argo-accounts.yaml sets its
+  password to the shared workshop password, which is not a secret in this workshop). The account can
+  only GET applications, which Developer Hub shows every signed-in user anyway. Restarts the
+  Developer Hub pod only when the Secret changed (it reads env at start).
+*/ -}}
+{{- if include "workshop-config.moduleEnabled" (dict "root" $ "slug" "developer-hub-golden-paths") }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: devhub-argocd-access
+  namespace: rhdh
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: devhub-argocd-access
+  namespace: rhdh
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["rhdh-plugin-config"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: devhub-argocd-access
+  namespace: rhdh
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: devhub-argocd-access
+subjects:
+  - kind: ServiceAccount
+    name: devhub-argocd-access
+    namespace: rhdh
+---
+# why (cross-namespace read): the shared workshop password, in workshop-user-creds.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: devhub-argocd-access-creds
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["workshop-user-creds"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: devhub-argocd-access-creds
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: devhub-argocd-access-creds
+subjects:
+  - kind: ServiceAccount
+    name: devhub-argocd-access
+    namespace: rhdh
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: devhub-argocd-access
+  namespace: rhdh
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+  template:
+    spec:
+      serviceAccountName: devhub-argocd-access
+      restartPolicy: Never
+      containers:
+        - name: write
+          # Digest-pinned; el8 `ose-cli:latest` was frozen on v4.15.0 with unapplied Critical errata.
+          image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+          env:
+            - name: GITEA_NS
+              value: {{ .Values.giteaNamespace | quote }}
+            - name: ARGO_URL
+              value: "http://student-gitops-server.{{ .Values.studentArgoNamespace }}.svc"
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              python3 - <<'PY'
+              import base64, json, os, subprocess
+              def oc(*a, **kw):
+                  return subprocess.run(["oc", *a], capture_output=True, text=True, **kw)
+              r = oc("get", "secret", "workshop-user-creds", "-n", os.environ["GITEA_NS"], "-o", "jsonpath={.data.password}")
+              pw = base64.b64decode(r.stdout).decode() if r.returncode == 0 and r.stdout else ""
+              if not pw:
+                  raise SystemExit("❌ workshop-user-creds/password missing (bootstrap creates it)")
+              conf = {"username": "rhdh-reader", "password": pw,
+                      "appLocatorMethods": [{"type": "config", "instances": [
+                          {"name": "student-gitops", "url": os.environ["ARGO_URL"]}]}]}
+              want = {"APP_CONFIG_argocd": json.dumps(conf, sort_keys=True)}
+              live = oc("get", "secret", "rhdh-plugin-config", "-n", "rhdh", "-o", "json")
+              have = {k: base64.b64decode(v).decode() for k, v in
+                      (json.loads(live.stdout).get("data") or {}).items()} if live.returncode == 0 else {}
+              if have == want:
+                  print("✅ Developer Hub already reads the attendees' Argo CD (rhdh-plugin-config unchanged)")
+                  raise SystemExit(0)
+              secret = {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+                        "metadata": {"name": "rhdh-plugin-config", "namespace": "rhdh",
+                                     "labels": {"workshop.redhat.com/layer": "workshop-config",
+                                                "workshop.redhat.com/owner": "ogsr"}},
+                        "stringData": want}
+              subprocess.run(["oc", "apply", "-f", "-"], input=json.dumps(secret), text=True, check=True,
+                             stdout=subprocess.DEVNULL)
+              oc("delete", "pod", "-n", "rhdh", "-l", "rhdh.redhat.com/app=backstage-developer-hub", "--wait=false")
+              print("✅ rhdh-plugin-config written; Developer Hub restarting to read the attendees' Argo CD")
+              PY
+{{- end }}
