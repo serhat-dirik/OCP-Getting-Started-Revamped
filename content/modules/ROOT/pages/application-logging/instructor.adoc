@@ -24,7 +24,7 @@ include::partial$prep-before-you-teach.adoc[]
 
 == Timing
 
-Total hands-on: *~42 min* (plus an optional ~5 min challenge).
+Total hands-on: *~39 min* (plus an optional ~5 min challenge).
 Add ~10–12 min of in-room concept discussion up front.
 
 [cols="1,4,1,3",options="header"]
@@ -33,8 +33,8 @@ Add ~10–12 min of in-room concept discussion up front.
 
 | 1 | Read what you have; break it; three replicas | ~7 min | pod boot *~10–14 s*; the invalid-level rollout *times out at 90 s* with the new pod at 3 restarts by ~60 s; the fix plus its wait lines *~13 s*; scale 1→3 with the routing wait and the six POSTs *~25–27 s*
 | 2 | Free text → structured JSON | ~7 min | scale 3→1 *~13 s*; `oc set env` + rollout + wait lines *~25 s*; every query after that is instant
-| 3 | The level dial, and what the blunt version costs | ~9 min | four rollouts at *~26–30 s* each, wait lines included; 336–355 records at startup on root DEBUG, *+91 to +110* for four requests (measured on two clusters)
-| 4 | The credential in the access log | ~8 min | two rollouts at *~26–30 s* each, wait lines included; the leak is visible on the *first* request
+| 3 | Your code at DEBUG through a ConfigMap; the root level for comparison | ~8 min | four rollouts at *~26–44 s* each, wait lines included (the first, which rewires the Deployment, is the slowest); the same four requests leave *8* records in the log at the category level and *427–446* at root DEBUG (measured on three clusters)
+| 4 | An API key in the access log, and moving it to a header | ~6 min | two rollouts at *~26–39 s* each, wait lines included; the leak is visible on the *first* request
 | 5 | One request across three replicas | ~8 min | scale 1→3 with the routing wait *~24 s*; the correlation query is instant
 | 6 | Take-home: logs that outlive the pod | ~3 min | reading only — no checkpoint, nothing to run
 | C | Challenge (optional) | ~5 min | one rollout per attempt
@@ -57,6 +57,8 @@ The whole *demo arc* was performed separately from the end state: 21 s of comman
 *Re-measured 2026-11-12 on cluster-5vqxc (OCP 4.22.22)*, after every rollout gained its wait lines: the whole lab, run twice from a cold `adm reset` as an attendee in that attendee's own terminal, took *383 s* and *407 s* of command time (exercise 1: 132/135 s, 2: 41/41 s, 3: 112/120 s, 4: 54/65 s, 5: 29/30 s), plus 10–11 s for `ws prep` and 5 s for `ws verify`.
 Each rollout block now takes 25–30 s instead of 15–20 s; the extra is the old pod draining and the 10 s router allowance, and it is what made every count on the page come out the same on both runs.
 The cold `adm reset` itself took 163–214 s.
+
+*Re-measured 2026-11-15 on cluster-gn67x (OCP 4.22)*, after exercises 3 and 4 were rewritten into numbered steps: two runs as an attendee in that attendee's own terminal, the second from the page text itself, took exercise 1: 132/143 s, 2: 41/41 s, 3: 137/108 s, 4: 66/54 s, 5: 38/27 s of command time, plus 10 s for `ws prep` on a clean namespace (120 s when it first had to evict another module's leftovers) and 4 s for `ws verify`.
 ====
 
 == Pre-flight checklist
@@ -152,7 +154,7 @@ The lab's block reads the current container too, which is why it still finds the
 That is exercise 3's second lesson and it catches nearly everyone.
 A ConfigMap consumed as *environment variables* is read when the container *starts* — changing the object does not reach a running process. `oc rollout restart` is the missing step.
 (Mounted as a *file*, the content does update in place — which is one of the honest reasons to prefer a mounted file, and is covered in the config module.)
-The related trap, if someone typed the variable by hand: `QUARKUS_LOG_CATEGORY__COM_PARASOL__LEVEL` needs *double* underscores around the quoted segment. With single underscores it is simply an unrecognized environment variable — measured, Quarkus logs *no warning whatsoever*, and the level silently stays where it was.
+The related trap, if someone typed the variable by hand: `+QUARKUS_LOG_CATEGORY__COM_PARASOL__LEVEL+` needs *double* underscores around the quoted segment. With single underscores it is simply an unrecognized environment variable — measured, Quarkus logs *no warning whatsoever*, and the level silently stays where it was.
 
 *5. "Isn't a request id just a trace id? Why are we doing this by hand?"*::
 Good question, and the honest answer has two halves.
@@ -166,11 +168,11 @@ The mechanism in this lab is also what you use when there is no tracing at all, 
 * *Scaling the claims service re-seeds its database.* Every new replica runs `drop-and-create` against the same ephemeral PostgreSQL at boot, so claim numbers repeat across pods and the list count jumps. It is documented in the lab and in troubleshooting, and it is harmless here (nothing in this module asserts a claim number), but somebody will notice and ask.
 * *Do not let anyone trim the wait lines.* Every rollout block ends with an `until … wc -l … -eq 1` line plus `sleep 10`, and both scale-ups wait for three ready endpoints plus `sleep 10`. Measured on cluster-5vqxc on 2026-11-12: `rollout status` returns while the replaced pod is still shutting down, and `oc logs deploy/…` then read that old pod (`Found 2 pods, using pod/<old>`), which turned exercise 3's 336-record startup count into 9; and six POSTs sent the second the scale-up finished all landed on the one pod the router already knew, because the router rewrites its backend list at most every five seconds. The same lag works the other way: for a few seconds after a replaced pod is gone the router still sends requests to its address — one stalled 5.9 s, one returned `503` after 20 s, and exercise 3 lost a record. All three looked like attendee error and none was.
 * *A terminal reconnect costs nothing but exercise 5's request id.* Every block that calls the Route looks the host up itself, so a fresh shell just works; the two exercise 5 blocks that need `$RID` print `bash: RID: is empty - run the request-id block above again` — send the attendee back to that block, which mints a new id and new traffic.
-* *Exercise 3 is the rollout-heaviest group.* Three restarts, ~30 s each, and attendees will be tempted to skip the "nothing happened yet" step. Do not let them: that step *is* the lesson about env-from-ConfigMap.
+* *Exercise 3 is the rollout-heaviest group.* Four rollouts, ~30 s each. Do not let attendees skip step 2's `printenv` check, which still prints `INFO` after the ConfigMap says `DEBUG`: that check *is* the lesson about environment variables read from a ConfigMap.
 * *The `--tail=-1` flag is not decoration.* With a label selector, `oc logs` shows the last *10 lines per pod*. An attendee who drops it from the exercise-5 query gets an empty result and concludes the correlation id does not work. It is the first thing to check when someone says "my query returns nothing".
 * *`oc logs deploy/parasol-claims` with three replicas reads ONE pod* and says so on stderr (`Found 3 pods, using pod/…`). Where a step means "all replicas", the lab uses `-l app=parasol-claims`; if someone substitutes the deployment form they will get a confusing partial answer.
 * *The API key in exercise 4 is synthetic* (`PARASOL-PARTNER-EXAMPLE-4f9a2c7b` — note `EXAMPLE`) and authenticates nothing anywhere. If an attendee asks whether they should try it with a real key from their own environment, the answer is an emphatic no, and the reason is the exercise's own punchline: the log is append-only.
-* *Do not let the room "fix" the leak by tightening the `cut`.* If somebody proposes `cut -c1-55`, that is the module's lesson walking in the door — ask them what happens when the client IP is a character longer. The repo's own `tools/lint/credential-redaction-guard.py` docstring is the story if you want to read it out.
+* *Do not let the room "fix" the leak by tightening the `cut`.* If somebody proposes a shorter width than step 2's 80 characters, that is the module's lesson walking in the door — ask them what happens when the client address or the path in front of the key gets longer. The repo's own `tools/lint/credential-redaction-guard.py` docstring is the story if you want to read it out.
 * *Challenge 3 has an answer, in case you are asked:* `%R` (or `%\{REQUEST_PATH}`) is the access-log token for the path *without* the query string. `%U` is not — it is `REQUEST_URL` and, measured on this cluster, it still includes the query. The better answer to the challenge is still "ban credentials in URLs", and the token is the consolation prize.
 
 == Provenance
