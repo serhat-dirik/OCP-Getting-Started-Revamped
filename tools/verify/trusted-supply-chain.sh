@@ -4,9 +4,10 @@
 #          {user}-cicd exists · entry marker CM · Pipeline parasol-claims-trusted-build present and
 #          admissible (one PVC-backed workspace) · {user}-cicd opted into the RHTAS policy controller
 #          (policy.rhtas.com/include=true — admission enforces image policies only there) · the copied
-#          rox-api-token Secret (the scan task's contract) · the attendee's Gitea fork with `main` and
-#          `seed-vulnerable` · the four shared Tasks the Pipeline resolves (git-clone + buildah in
-#          openshift-pipelines; acs-image-check + verify-conforma in ogsr-parasol-tasks) · the cluster's
+#          rox-api-token Secret (the scan task's contract) · claims-db ready (the app's database) ·
+#          the attendee's Gitea fork with `main` and `seed-vulnerable` · the four shared Tasks the
+#          Pipeline resolves (git-clone + buildah in openshift-pipelines; acs-image-check +
+#          verify-conforma in ogsr-parasol-tasks) · the cluster's
 #          SPIFFE OIDC issuer answers (the local `cosign verify` names Chains' keyless identity by it) ·
 #          the cluster image policy ogsr-parasol-claims-keyless guards parasol-claims-secure (cluster
 #          state, but readable by the attendee and the thing the admission exercise depends on).
@@ -108,6 +109,8 @@ check "Pipeline ${PIPELINE} admissible (one PVC-backed workspace per task)" pipe
   || hint "${PIPELINE_PVC_CONFLICT:+task ${PIPELINE_PVC_CONFLICT} binds more than one PVC workspace — }re-materialize: ${PREP_HINT}"
 check "${NS} opted into the RHTAS policy controller (policy.rhtas.com/include=true)" ns_opted_in "$NS" \
   || hint "the entry state's label hook sets it — re-materialize: ${PREP_HINT}"
+check "claims-db ready in ${NS} (the deployed app's database)" deploy_ready claims-db "$NS" \
+  || hint "the entry state creates it — re-materialize: ${PREP_HINT}"
 check "rox-api-token copied into ${NS} (the scan task reads it)" oc get secret rox-api-token -n "$NS"            || hint "the token hook copies it from stackrox — ws reset trusted-supply-chain (needs the trust stack)"
 check "Gitea fork ${USER_NAME}/parasol-claims answers"           gitea_repo_exists "$USER_NAME" parasol-claims  || hint "fork missing — re-run: ${PREP_HINT} (fork job)"
 check "fork branch main exists"                                  gitea_branch_exists "$USER_NAME" parasol-claims main            || hint "re-run the fork job: ws reset trusted-supply-chain"
