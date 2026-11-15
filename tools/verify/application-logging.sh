@@ -87,6 +87,14 @@ deploy_spec_replicas_in() {
   return 1
 }
 
+# The end state's replica check, in one predicate: the spec says three AND three are ready. One
+# check, not two, so a one-replica Deployment fails fast on its spec instead of spending the ready
+# poll's budget and then blaming "pods not ready" for what is simply "not scaled yet".
+deploy_three_ready() {
+  deploy_spec_replicas_in 3 || return 1
+  deploy_ready_min parasol-claims "$NS" 3
+}
+
 # The app is REALLY emitting structured records — the attendee-visible outcome, not just the object
 # graph that should produce it. This is the check that catches the failure the instructor guide calls
 # the single most likely cause of a dead lab: an image rebuilt without the quarkus-logging-json
@@ -123,8 +131,7 @@ else
   # --- end state (what a completed lab looks like) ---------------------------
   info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
   check "claims app emits structured JSON records"            logs_are_structured_json                                                     || hint "not done yet? exercise 2 switches structured output on (oc set env deploy/parasol-claims QUARKUS_LOG_CONSOLE_JSON_ENABLED=true). If it IS set and this is still red, it is NOT your lab: the shared image predates this module and does not carry the quarkus-logging-json extension — tell your instructor (rebuild ogsr-parasol-images/parasol-claims:1.0 from current main)"
-  check "claims app is at three replicas"                     deploy_spec_replicas_in 3                                                    || hint "not done yet — exercise 3 scales to three replicas (oc scale deploy/parasol-claims --replicas=3) and the lab leaves it there"
-  check "three claims replicas ready"                         deploy_ready_min parasol-claims "$NS" 3                                      || hint "the pods are not all ready yet: oc get pods -n ${NS}"
+  check "claims app ready at three replicas"                  deploy_three_ready                                                           || hint "not done yet? exercise 3 scales to three replicas (oc scale deploy/parasol-claims --replicas=3) and the lab leaves it there. If it IS at three and this is still red, the pods are not all ready: oc get pods -n ${NS}"
 fi
 
 verify_summary

@@ -64,42 +64,12 @@ oc logs $BAD --tail=5
 +
 The lab's block already does both reads for this reason. Do not "tidy" it into one command with a `||`.
 
-== I set the log level and nothing changed
-
-Symptom:: `oc set data configmap/claims-logging …` reports `configmap/claims-logging data updated`, requests are served, and no new records appear.
-Cause:: A ConfigMap consumed as *environment variables* is read when the container *starts*. Updating the object does not reach a process that is already running. "No rebuild" is not the same as "no restart".
-Fix:: Restart the workload, then re-send traffic:
-+
-[source,sh,role=execute]
-----
-oc rollout restart deploy/parasol-claims
-oc rollout status deploy/parasol-claims --timeout=300s
-until [ "$(oc get pods -l app=parasol-claims -o name | wc -l)" -eq 1 ]; do sleep 2; done
-sleep 10
-----
-+
-(Delivered as a *mounted file* instead, the content does update in place — one of the honest reasons to prefer a file, covered in _Config, Secrets & Multi-Environment_, a separate module.)
-
-== I set the level, restarted, and *still* nothing changed
-
-Symptom:: As above, but the restart completed and the DEBUG records still are not there.
-Cause:: The environment-variable spelling. The property is `quarkus.log.category."com.parasol".level`, and the *quoted* segment is delimited by **double** underscores: `+QUARKUS_LOG_CATEGORY__COM_PARASOL__LEVEL+`. A single underscore anywhere in that name produces a variable Quarkus simply does not recognize — and, measured on this cluster, it logs *no warning at all*. Nothing tells you that you set something meaningless.
-Fix:: Compare the name character by character against what is actually on the Deployment:
-+
-[source,sh,role=execute]
-----
-oc set env deploy/parasol-claims --list | grep -i CATEGORY
-oc get cm claims-logging -o jsonpath='{.data}{"\n"}' | tr ',' '\n'
-----
-+
-Count the underscores: two after `CATEGORY`, two before `LEVEL`.
-
 == My correlation query returns nothing
 
-Symptom:: The exercise-5 `jq` filter on `.mdc.requestId` prints nothing, even though the requests plainly succeeded.
+Symptom:: The exercise-3 `jq` filter on `.mdc.requestId` prints nothing, or one line where the lab shows seven, even though the requests plainly succeeded.
 Cause:: Almost always the missing `--tail=-1`. With a *label selector*, `oc logs` shows the last *10 lines per pod*; without a selector it shows everything (`oc logs --help` states this). Ten lines per pod is easily less than the pod's startup chatter, so the query reads only the boot records and finds no request id.
 +
-The other two causes, in order: the app's category is not at DEBUG, so the `GET` records were never written (only the one `INFO` create line will match); or the shell has been restarted since, so `$RID` is empty and the filter compares against an empty string.
+The other two causes, in order: the shell has been restarted since, so `$RID` is empty and the filter compares against an empty string; or the claims service is no longer logging Parasol's own code at DEBUG — the module's starting state sets that, so the six reads each write a record — and only the one `INFO` create line matches. That happens when the Deployment's environment was edited by hand; `ws prep application-logging --yes` restores the starting state, and `ws verify application-logging` names the check that fails.
 Fix::
 +
 [source,sh,role=execute]
@@ -132,9 +102,9 @@ Fix:: Use the label selector where you mean all replicas — and remember `--tai
 oc logs -l app=parasol-claims --tail=-1 | jq -r '[.hostName, .message] | @tsv'
 ----
 
-== Right after a rollout, `oc logs deploy/parasol-claims` says `Found 2 pods` and the numbers are wrong
+== Right after a rollout, `oc logs deploy/parasol-claims` says `Found 2 pods` and shows the wrong records
 
-Symptom:: A read straight after `oc rollout status` prints `Found 2 pods, using pod/…` and returns records that do not match the step — a startup count of 9 where the lab shows hundreds, a free-text line where JSON was just switched on, or no `DEBUG` records after the level went up.
+Symptom:: A read straight after `oc rollout status` prints `Found 2 pods, using pod/…` and returns records that do not match the step — a free-text line where JSON was just switched on, for example, and a `jq` parse error on it.
 Cause:: `oc rollout status` returns when the *new* pods are Ready, not when the *replaced* pods are gone. The old pod spends a few more seconds shutting down, and while it exists the deployment form of `oc logs` can pick it — it prefers the pod that has been ready longest, which is the old one. Measured on cluster-5vqxc on 2026-11-12.
 Fix:: Wait until only the new pod is left, then read again. Every rollout block in the lab already ends with this line (and a `sleep 10` for the router, see the next entry):
 +
@@ -146,7 +116,7 @@ oc logs deploy/parasol-claims --tail=1
 
 == A request right after a rollout hangs for seconds, or returns `503`
 
-Symptom:: The first `curl` after a rollout takes five to twenty seconds, or comes back `503`, and the record you expected from it is in nobody's log — exercise 3's restart block, for example, shows two `claim list served` lines instead of three.
+Symptom:: The first `curl` after a rollout takes five to twenty seconds, or comes back `503`, and the record you expected from it is in nobody's log.
 Cause:: The router still has the replaced pod's address. It rebuilds its backend list from the Service's endpoints at most every five seconds, so for a few seconds after the old pod is gone a request can be sent to an address nothing answers on. Measured on cluster-5vqxc on 2026-11-12: one request stalled 5.9 s before the router retried elsewhere, another failed with `503` after 20 s.
 Fix:: Give the router ten seconds after the old pod is gone, then send the traffic again. Every rollout block in the lab ends with this wait for that reason:
 +
@@ -158,7 +128,7 @@ sleep 10
 
 == All six claim submissions landed on one pod
 
-Symptom:: In exercise 1 (or exercise 5), traffic sent right after scaling to three replicas shows up under a single pod name.
+Symptom:: In exercise 1 (or exercise 3), traffic sent right after scaling to three replicas shows up under a single pod name.
 Cause:: Ready is not the same as routed. A Ready pod joins the Service's endpoints at once, but the router rebuilds its own backend list from those endpoints at most every five seconds. Traffic sent in the same second as the end of the rollout goes to the pods the router already knew — measured on cluster-5vqxc on 2026-11-12, all six POSTs hit the original pod.
 Fix:: Wait for three ready endpoints, give the router ten seconds, and send the traffic again. The lab's scale-up blocks do exactly this; if you typed the commands yourself, add the two wait lines:
 +
@@ -168,6 +138,8 @@ until [ "$(oc get endpointslices -l kubernetes.io/service-name=parasol-claims \
     -o jsonpath='{.items[*].endpoints[?(@.conditions.ready==true)].addresses[0]}' | wc -w)" -eq 3 ]; do sleep 2; done
 sleep 10
 ----
++
+Even after the wait, one pod can get none of a handful of requests: the router picks a backend for each request at random. Measured on cluster-gn67x on 2026-11-15, exercise 1's six POSTs went to two of the three pods, and in one of four demo runs nine requests did the same. That is why every check on the page asks for *more than one* pod rather than three.
 
 == Lines from different pods appear out of chronological order
 
@@ -185,44 +157,9 @@ oc logs -l app=parasol-claims --tail=-1 | jq -r '[.timestamp, .hostName, .messag
 Symptom:: After scaling to three replicas, two different pods report creating `CLM-1031`, and `claim list served: N of N` reports a smaller `N` than a moment ago.
 Cause:: Nothing to do with logging. Every replica runs Hibernate's `drop-and-create` schema import against the *same* ephemeral PostgreSQL at boot, so a new pod reloads the 30 seed claims and resets the number sequence underneath the pods that were already running. It is the shared throwaway database being shared, by design (see `apps/parasol-claims/src/main/resources/application.properties`).
 +
-The same race is noisy in the log, too. A replica that boots while another is re-creating the schema logs a burst of `WARN` records from `org.hibernate.tool.schema.internal.ExceptionHandlerLoggedImpl` — 40 of them on one pod in the run where they were counted, on cluster-5vqxc on 2026-11-12. That is why exercise 5's `--tail=-1` count came out at 81–91 in three of four runs, instead of the 41 on the lab page.
+The same race is noisy in the log, too. A replica that boots while another is re-creating the schema logs a burst of `WARN` records from `org.hibernate.tool.schema.internal.ExceptionHandlerLoggedImpl` — 40 of them on one pod in the run where they were counted, on cluster-5vqxc on 2026-11-12. That is why exercise 3's `--tail=-1` count came out at 81–91 in three of four runs on that cluster, instead of the 44 on the lab page.
 Fix:: None needed — no step in this module asserts a claim number, and every log exercise works regardless. If you want stable numbering across a scale-up, that is what persistent storage is for (_Storage & Stateful Apps_, a separate module).
-
-== The access log is full of `/q/health/ready`
-
-Symptom:: With `QUARKUS_HTTP_ACCESS_LOG_ENABLED=true`, most access-log records are the readiness probe rather than real traffic.
-Cause:: The kubelet probes every pod on a schedule, and an access log records *every* request, including that one. On three replicas at a 10-second period that is eighteen records a minute before any user arrives.
-Fix:: It is one of the two reasons the lab turns the access log back off at the end of exercise 4 — the other being the credential. If you genuinely need one in production, `quarkus.http.access-log.exclude-pattern` takes a regular expression on the path, and excluding `/q/.*` removes both the probes and the metrics scrape.
-
-== Root DEBUG made the pod slow and the log enormous
-
-Symptom:: After setting `QUARKUS_LOG_LEVEL=DEBUG`, the pod takes noticeably longer to become ready and `oc logs | wc -l` is in the hundreds before any traffic.
-Cause:: That is what exercise 3's step 3 shows: 427 to 446 records after four requests on the clusters this was measured on, 336 to 355 of them written at startup, against 8 with only the application's own category turned up. Every one of them is formatted, written, and, on a cluster that collects logs, collected and stored.
-Fix:: Remove the root override and use the category dial instead — that is the exercise's conclusion, not a workaround:
-+
-[source,sh,role=execute]
-----
-oc set env deploy/parasol-claims QUARKUS_LOG_LEVEL-
-oc rollout status deploy/parasol-claims --timeout=300s
-----
-
-== `oc set data` is not a command
-
-Symptom:: `oc set data configmap/claims-logging …` reports an unknown command.
-Cause:: An older `oc` client. The verb exists in the client shipped in this workshop's terminal (verified 2026-08-22), but a laptop client may predate it.
-Fix:: Use the terminal beside the instructions, which has a current client. If you must use your own, the equivalent is:
-+
-[source,sh,role=execute]
-----
-oc create configmap claims-logging \
-  --from-literal=QUARKUS_LOG_CONSOLE_JSON_ENABLED=true \
-  --from-literal=QUARKUS_LOG_CATEGORY__COM_PARASOL__LEVEL=DEBUG \
-  --dry-run=client -o yaml | oc apply -f -
-----
-+
-On a ConfigMap that already exists, `oc apply` warns that the object is missing its
-`last-applied-configuration` annotation and then patches it anyway. That warning is harmless here.
 
 '''
 
-_Last verified on cluster-m24jn (OCP 4.22.8, Quarkus 3.33.3.1) on 2026-08-22, by performing every lab exercise in order from a pristine entry state and then performing the demo arc from the end state. The lab was re-performed twice from a cold start on cluster-5vqxc (OCP 4.22.22) on 2026-11-12, as an attendee in that attendee's own terminal._
+_Last verified on cluster-m24jn (OCP 4.22.8, Quarkus 3.33.3.1) on 2026-08-22, by performing every lab exercise in order from a pristine entry state and then performing the demo arc from the end state. The lab was re-performed twice from a cold start on cluster-5vqxc (OCP 4.22.22) on 2026-11-12, and its current three exercises and two-step demo on cluster-gn67x (OCP 4.22) on 2026-11-15, each time as an attendee in that attendee's own terminal._
