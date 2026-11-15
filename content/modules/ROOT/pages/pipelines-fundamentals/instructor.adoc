@@ -5,7 +5,7 @@ include::partial$version-attributes.adoc[]
 // Internal delivery runbook. First built on OCP 4.21.22 / OpenShift Pipelines 1.22.4 (2026-07-10);
 // the Timing section was re-measured end to end on 2026-11-12 (see the comment there).
 
-This module's pacing is set by four pipeline runs, each about *2–4 minutes*.
+This module's pacing is set by four pipeline runs, each about *2–4 minutes*; exercise 5 adds two runs of about 15 seconds.
 Maven resolves the dependency tree twice per run, once for the test and once inside the image build, and since 2026-11-12 both resolve from the in-cluster Maven mirror (`ogsr-maven-mirror`, warmed at install), so the cluster's internet egress no longer sets the run length: on cluster-5vqxc a full run went from *4m02s* to *3m32s* (`unit-test` Maven 95 s → 83 s, the `Containerfile` Maven 49 s → 36 s). The rest is Quarkus compile and the test suite, which a mirror cannot shorten.
 Attendees who finish reading early can start exercise 2 (the task library) while exercise 1's run builds.
 
@@ -32,7 +32,7 @@ include::partial$prep-before-you-teach.adoc[]
 
 == Timing
 
-Attendee hands-on: *~35 min* (add ~12–15 min of concept up front). Budget *~45 min* of wall clock for the lab.
+Attendee hands-on: *~43 min* (add ~12–15 min of concept up front). Budget *~55 min* of wall clock for the lab.
 
 // MEASURED 2026-11-12 on cluster-5vqxc (OCP 4.22.22 / OpenShift Pipelines 1.24.3) as user8, from a
 // cold `adm reset`, every command run in user8's own terminal pod; the Gitea UI steps (toggle edits,
@@ -45,7 +45,8 @@ Attendee hands-on: *~35 min* (add ~12–15 min of concept up front). Budget *~45
 | 1 | Run the build-test-deploy pipeline from the console | ~10 min | run `Succeeded` in *3m53s* (fetch-source 15s, unit-test 1m36s, build-image 1m28s, image-report 8s, deploy 22s); `deploy` creates the edge Route; `image-size-mb` 394, within the 500 MB budget
 | 2 | Explore the company task library | ~5 min | read-only (`oc get`/`jsonpath`), 5 s of commands; the rest is reading
 | 3 | Break the build (failing test) | ~10 min | RED run `Failed` at `unit-test` in *2m13s* (build/report/deploy Skipped); GREEN re-run *3m21s*; 7 min from the breaking commit to the green run
-| 4 | Pipelines-as-Code (git push) | ~10 min | Secret + webhook ~5 min; the push-fired run is listed *within 5 s* and `Succeeded` in *3m32s*
+| 4 | Build on every push (webhook) | ~10 min | Secret + webhook ~5 min; the push-fired run is listed *within 5 s* and `Succeeded` in *3m32s* (*3m22s* on cluster-gn67x, 2026-11-15)
+| 5 | Pipelines-as-Code: the pipeline lives in your repo | ~8 min | measured 2026-11-15 on cluster-gn67x as user22: the run from the commit that adds `.tekton/hello.yaml` `Succeeded` in *11s*, the edit commit's run in *14s*; the rest is Gitea UI (new repo, new file, edit)
 |===
 
 [NOTE]
@@ -55,6 +56,7 @@ Attendee hands-on: *~35 min* (add ~12–15 min of concept up front). Budget *~45
 * *Later runs cost the same as the first.* This was tested rather than assumed: with a genuinely warm Maven repository the same pipeline finished in *11m10s* against *11m18s* with none (2026-08-08, before the mirror).
 * *A failing test fails fast in Task terms*: the RED run stops at `unit-test` and the three downstream Tasks are *Skipped*, so it costs one Maven resolution rather than two.
 * *PaC latency*: a pushed run appears *within a few seconds*; its duration is just a normal run.
+* *Exercise 5 is quick on purpose*: its pipeline is two inline Tasks of `echo` steps on a small UBI image, so each run takes 11–18 s and the time goes into the Gitea UI.
 ====
 
 == Pre-flight checklist
@@ -226,6 +228,12 @@ Here the pipeline deploys into its own `-cicd` namespace to keep the module self
 In practice the pipeline's job ends at *building and publishing a trustworthy image*; promoting that image across dev/stage/prod is GitOps' job (a later module), where Argo CD reconciles the image into each environment from Git.
 Pushing an image straight from CI into prod is the anti-pattern GitOps exists to replace.
 
+*6. "The fork already had a `.tekton/` file in exercise 4. What does exercise 5 add?"*::
+In exercise 4 `.tekton/pull-request.yaml` is a PipelineRun that names `parasol-claims-build-test-deploy`, a Pipeline stored in the cluster; changing the build steps means changing that Pipeline.
+In exercise 5 `.tekton/hello.yaml` holds the whole pipeline (`pipelineSpec` with inline `taskSpec`), so a commit changes the build and the Git history is the pipeline's history.
+That is Pipelines-as-Code; the webhook is the same trigger in both.
+Many teams mix the two: a `.tekton/` PipelineRun in the app repo that references shared Tasks or Pipelines by resolver.
+
 == Watchouts
 
 * *Two Maven resolutions per run, both from the mirror.*
@@ -242,6 +250,12 @@ The lab says "your claim number" — keep it that way.
 Each attendee wires a webhook on *their own* fork; there is no shared webhook.
 `ws reset` and `ws prep --yes` never touch the fork's Gitea settings, so an attendee who repeats exercise 4 meets their old `pac` token (Gitea refuses the name) and their old webhook (every push delivered twice). The lab's *Doing this exercise a second time?* collapsible tells them to delete both first.
 If PaC does not fire, check three things in order: the webhook exists and is *active* in Gitea (Settings → Webhooks → *Recent Deliveries* shows the POST and its response), the `gitea-pac-secret` Secret exists with both keys (`token`, `webhook-secret`), and the webhook's secret *matches* the Secret's `webhook-secret`.
+* *Exercise 5's `pac-demo` repo outlives a reset too.*
+`ws reset` and `ws prep --yes` delete the `pac-demo` `Repository` and its runs from `{user}-cicd`, but the Gitea repo, its `.tekton/hello.yaml` and its webhook stay.
+On a second pass the attendee keeps the repo, deletes the old webhook (it signs with the previous pass's webhook secret), runs the `Repository` and webhook blocks again, and edits `.tekton/hello.yaml` instead of adding it; the lab's *Already have `pac-demo`* collapsible says so.
+* *A broken `.tekton/hello.yaml` fails silently.*
+If the pasted YAML loses its indentation, PaC rejects the file in its controller log only: no run, no event in the attendee's namespace, and no status on the Gitea commit.
+The troubleshooting page has the one-line check (`oc create --dry-run=client`) that prints the YAML error and its line.
 * *The `Repository` CR must keep its `git_provider` — and the `.tekton` uses a cluster resolver.*
 Two things the entry state now ships (both were on-cluster failures during the build): the `Repository` carries `git_provider` (a bare `url` makes PaC reject the webhook with "failed to find git_provider details"), and `.tekton/pull-request.yaml` resolves the Pipeline with `resolver: cluster` (a name-only `pipelineRef` fails with "cannot find referenced pipeline").
 If you hand-edit the `Repository` and drop `git_provider`, PaC breaks — re-apply the entry state.

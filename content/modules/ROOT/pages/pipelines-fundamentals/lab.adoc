@@ -20,6 +20,7 @@ include::partial$prereq-ws-start.adoc[]
 image::solution-map/pipelines-fundamentals.svg["The Parasol solution map with this module's pieces highlighted: Pipelines and parasol-claims.",width=900]
 
 In this lab you take Parasol's `parasol-claims` service through a *build-test-deploy pipeline*: run it, trace where its Tasks come from, break it with a failing test, and make a Git push run it on its own.
+Then you write a small pipeline that lives in a Git repository, and change it with a commit.
 
 Set a shortcut you will reuse in every command below:
 
@@ -39,7 +40,7 @@ If a console label reads differently on your cluster, the CLI command is the sou
 .Terminal reconnected? Open Gitea now
 ====
 A fresh shell has no `$NS`: *run the first block of the exercise you are in again* (in exercise 1, the block above).
-Exercises 3 and 4 also use the Gitea web UI: open your fork, {gitea_url}/{user}/parasol-claims[{user}/parasol-claims^], in a second browser tab now.
+Exercises 3 to 5 also use the Gitea web UI: open your fork, {gitea_url}/{user}/parasol-claims[{user}/parasol-claims^], in a second browser tab now.
 ====
 endif::demo[]
 
@@ -1352,12 +1353,285 @@ tkn pipelinerun logs --last -f -n $NS
 ----
 
 The webhook is the trigger: *every push is now built the same way*, the foundation the supply-chain and GitOps modules build on.
-The build steps themselves still live in the cluster, in that Pipeline.
+The build steps themselves still live in the cluster, in that Pipeline; exercise 5 puts a whole pipeline in the repo.
 
 [.checkpoint]
 ****
 ✔ *Verify:* After your push, `tkn pipelinerun list -n $NS` shows a new `parasol-claims-pull-request-...` run that *you did not start*; `tkn pac describe -n $NS` lists it under the `Repository`.
 The pipeline now fires on Git push.
+****
+
+== 5. Pipelines-as-Code: the pipeline lives in your repo
+⏱ *~8 min* · write a two-Task pipeline in a Git repo, then change it with a commit (each run takes about 15 seconds)
+
+In exercise 4 your fork's `.tekton/` file only pointed at a Pipeline stored in the cluster.
+With Pipelines-as-Code, the pipeline itself is a file in the repo, so changing how the code is built is a commit like any other.
+Try it on a new, deliberately small project.
+
+*You'll end with:* a `pac-demo` repo whose `.tekton/hello.yaml` holds a whole pipeline, and two runs of it: one from the commit that added the file, one from the commit that changed it.
+
+// Grounded live on cluster-gn67x (OCP 4.22.22 / OpenShift Pipelines 1.24.3), 2026-11-15, as user22 in
+// its own terminal pod after `ws prep pipelines-fundamentals --yes` and exercise 4. The Gitea UI steps
+// (new repo, new file, edit) were driven through Gitea's API as user22; their labels were read from the
+// Gitea pages served to user22: "Create…" menu -> "New Repository", "Repository Name", "Initialize
+// Repository (Adds .gitignore, License and README)", "Create Repository"; repo page "Add File" -> "New
+// File"; file name box "Name your file…"; "Commit directly to the main branch"; "Commit Changes"; file
+// view "Edit File". Gitea's file editor is CodeMirror 6 with no paste re-indent, so a pasted block keeps
+// its indentation. Runs measured: add-file run 11s, edit run 14s, a fix commit 18s.
+*Create the repo.*
+
+.Already have `pac-demo` from an earlier pass?
+[%collapsible]
+====
+Keep it: `ws prep` and `ws reset` delete the `pac-demo` `Repository` and its runs from `{user}-cicd`, but they never touch Gitea.
+Three things differ on a second pass:
+
+* Skip creating the repo.
+* Before the webhook step, delete the old webhook: `pac-demo` → *Settings* → *Webhooks*, open the `pipelines-as-code-controller` entry and *Delete Webhook*. It still signs with the previous pass's webhook secret, which no longer matches `gitea-pac-secret`.
+* `.tekton/hello.yaml` already exists, so instead of adding it, edit it (any change) and commit.
+====
+
+. In Gitea, open the *+* menu (top right, *Create…*) and pick *New Repository*.
+. Set *Repository Name* to `pac-demo`, check *Initialize Repository (Adds .gitignore, License and README)*, and click *Create Repository*.
+
+*Connect it to Pipelines-as-Code.*
+A `Repository` in `{user}-cicd` tells PaC to run the pipelines from `pac-demo` in this namespace.
+It reuses exercise 4's `gitea-pac-secret`:
+
+[source,sh,role=execute,subs="attributes+"]
+----
+NS={user}-cicd
+oc apply -n $NS -f - <<EOF
+apiVersion: pipelinesascode.tekton.dev/v1alpha1
+kind: Repository
+metadata:
+  name: pac-demo
+spec:
+  url: {gitea_url}/{user}/pac-demo
+  git_provider:
+    type: gitea
+    url: {gitea_url}
+    secret:
+      name: gitea-pac-secret
+      key: token
+    webhook_secret:
+      name: gitea-pac-secret
+      key: webhook-secret
+EOF
+----
+
+.Expected output
+[source,texinfo]
+----
+repository.pipelinesascode.tekton.dev/pac-demo created
+----
+
+Now the webhook, created through Gitea's API rather than the form you filled in for exercise 4.
+The block reads the token and the webhook secret from `gitea-pac-secret`, so it works in a fresh terminal and prints neither:
+
+[source,sh,role=execute,subs="attributes+"]
+----
+NS={user}-cicd
+TOKEN=$(oc get secret gitea-pac-secret -n $NS -o jsonpath='{.data.token}' | base64 -d)
+HOOK_SECRET=$(oc get secret gitea-pac-secret -n $NS -o jsonpath='{.data.webhook-secret}' | base64 -d)
+curl -s -o /dev/null -w "webhook: HTTP %\{http_code}\n" -X POST \
+  -H "Authorization: token $TOKEN" -H "Content-Type: application/json" \
+  {gitea_url}/api/v1/repos/{user}/pac-demo/hooks --data @- <<EOF
+{"type": "gitea", "active": true, "events": ["push"],
+ "config": {"url": "https://pipelines-as-code-controller-openshift-pipelines.{cluster_domain}",
+            "content_type": "json", "secret": "$HOOK_SECRET"}}
+EOF
+----
+
+.Expected output
+[source,texinfo]
+----
+webhook: HTTP 201
+----
+
+`201` means Gitea created the webhook; run the block once only, because a second run adds a second webhook.
+A `NotFound` error followed by `HTTP 401` means `gitea-pac-secret` is missing: create it with exercise 4's Secret step, then run this block again.
+
+*Write the pipeline in Git.*
+
+. Open {gitea_url}/{user}/pac-demo[{user}/pac-demo^] and click *Add File* → *New File*.
+. In *Name your file…*, type `.tekton/hello.yaml`. Typing the `/` creates the `.tekton` folder.
+. Paste this pipeline into the editor:
++
+[source,yaml]
+----
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: hello
+  annotations:
+    pipelinesascode.tekton.dev/on-event: "[push]"
+    pipelinesascode.tekton.dev/on-target-branch: "[main]"
+    pipelinesascode.tekton.dev/max-keep-runs: "3"
+spec:
+  taskRunTemplate:
+    serviceAccountName: pipeline
+  pipelineSpec:
+    tasks:
+      - name: build
+        taskSpec:
+          steps:
+            - name: show-commit
+              image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+              script: |
+                echo "Building {{ repo_url }}"
+                echo "at commit {{ revision }}"
+      - name: test
+        runAfter: [build]
+        taskSpec:
+          steps:
+            - name: run-tests
+              image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+              script: |
+                echo "Testing commit {{ revision }}"
+                echo "All checks passed"
+----
+. Leave *Commit directly to the `main` branch* selected and click *Commit Changes*.
+
+Read it before you check the run.
+There is no `pipelineRef` and no Pipeline in the cluster: `pipelineSpec` holds the whole pipeline, two Tasks written inline, with `test` running after `build`.
+The annotations say when it runs (a push to `main`) and how many old runs to keep.
+PaC fills in `{{ repo_url }}` and `{{ revision }}` from the push, so the run reports which commit it built.
+
+The commit that added the file is a push, so it has already started the pipeline it added.
+Ask PaC what ran for `pac-demo`:
+
+[source,sh,role=execute,subs="attributes+"]
+----
+NS={user}-cicd
+tkn pac describe pac-demo -n $NS
+----
+
+.Expected output (abridged; run it again if *Status* still reads `Running`)
+[source,texinfo]
+----
+Name:           pac-demo
+Namespace:      user22-cicd
+URL:            https://gitea-.../user22/pac-demo
+Status:         Succeeded
+...
+PipelineRun:    hello-mbnsx
+Event:          push
+Branch:         main
+Commit Title:   Add .tekton/hello.yaml
+
+StartTime:   1 minute ago
+Duration:    11 seconds
+----
+
+Read what it did:
+
+[source,sh,role=execute]
+----
+tkn pac logs pac-demo -n $NS -L
+----
+
+.Expected output (your commit differs)
+[source,texinfo]
+----
+[build : show-commit] Building https://gitea-.../user22/pac-demo
+[build : show-commit] at commit 089a5d435cd43f67b9c158f93d430ec89a017b98
+
+[test : run-tests] Testing commit 089a5d435cd43f67b9c158f93d430ec89a017b98
+[test : run-tests] All checks passed
+----
+
+*Change the pipeline with a commit.*
+
+. In `pac-demo`, open `.tekton/hello.yaml` and click the pencil (*Edit File*).
+. Select everything in the editor (*Ctrl+A*, or *Cmd+A* on macOS) and paste this version over it.
+Only the last four lines are new: a third step, `report`, in the `test` Task.
++
+[source,yaml]
+----
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: hello
+  annotations:
+    pipelinesascode.tekton.dev/on-event: "[push]"
+    pipelinesascode.tekton.dev/on-target-branch: "[main]"
+    pipelinesascode.tekton.dev/max-keep-runs: "3"
+spec:
+  taskRunTemplate:
+    serviceAccountName: pipeline
+  pipelineSpec:
+    tasks:
+      - name: build
+        taskSpec:
+          steps:
+            - name: show-commit
+              image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+              script: |
+                echo "Building {{ repo_url }}"
+                echo "at commit {{ revision }}"
+      - name: test
+        runAfter: [build]
+        taskSpec:
+          steps:
+            - name: run-tests
+              image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+              script: |
+                echo "Testing commit {{ revision }}"
+                echo "All checks passed"
+            - name: report
+              image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+              script: |
+                echo "Report: commit {{ revision }} is ready to ship"
+----
+. Click *Commit Changes*.
+
+About 20 seconds later, read the new run's logs:
+
+[source,sh,role=execute,subs="attributes+"]
+----
+NS={user}-cicd
+tkn pac logs pac-demo -n $NS -L
+----
+
+.Expected output (your commit differs)
+[source,texinfo]
+----
+[build : show-commit] Building https://gitea-.../user22/pac-demo
+[build : show-commit] at commit 9b408e4fce3ce63ff33bf997552659103f58606a
+
+[test : run-tests] Testing commit 9b408e4fce3ce63ff33bf997552659103f58606a
+[test : run-tests] All checks passed
+
+[test : report] Report: commit 9b408e4fce3ce63ff33bf997552659103f58606a is ready to ship
+----
+
+If the logs still end at `All checks passed`, the new run has not started yet: wait a few seconds and run the block again.
+If no new run ever appears, see xref:pipelines-fundamentals/troubleshooting.adoc[the troubleshooting page].
+
+*What just happened:* you changed how `pac-demo` is built with a commit, and the push ran the new version.
+
+[cols="1,2,2",options="header"]
+|===
+| | Exercise 4: `parasol-claims` | Exercise 5: `pac-demo`
+
+| What `.tekton/` holds
+| A PipelineRun that names a Pipeline stored in the cluster
+| The whole pipeline: its Tasks and their steps
+
+| To change the build steps
+| Change the Pipeline in the cluster
+| Commit a change to `.tekton/hello.yaml`
+|===
+
+That is Pipelines-as-Code: the pipeline definition is versioned, reviewed and reverted like any other code.
+Its history is the file's Git history, a pull request can review a change to it, and reverting the commit brings the previous pipeline back.
+The webhook is only the trigger; it carries no pipeline at all.
+
+[.checkpoint]
+****
+✔ *Verify:* `tkn pac describe pac-demo -n $NS` shows a `Succeeded` run for your edit commit under *Last Run*, with the run for the commit that added the file under *Other Runs*, and the latest logs include a `[test : report]` line.
+You can say where the pipeline definition lives (in the repo, under `.tekton/`) and what the webhook does (it tells PaC that a push arrived).
 ****
 
 == Challenge (optional)
