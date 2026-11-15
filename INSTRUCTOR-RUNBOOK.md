@@ -50,6 +50,8 @@ export PATH="$PWD/tools/ws:$PATH"
    tools/ws/adm git-refresh --restart-terminals --all
    ```
 
+   Terminals restart five at a time, about 35 s per five (25 took ~3.5 min). `WS_RESTART_BATCH=N` sets the batch size.
+
 2. **Check the cluster:** `tools/ws/adm doctor`
 3. **Share the Etherpad link:** `https://ogsr-pad.<apps>/p/workshop`. It holds the Showroom link and
    a numbered list where each attendee claims a user, so no two people take the same one.

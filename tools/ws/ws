@@ -2124,6 +2124,25 @@ verify_shared_head() {  # dep ns want-sha [container] — a shared-model pod's c
   fi
 }
 
+_roll_batch() {  # <ns>/<deployment>... → restart each, then wait for each and verify its head.
+  # Appends to the CALLER's restarted / sfailed and reads its ns / swant (dynamic scoping, as
+  # restart_terminals' other helpers do).
+  local sd issued=()
+  for sd in "$@"; do
+    if oc rollout restart "deployment/${sd#*/}" -n "${sd%%/*}" >/dev/null 2>&1; then issued+=("$sd")
+    elif [[ "${sd%%/*}" == "$ns" ]]; then err "  ${sd}: restart failed (RBAC? this is an operator/admin action)"; sfailed=1
+    else err "  ${sd}: restart failed (no terminal for that user?)"; sfailed=1; fi
+  done
+  for sd in ${issued[@]+"${issued[@]}"}; do
+    restarted+=("$sd")
+    if ! oc rollout status "deployment/${sd#*/}" -n "${sd%%/*}" --timeout=180s >/dev/null 2>&1; then
+      err "  ${sd}: not ready in 180s — check: oc rollout status deployment/${sd#*/} -n ${sd%%/*}"; sfailed=1; continue
+    fi
+    if [[ "${sd%%/*}" == "$ns" ]]; then verify_shared_head "${sd#*/}" "$ns" "$swant"
+    else verify_shared_head terminal "${sd%%/*}" "$swant" terminal; fi
+  done
+}
+
 restart_terminals() {  # target all-flag [exclude...] — opt-in restart of showroom cockpit pods so LIVE
   # attendees get re-rendered pages + re-cloned content. Rendered lab pages build at pod-init from the
   # mirror, so the CLI self-heal can't touch them — only a pod restart re-renders them. WS_RESERVED_USERS
@@ -2172,23 +2191,26 @@ restart_terminals() {  # target all-flag [exclude...] — opt-in restart of show
       done
     fi
     info "restarting shared cockpit(s): ${shared[*]}${users[*]:+ and terminal pod(s): ${users[*]}}"
-    # Issue every restart first, then wait: N terminals roll in parallel, not one after another.
-    for sd in "${shared[@]}"; do
-      if oc rollout restart "deployment/${sd}" -n "$ns" >/dev/null 2>&1; then restarted+=("${ns}/${sd}")
-      else err "  ${sd}: restart failed (RBAC? this is an operator/admin action)"; sfailed=1; fi
-    done
+    # Terminals roll in BATCHES, never all at once. Every terminal pod's init does a full clone from
+    # the one in-cluster Gitea; 29 at once crashed it (2026-11-15: Gitea restarted 6×, every clone
+    # died, and the whole room saw 502s for ~30 min). WS_RESTART_BATCH roll together, and each batch
+    # must be ready before the next starts — 25 terminals took ~3 min that way.
+    local batch="${WS_RESTART_BATCH:-5}" targets=() done_n=0
+    [[ "$batch" =~ ^[1-9][0-9]*$ ]] || die "WS_RESTART_BATCH must be a positive number, got '${batch}'"
+    for sd in "${shared[@]}"; do targets+=("${ns}/${sd}"); done
+    _roll_batch "${targets[@]}"
+    targets=()
     for tu in ${users[@]+"${users[@]}"}; do
-      tns="${TERMINAL_NS_PREFIX}${tu}"
-      if oc rollout restart deployment/terminal -n "$tns" >/dev/null 2>&1; then restarted+=("${tns}/terminal")
-      else err "  ${tns}/terminal: restart failed (no terminal for ${tu}?)"; sfailed=1; fi
-    done
-    for sd in ${restarted[@]+"${restarted[@]}"}; do
-      if ! oc rollout status "deployment/${sd#*/}" -n "${sd%%/*}" --timeout=180s >/dev/null 2>&1; then
-        err "  ${sd}: not ready in 180s — check: oc rollout status deployment/${sd#*/} -n ${sd%%/*}"; sfailed=1; continue
+      targets+=("${TERMINAL_NS_PREFIX}${tu}/terminal")
+      if (( ${#targets[@]} >= batch )); then
+        info "  terminals $((done_n + 1))–$((done_n + ${#targets[@]})) of ${#users[@]}…"
+        _roll_batch "${targets[@]}"; done_n=$((done_n + ${#targets[@]})); targets=()
       fi
-      if [[ "${sd%%/*}" == "$ns" ]]; then verify_shared_head "${sd#*/}" "$ns" "$swant"
-      else verify_shared_head terminal "${sd%%/*}" "$swant" terminal; fi
     done
+    if (( ${#targets[@]} > 0 )); then
+      info "  terminals $((done_n + 1))–$((done_n + ${#targets[@]})) of ${#users[@]}…"
+      _roll_batch "${targets[@]}"
+    fi
     echo
     if (( sfailed == 0 )); then
       ok "restarted ${#restarted[@]} pod(s) — pages re-render on reload; reopened terminals run the new ws"
