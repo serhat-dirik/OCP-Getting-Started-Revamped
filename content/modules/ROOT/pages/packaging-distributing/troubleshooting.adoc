@@ -17,7 +17,7 @@ Fix:: Push into your namespace directly — the chart's own name and version tag
 +
 [source,sh,role=execute]
 ----
-helm push parasol-notifications-0.1.0.tgz oci://image-registry.openshift-image-registry.svc:5000/$NS --ca-file /tmp/service-ca.crt
+helm push parasol-notifications-0.1.0.tgz oci://image-registry.openshift-image-registry.svc:5000/$NS --ca-file /tmp/registry-ca.crt
 ----
 +
 The chart lands at `$NS/parasol-notifications:0.1.0`. On a general-purpose OCI registry (Quay, Harbor) a `charts/` prefix works; the integrated registry is the special case.
@@ -121,6 +121,17 @@ oc get route parasol-notifications -n $NS -o jsonpath='termination={.spec.tls.te
 +
 Expect `termination=edge insecure=Allow`. If it's blank, `templates/route.yaml` wasn't applied (or an Ingress is still present) — re-check exercise 2's Route step.
 
+== `helm pull` or `helm install` from the registry fails with a certificate error
+
+Symptom:: `helm pull` or `helm install`/`helm upgrade` from `oci://` fails with `x509: certificate signed by unknown authority`, although `helm registry login` and `helm push` worked.
+Cause:: `--ca-file` replaces the system CAs. The registry may redirect blob downloads to cloud object storage, whose certificate the cluster's service CA does not sign.
+Fix:: Use the combined bundle (system CAs plus service CA) as `--ca-file`:
++
+[source,sh,role=execute]
+----
+cat /etc/pki/tls/certs/ca-bundle.crt /tmp/service-ca.crt > /tmp/registry-ca.crt
+----
+
 == `helm registry login` fails, or push says `unauthorized`
 
 Symptom:: `helm registry login` fails with a TLS/certificate error, or a subsequent `push` returns `unauthorized`.
@@ -130,7 +141,8 @@ Fix:: Re-fetch the CA and log in fresh with a current token; the internal regist
 [source,sh,role=execute]
 ----
 oc get configmap openshift-service-ca.crt -n $NS -o jsonpath='{.data.service-ca\.crt}' > /tmp/service-ca.crt
-oc whoami -t | helm registry login image-registry.openshift-image-registry.svc:5000 -u $(oc whoami) --password-stdin --ca-file /tmp/service-ca.crt
+cat /etc/pki/tls/certs/ca-bundle.crt /tmp/service-ca.crt > /tmp/registry-ca.crt
+oc whoami -t | helm registry login image-registry.openshift-image-registry.svc:5000 -u $(oc whoami) --password-stdin --ca-file /tmp/registry-ca.crt
 ----
 +
 `Login Succeeded` confirms both the CA trust and the token. If `oc whoami -t` is empty, your session token expired — re-open the cockpit (it re-authenticates you).

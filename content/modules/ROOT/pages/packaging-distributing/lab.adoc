@@ -806,11 +806,11 @@ oc rollout status deploy/parasol-notifications -n $NS --timeout=60s
 helm history parasol-notifications -n $NS
 ----
 
-.Expected output (revision 2, and a history you can audit)
+.Expected output (abridged; revision 2 is `deployed`, revision 1 `superseded`, and the history is auditable)
 [source,texinfo]
 ----
 Release "parasol-notifications" has been upgraded. Happy Helming!
-...
+... (STATUS, REVISION and the NOTES block omitted)
 deployment "parasol-notifications" successfully rolled out
 REVISION  UPDATED                   STATUS      CHART                        APP VERSION  DESCRIPTION
 1         Thu Nov 12 17:30:13 2026  superseded  parasol-notifications-0.1.0  1.0          Install complete
@@ -1169,6 +1169,7 @@ Set this exercise's shortcuts, `$NS`, `$REG` and the registry's CA bundle (re-ru
 cd ~ && NS={user}-dev
 REG=image-registry.openshift-image-registry.svc:5000
 oc get configmap openshift-service-ca.crt -n $NS -o jsonpath='{.data.service-ca\.crt}' > /tmp/service-ca.crt
+cat /etc/pki/tls/certs/ca-bundle.crt /tmp/service-ca.crt > /tmp/registry-ca.crt
 echo "namespace: $NS  registry: $REG  CA bundle: $(grep -c 'BEGIN CERTIFICATE' /tmp/service-ca.crt) certificate(s)"
 ----
 
@@ -1187,11 +1188,11 @@ Successfully packaged chart and saved it to: .../parasol-notifications-0.1.0.tgz
 parasol-notifications-0.1.0.tgz
 ----
 
-*Log in* with your OpenShift token, trusting that CA bundle:
+*Log in* with your OpenShift token, trusting the cluster's service CA plus the system CAs (the combined `/tmp/registry-ca.crt`):
 
 [source,sh,role=execute]
 ----
-oc whoami -t | helm registry login $REG -u $(oc whoami) --password-stdin --ca-file /tmp/service-ca.crt
+oc whoami -t | helm registry login $REG -u $(oc whoami) --password-stdin --ca-file /tmp/registry-ca.crt
 ----
 
 .Expected output
@@ -1204,14 +1205,15 @@ Login Succeeded
 [%collapsible]
 ====
 Modern Helm speaks *OCI*, the same artifact format as container images, so a chart can live in any OCI registry, including the cluster's *internal registry*.
-That registry is an in-cluster Service (`$REG`) whose certificate is signed by the cluster's *service CA*, so you log in with your OpenShift token and trust that CA, the bundle saved to `/tmp/service-ca.crt`.
+That registry is an in-cluster Service (`$REG`) whose certificate is signed by the cluster's *service CA*, so you log in with your OpenShift token and trust that CA.
+`--ca-file` replaces Helm's default trust store, so `/tmp/registry-ca.crt` combines the system CAs with the service CA: the registry may hand a blob download to cloud object storage, which the cluster's service CA does not sign.
 ====
 
 *Push the chart* into your namespace, where it lands as a tag:
 
 [source,sh,role=execute]
 ----
-helm push parasol-notifications-0.1.0.tgz oci://$REG/$NS --ca-file /tmp/service-ca.crt
+helm push parasol-notifications-0.1.0.tgz oci://$REG/$NS --ca-file /tmp/registry-ca.crt
 ----
 
 .Expected output (pushed as an OCI artifact; note the sha256 digest)
@@ -1236,7 +1238,7 @@ Push to `oci://<registry>/<your-namespace>` and let the chart's own name and ver
 [source,sh,role=execute]
 ----
 mkdir -p /tmp/pulled && cd /tmp/pulled
-helm pull oci://$REG/$NS/parasol-notifications --version 0.1.0 --ca-file /tmp/service-ca.crt
+helm pull oci://$REG/$NS/parasol-notifications --version 0.1.0 --ca-file /tmp/registry-ca.crt
 cd - >/dev/null
 ----
 
@@ -1578,11 +1580,12 @@ You have the mechanics. Set the shortcuts these use (the same block as exercise 
 cd ~ && NS={user}-dev
 REG=image-registry.openshift-image-registry.svc:5000
 oc get configmap openshift-service-ca.crt -n $NS -o jsonpath='{.data.service-ca\.crt}' > /tmp/service-ca.crt
+cat /etc/pki/tls/certs/ca-bundle.crt /tmp/service-ca.crt > /tmp/registry-ca.crt
 echo "namespace: $NS  registry: $REG  CA bundle: $(grep -c 'BEGIN CERTIFICATE' /tmp/service-ca.crt) certificate(s)"
 ----
 
 * *Bump the chart version and re-push.* Edit `Chart.yaml` `version` to `0.2.0`, `helm package`, and push again. Then `oc get is parasol-notifications -n $NS` — read the `TAGS` column and reason about how the registry now holds *two* chart versions (and the app image) as distinct tags on one repository.
-* *Install straight from the registry.* `helm uninstall` your release, then `helm install parasol-notifications oci://$REG/$NS/parasol-notifications --version 0.1.0 -n $NS --ca-file /tmp/service-ca.crt` — prove a chart in the registry installs with no local directory. Then upgrade it the way a consumer would, from the registry again: `helm upgrade parasol-notifications oci://$REG/$NS/parasol-notifications --version 0.2.0 -n $NS --ca-file /tmp/service-ca.crt` (the first bullet pushed `0.2.0`). What does that enable for a consumer on another team?
+* *Install straight from the registry.* `helm uninstall` your release, then `helm install parasol-notifications oci://$REG/$NS/parasol-notifications --version 0.1.0 -n $NS --ca-file /tmp/registry-ca.crt` — prove a chart in the registry installs with no local directory. Then upgrade it the way a consumer would, from the registry again: `helm upgrade parasol-notifications oci://$REG/$NS/parasol-notifications --version 0.2.0 -n $NS --ca-file /tmp/registry-ca.crt` (the first bullet pushed `0.2.0`). What does that enable for a consumer on another team?
 * *Read a different operator's bundle.* Pick the GitOps operator (`openshift-gitops-operator`) and repeat exercise 7 against it — its Subscription, channels, CSV, and owned CRDs. Note it does *not* live in `openshift-operators` like Pipelines does: swap exercise 7's `-n openshift-operators` for `-n openshift-gitops-operator`. Compare its channel naming to Pipelines' and reason about what an operator's *channels* commit its author to.
 
 When you are done, run `ws verify {module-id}` in the Terminal.
