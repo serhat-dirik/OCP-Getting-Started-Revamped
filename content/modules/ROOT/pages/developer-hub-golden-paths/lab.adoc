@@ -205,7 +205,7 @@ A tag became two Git commits, stage then prod, and Argo Rollouts moved half the 
 In the service's GitOps repository, `ci/pipeline-build.yaml`, applied by Argo CD. The team can change it with a commit; the platform team improves it for new services by changing the template, and many organizations move it into a shared, versioned pipeline instead so one change reaches every service.
 
 *What happens if a test fails or the image has a critical vulnerability?*::
-The run stops at that task, nothing is committed to the GitOps repository, and the environments keep running the last image that passed.
+The run stops at that task, nothing is committed to the GitOps repository, the environments keep running the last image that passed, and that commit can never be released.
 
 *Why is the image not checked again at deploy time?*::
 It is checked twice before Git ever names it: by Conforma in the build pipeline and again by the release pipeline before stage. A cluster admission policy can add a third check at deploy time; this workshop applies one to the trusted supply chain module's image only.
@@ -449,7 +449,7 @@ NAME                              STARTED         DURATION   STATUS
 parasol-quote-{user}-push-x8776   5 seconds ago   ---        Running
 ----
 
-Each task is one practice, in order:
+Each task is one practice. Tests and the image build run side by side, and so do `scan` and `sbom`; nothing is released unless every one of them passed:
 
 [cols="1,3",options="header"]
 |===
@@ -459,7 +459,7 @@ Each task is one practice, in order:
 | The exact commit you pushed.
 
 | `unit-tests`
-| The tests pass. A failing test stops the run here.
+| The tests pass. A failing test fails the run, and the commit can never be released.
 
 | `build-image`
 | The image is built once and pushed, tagged with the commit.
@@ -474,7 +474,7 @@ Each task is one practice, in order:
 | Tekton Chains has signed the image and its provenance, keyless, and Conforma verifies both before anything ships.
 
 | `deploy-dev`
-| The verified digest is committed to the GitOps repository; Argo CD deploys it to `{user}-dev`.
+| The verified digest is committed to the GitOps repository; Argo CD deploys it to `{user}-dev`. The image is then marked `passed-<commit>`, the only mark the release pipeline accepts.
 |===
 
 When the run ends (about 2.5 minutes), read its last task:
@@ -489,6 +489,7 @@ tkn pipelinerun logs -n $CICD --last -t deploy-dev
 ----
 [deploy-dev : commit] dev now runs image-registry.openshift-image-registry.svc:5000/{user}-cicd/parasol-quote-{user}:09e6ff0b…@sha256:41d74ee33d94…
 [deploy-dev : commit] gitops commit: 1492333
+[deploy-dev : mark-passed] releasable: parasol-quote-{user}:passed-09e6ff0b…
 ----
 
 The pipeline never touched `{user}-dev`.
@@ -614,8 +615,8 @@ tkn pipelinerun logs -n $CICD $(tkn pipelinerun list -n $CICD -o name | grep -m1
 [source,texinfo,subs="attributes+"]
 ----
 task resolve-image has failed: "step-resolve" exited with code 1: Error
-[resolve-image : resolve] No image was built from commit 689d91cdc990d76744cdf02dcf98af92552624ba.
-[resolve-image : resolve] Only a commit that passed the build pipeline can be released. Wait until its
+[resolve-image : resolve] Commit 689d91cdc990d76744cdf02dcf98af92552624ba has no image that passed the build pipeline.
+[resolve-image : resolve] Only a commit that passed every gate can be released. Wait until its
 [resolve-image : resolve] parasol-quote-{user}-build run Succeeded, then tag it with the next version.
 ...
 Tasks Completed: 1 (Failed: 1, Cancelled 0), Skipped: 2
@@ -623,10 +624,11 @@ Tasks Completed: 1 (Failed: 1, Cancelled 0), Skipped: 2
 
 The release refused, and stage and prod still run `v1.0.0`: only a commit that passed every gate of the build pipeline can be released, however it is tagged.
 
-*Fix:* wait until the new `parasol-quote-{user}-build` run reads `Succeeded`:
+*Fix:* wait until the new `parasol-quote-{user}-build` run ends (about 2.5 minutes after your push), and check that it reads `Succeeded`:
 
 [source,sh,role=execute]
 ----
+until tkn pipelinerun list -n $CICD --limit 1 --label tekton.dev/pipeline=$SVC-build | grep -qE 'Succeeded|Failed'; do sleep 5; done
 tkn pipelinerun list -n $CICD --limit 3
 ----
 
@@ -642,17 +644,17 @@ git push origin v1.1.1
 
 The release pipeline promotes `v1.1.1` to stage and, once stage runs it, commits it to prod.
 Argo Rollouts then moves one of the two prod pods to it, pauses, runs the analysis, and promotes it.
-Follow it for a minute:
+Follow it for up to four minutes:
 
 [source,sh,role=execute]
 ----
-for i in $(seq 1 24); do
+for i in $(seq 1 48); do
   oc get rollout $SVC -n $U-prod -o jsonpath='{.status.phase} · step {.status.currentStepIndex} of 4 · {.status.message}{"\n"}'
   sleep 5
 done
 ----
 
-.Expected output (abridged; prod stays `Healthy` on `v1.0.0` for about 40 seconds while the release promotes stage, then the canary starts)
+.Expected output (abridged; prod stays `Healthy` on `v1.0.0` for about 2 minutes while the release promotes stage, then the canary takes about a minute)
 [source,texinfo]
 ----
 Healthy · step 4 of 4 ·
@@ -663,7 +665,7 @@ Progressing · step 3 of 4 · old replicas are pending termination
 Healthy · step 4 of 4 ·
 ----
 
-If it reads `Healthy` throughout, the release has not reached prod yet: run the block again.
+If it reads `Healthy` throughout, or stops before the last `Healthy`, run the block again.
 
 The step that decided it was the analysis, which ran as a Job against the canary pods:
 

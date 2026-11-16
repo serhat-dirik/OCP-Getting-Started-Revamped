@@ -3,7 +3,7 @@
 # Signing is not a task: Tekton Chains signs the image build-image pushed, keyless, seconds after
 # that task ends, and verify-conforma refuses to continue until the signature and provenance verify.
 # Only then does deploy-dev write the image digest into overlays/dev/release.yaml, and Argo CD
-# deploys it. Shared tasks come from the cluster's task library through the cluster resolver.
+# deploys it, and mark the image passed-<commit>: the only images the release pipeline promotes. Shared tasks come from the cluster's task library through the cluster resolver.
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
@@ -173,11 +173,13 @@ spec:
       runAfter: [verify-conforma]
       params:
         - {name: image-ref, value: "$(tasks.build-image.results.IMAGE_URL)@$(tasks.build-image.results.IMAGE_DIGEST)"}
+        - {name: image-digest, value: $(tasks.build-image.results.IMAGE_DIGEST)}
         - {name: revision, value: $(params.revision)}
         - {name: gitops-url, value: $(params.gitops-url)}
       taskSpec:
         params:
           - {name: image-ref, type: string}
+          - {name: image-digest, type: string}
           - {name: revision, type: string}
           - {name: gitops-url, type: string}
         volumes:
@@ -221,3 +223,15 @@ spec:
               done
               echo "dev now runs ${IMAGE_REF}"
               echo "gitops commit: $(git rev-parse --short HEAD)"
+          # Every gate passed: mark this image releasable. The release pipeline promotes only images
+          # carrying this mark, so a commit that failed a test, the scan or Conforma can never be released.
+          - name: mark-passed
+            image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+            env:
+              - {name: IMAGE_DIGEST, value: $(params.image-digest)}
+              - {name: REVISION, value: $(params.revision)}
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              oc tag "${{ values.name }}@${IMAGE_DIGEST}" "${{ values.name }}:passed-${REVISION}" >/dev/null
+              echo "releasable: ${{ values.name }}:passed-${REVISION}"
